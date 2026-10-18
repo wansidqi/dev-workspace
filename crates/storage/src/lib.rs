@@ -14,13 +14,13 @@ mod transfer;
 
 pub use attachments::AttachmentRepo;
 pub use commit_links::CommitLinkRepo;
+pub use import::{import_project, import_project_with_limits, ImportLimits, ImportReport};
 pub use migrations::run_migrations;
 pub use notes::NoteRepo;
 pub use paths::WorkspacePaths;
 pub use projects::ProjectRepo;
 pub use repos::RepoRepo;
 pub use tasks::TaskRepo;
-pub use import::{import_project, import_project_with_limits, ImportLimits, ImportReport};
 pub use transfer::{
     backup_workspace, export_project, BackupReport, ExportReport, EXPORT_DB_NAME, EXPORT_DIR_SUFFIX,
 };

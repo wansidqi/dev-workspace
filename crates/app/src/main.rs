@@ -6,13 +6,16 @@
 mod commit_browser;
 mod date;
 mod external;
+mod ide;
 mod note_editor;
+mod settings;
 mod state;
 mod task_detail;
 mod terminal_panel;
 mod terminal_view;
 mod text_input;
 mod theme;
+mod workspace_tools;
 
 use anyhow::Result;
 use commit_browser::CommitBrowser;
@@ -24,11 +27,13 @@ use gpui::{
     WindowBounds, WindowControlArea, WindowOptions,
 };
 use note_editor::NoteEditor;
+use settings::SettingsStore;
 use state::AppState;
 use task_detail::TaskDetail;
 use terminal_panel::TerminalPanel;
 use text_input::TextInput;
 use theme::GlassTheme;
+use workspace_tools::WorkspaceTools;
 
 actions!(devspace, [ToggleTerminal, NewTerminal]);
 
@@ -62,6 +67,11 @@ struct Root {
     /// Project-page filter: show only tasks carrying this tag.
     tag_filter: Option<String>,
     terminal_open: bool,
+    // --- settings / IDE / backup hooks (settings.rs, workspace_tools.rs) ---
+    /// Persisted per-user settings (last project/task, terminal panel, IDE).
+    settings: Entity<SettingsStore>,
+    /// "Open in IDE" + backup/export/import card on the project page.
+    workspace_tools: Entity<WorkspaceTools>,
 }
 
 fn status_label(status: TaskStatus) -> &'static str {
@@ -607,6 +617,22 @@ impl Root {
         cx.notify();
     }
 
+    /// Records what should be restored next launch (selected project, open
+    /// task page, terminal visibility). The store only writes when a value
+    /// actually changed, and debounces, so calling this per render is cheap.
+    fn sync_settings(&mut self, cx: &mut Context<Self>) {
+        let project = self.state.read(cx).selected_project.map(|p| p.0);
+        let task = self.open_task.as_ref().map(|t| t.read(cx).task_id().0);
+        let terminal_open = self.terminal_open;
+        self.settings.update(cx, |store, cx| {
+            store.update(cx, |s| {
+                s.last_project = project;
+                s.last_task = task;
+                s.terminal_open = terminal_open;
+            })
+        });
+    }
+
     fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.terminal_open = !self.terminal_open;
         if self.terminal_open {
@@ -623,6 +649,7 @@ impl Root {
 
 impl Render for Root {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_settings(cx);
         let theme = self.theme;
         let state = self.state.read(cx);
         let projects = state.projects.clone();
@@ -903,6 +930,9 @@ impl Render for Root {
                     &recent_commits,
                     &unreadable_repos,
                 ))
+            })
+            .when(selected_project.is_some(), |el| {
+                el.child(self.workspace_tools.clone())
             })
             .when(selected_project.is_some() && !notes.is_empty(), |el| {
                 el.child(
@@ -1473,6 +1503,11 @@ fn main() -> Result<()> {
         let bounds = Bounds::centered(None, size(px(1000.0), px(640.0)), cx);
         let state = cx.new(|_| AppState::new(conn, paths.clone()));
         let theme = GlassTheme::dark();
+        // Restore last project / task / terminal visibility. Stale ids fall
+        // back to the defaults silently (see settings::restore_selection).
+        let settings = cx.new(|_| SettingsStore::load(settings::settings_path(paths.root())));
+        let saved = settings.read(cx).get().clone();
+        let restored_task = state.update(cx, |state, _| settings::restore_selection(state, &saved));
 
         cx.open_window(
             WindowOptions {
@@ -1562,7 +1597,11 @@ fn main() -> Result<()> {
                     // the root needs focus whenever nothing else has it.
                     let focus_handle = cx.focus_handle();
                     window.focus(&focus_handle, cx);
-                    Root {
+                    let workspace_tools = cx
+                        .new(|cx| WorkspaceTools::new(cx, state.clone(), settings.clone(), theme));
+                    let mut root = Root {
+                        settings: settings.clone(),
+                        workspace_tools,
                         state,
                         theme,
                         new_project_input,
@@ -1574,13 +1613,23 @@ fn main() -> Result<()> {
                         editing_note: None,
                         open_note: None,
                         terminal_panel,
-                        terminal_open: false,
+                        terminal_open: saved.terminal_open,
                         focus_handle,
                         open_history: None,
                         open_task: None,
                         confirm_unlink_repo: None,
                         tag_filter: None,
+                    };
+                    // A visible terminal panel needs its first tab, exactly
+                    // as when the user opens it; a hidden one spawns nothing.
+                    if root.terminal_open {
+                        root.terminal_panel
+                            .update(cx, |panel, cx| panel.ensure_tab(window, cx));
                     }
+                    if let Some(task) = restored_task {
+                        root.open_task_detail(task, cx);
+                    }
+                    root
                 })
             },
         )

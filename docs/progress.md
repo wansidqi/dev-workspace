@@ -195,7 +195,13 @@ remaining gap is visible at a glance.
       backend; no settings UI yet)
 - [ ] Terminal: tab rename, drag-to-resize panel width, split panes
 - [ ] Terminal: scrollback setting in a settings UI
-- [ ] IDE launcher (configurable external command)
+- [x] IDE launcher: "Open in IDE" on the project page (Workspace tools card) runs
+      the configurable command (default `code`, editable there, saved in
+      settings) on the first linked repo or the project data folder. Spawned
+      directly with the folder as one argument, never via a shell;
+      quote-aware splitter, PATH/PATHEXT lookup (`code.cmd` works), and
+      `.cmd` launchers refuse cmd metacharacters in the folder. Logic and
+      tests in `ide.rs`.
 - [ ] Per-project run commands + log view
 
 ## Search and navigation
@@ -203,11 +209,18 @@ remaining gap is visible at a glance.
 - [ ] Global search
 - [ ] Command palette (unblocked — `TextInput` exists to build it on)
 - [ ] Keyboard shortcuts / keybindings beyond the text-input ones
-- [ ] Restore last project/task/layout on startup
+- [x] Restore last project, task page and terminal visibility on startup
+      (`settings.rs`; stale ids fall back silently; a hidden terminal panel
+      spawns nothing)
 
 ## Data and safety
 
-- [ ] Backup / export / import of a project
+- [x] Backup / export / import (`devspace-storage` `transfer.rs` and
+      `import.rs`; buttons in the Workspace tools card): workspace backup to
+      `backups/<timestamp>/` (VACUUM INTO + project files), project export
+      folder `<name>.devspace-export/` (`project.db` + `files/`, never
+      credentials), import as a NEW project with all ids remapped in one
+      transaction
 
 ## UI polish (glass design spec)
 
@@ -409,3 +422,24 @@ remaining gap is visible at a glance.
   saves a task's tags in the same transaction. `update` does not touch tags —
   use `add_tag`/`remove_tag`. The upgrade path is tested (a database built at
   migration 2 with existing data gets migration 3 applied cleanly).
+- Settings file (`crates/app/src/settings.rs`): `key=value` lines
+  (`last_project`, `last_task`, `terminal_open`, `ide_command`); unknown keys
+  and malformed lines are ignored; written atomically (temp file + rename) 400
+  ms after the last change by `SettingsStore`. `Root::sync_settings` runs per
+  render but only schedules a write when a value differs. A write still
+  pending when the app quits (under half a second) is lost.
+- `AppState` id counters used to be raised from the *selected* project's rows
+  only, but ids are global across projects; they are now also raised from
+  global `MAX(id)` at startup and after an import (`refresh_id_counters`).
+- Import safety (`devspace-storage::import`): the export is untrusted. Ids,
+  file names and sizes are never reused (names are re-derived from new ids);
+  note and copied-attachment paths must be plain relative names (no `..`,
+  roots or drive prefixes) pointing at regular files (no symlinks) inside the
+  export; copies are capped (2 GiB total, 1 GiB per file, enforced while
+  reading); a schema newer than the app is refused; broken parent links and
+  cycles are refused; bad tags/hashes/UNC links are skipped and reported.
+  Imported run commands are data only, never executed by the import. Linked
+  attachments keep their absolute path (a reference to a file on the
+  exporter's machine).
+- Backup/export/import use a second SQLite connection on a background thread
+  (WAL, 10 s busy timeout), not the UI's connection.

@@ -192,24 +192,22 @@ pub fn import_project_with_limits(
     )?;
 
     let mut repo_map: HashMap<i64, i64> = HashMap::new();
-    let mut next_repo = max_id(&tx, "repos")? + 1;
-    for (old, path, name) in &repos {
+    let first_repo = max_id(&tx, "repos")? + 1;
+    for (next_repo, (old, path, name)) in (first_repo..).zip(repos.iter()) {
         tx.execute(
             "INSERT INTO repos (id, project_id, path, name) VALUES (?1, ?2, ?3, ?4)",
             params![next_repo, new_project.0, path, name],
         )?;
         repo_map.insert(*old, next_repo);
-        next_repo += 1;
     }
 
     // New ids in old-id order; insertion parents-first to satisfy the FK.
     let mut task_map: HashMap<i64, i64> = HashMap::new();
-    let mut next_task = max_id(&tx, "tasks")? + 1;
+    let first_task = max_id(&tx, "tasks")? + 1;
     let mut by_old_id: Vec<&TaskRow> = tasks.iter().collect();
     by_old_id.sort_by_key(|t| t.id);
-    for t in &by_old_id {
+    for (next_task, t) in (first_task..).zip(by_old_id.iter()) {
         task_map.insert(t.id, next_task);
-        next_task += 1;
     }
     let mut by_depth: Vec<(usize, &TaskRow)> = tasks
         .iter()
@@ -252,7 +250,7 @@ pub fn import_project_with_limits(
         .iter()
         .map(|(is_note, id, p)| ((*is_note, *id), p))
         .collect();
-    let mut next_note = max_id(&tx, "notes")? + 1;
+    let first_note = max_id(&tx, "notes")? + 1;
     paths.ensure_dirs(Some(new_project))?;
     // Removes the new folder on any early return (SQL error, failed copy,
     // failed commit) so nothing is left half-imported.
@@ -260,9 +258,7 @@ pub fn import_project_with_limits(
         dir: paths.project_dir(new_project),
         keep: false,
     };
-    for n in &notes {
-        let new_id = next_note;
-        next_note += 1;
+    for (new_id, n) in (first_note..).zip(notes.iter()) {
         // The stored name is derived from the new id, never from the import.
         let file_name = format!("{new_id}.{}", safe_extension(&n.file_path));
         tx.execute(
@@ -471,7 +467,9 @@ fn check_task_tree(tasks: &[TaskRow], ids: &HashSet<i64>) -> Result<(), StorageE
     let parents: HashMap<i64, Option<i64>> = tasks.iter().map(|t| (t.id, t.parent)).collect();
     for t in tasks {
         if t.parent.is_some_and(|p| !ids.contains(&p)) {
-            return Err(invalid("a task points at a parent that is not in the export"));
+            return Err(invalid(
+                "a task points at a parent that is not in the export",
+            ));
         }
         let mut current = t.parent;
         let mut steps = 0;
@@ -512,8 +510,8 @@ fn read_tags(src: &Connection, tasks: &HashSet<i64>) -> Result<Vec<(i64, String)
 }
 
 fn read_notes(src: &Connection, tasks: &HashSet<i64>) -> Result<Vec<NoteRow>, StorageError> {
-    let mut stmt =
-        src.prepare("SELECT id, task_id, kind, title, file_path, updated_at FROM notes ORDER BY id")?;
+    let mut stmt = src
+        .prepare("SELECT id, task_id, kind, title, file_path, updated_at FROM notes ORDER BY id")?;
     let rows = stmt.query_map([], |r| {
         Ok(NoteRow {
             id: r.get(0)?,
@@ -527,7 +525,9 @@ fn read_notes(src: &Connection, tasks: &HashSet<i64>) -> Result<Vec<NoteRow>, St
     let mut notes = rows.collect::<Result<Vec<_>, _>>()?;
     for n in &mut notes {
         if n.task.is_some_and(|t| !tasks.contains(&t)) {
-            return Err(invalid("a note belongs to a task that is not in the export"));
+            return Err(invalid(
+                "a note belongs to a task that is not in the export",
+            ));
         }
         if n.title.trim().is_empty() {
             n.title = "(untitled)".to_string();

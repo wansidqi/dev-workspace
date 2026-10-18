@@ -46,6 +46,13 @@ enum Field {
     Branch,
 }
 
+impl TaskDetail {
+    /// The task this page shows (remembered across restarts, see settings).
+    pub fn task_id(&self) -> TaskId {
+        self.task_id
+    }
+}
+
 pub struct TaskDetail {
     state: Entity<AppState>,
     theme: GlassTheme,

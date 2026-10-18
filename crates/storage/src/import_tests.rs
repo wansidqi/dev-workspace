@@ -266,7 +266,10 @@ fn importing_twice_gives_two_independent_projects() {
     assert_eq!(count(&f.conn, "tasks"), 1 + 3 + 3 + 3);
     // Deleting one copy (cascade) leaves the other whole.
     f.conn
-        .execute("DELETE FROM projects WHERE id = ?1", params![a.project_id.0])
+        .execute(
+            "DELETE FROM projects WHERE id = ?1",
+            params![a.project_id.0],
+        )
         .unwrap();
     let left: i64 = f
         .conn
@@ -318,8 +321,11 @@ fn hostile_note_paths_are_rejected() {
         let mut f = fixture("hostile-note");
         let dir = export(&f);
         let db = Connection::open(dir.join(EXPORT_DB_NAME)).unwrap();
-        db.execute("UPDATE notes SET file_path = ?1 WHERE id = 30", params![bad])
-            .unwrap();
+        db.execute(
+            "UPDATE notes SET file_path = ?1 WHERE id = 30",
+            params![bad],
+        )
+        .unwrap();
         drop(db);
         let message = assert_refused_and_clean(&mut f, &dir);
         assert!(message.contains("unsafe file path"), "{bad:?}: {message}");
