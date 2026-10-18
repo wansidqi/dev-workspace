@@ -126,6 +126,12 @@ impl AppState {
         id
     }
 
+    /// On-disk layout, for background tasks that open their own read-only
+    /// connection (the palette's cross-project search).
+    pub fn workspace_paths(&self) -> &WorkspacePaths {
+        &self.paths
+    }
+
     pub fn reload_projects(&mut self) {
         self.projects = ProjectRepo::list(&self.conn, false).unwrap_or_default();
         if let Some(max) = self.projects.iter().map(|p| p.id.0).max() {
