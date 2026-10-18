@@ -13,13 +13,13 @@ use std::ops::Range;
 use std::time::Duration;
 
 use devspace_core::{CommitLink, CommitLinkStatus, Repo, RepoId, TaskId};
-use devspace_git::{HistoryCursor, RepoCommit};
+use devspace_git::{HistoryCursor, HistoryFilter, RepoCommit};
 use gpui::{
     div, prelude::*, px, uniform_list, AnyElement, App, Context, Entity, Hsla, SharedString,
     UniformListScrollHandle, Window,
 };
 
-use crate::date::format_date;
+use crate::date::{format_date, parse_date};
 use crate::state::AppState;
 use crate::text_input::TextInput;
 use crate::theme::GlassTheme;
@@ -31,6 +31,70 @@ const PREFETCH_ROWS: usize = 40;
 const ROW_HEIGHT: f32 = 56.0;
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
 const SIDE_PANEL_WIDTH: f32 = 360.0;
+/// Branch chips shown inline; the rest sit behind "More…".
+const INLINE_BRANCHES: usize = 12;
+const DAY_SECONDS: i64 = 86_400;
+
+/// Quick date ranges. Day boundaries are UTC, like the From/To inputs, since
+/// the app has no timezone database (see `date.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DatePreset {
+    Any,
+    Today,
+    Last7,
+    Last30,
+    /// Driven by the From / To inputs.
+    Custom,
+}
+
+impl DatePreset {
+    const QUICK: [DatePreset; 4] = [
+        DatePreset::Any,
+        DatePreset::Today,
+        DatePreset::Last7,
+        DatePreset::Last30,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            DatePreset::Any => "Any time",
+            DatePreset::Today => "Today",
+            DatePreset::Last7 => "Last 7 days",
+            DatePreset::Last30 => "Last 30 days",
+            DatePreset::Custom => "Custom",
+        }
+    }
+
+    /// `(since, until)` for a quick preset at unix time `now`; `Custom` is
+    /// set from the inputs, never here.
+    fn range(self, now: i64) -> (Option<i64>, Option<i64>) {
+        let today = now.div_euclid(DAY_SECONDS) * DAY_SECONDS;
+        match self {
+            DatePreset::Any | DatePreset::Custom => (None, None),
+            DatePreset::Today => (Some(today), None),
+            DatePreset::Last7 => (Some(today - 6 * DAY_SECONDS), None),
+            DatePreset::Last30 => (Some(today - 29 * DAY_SECONDS), None),
+        }
+    }
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Parses a From/To box: blank is "no bound", otherwise a real `YYYY-MM-DD`.
+/// `Err` means the text is invalid and must not be applied.
+fn parse_bound(text: &str) -> Result<Option<i64>, ()> {
+    let text = text.trim();
+    if text.is_empty() {
+        Ok(None)
+    } else {
+        parse_date(text).map(Some).ok_or(())
+    }
+}
 
 pub type CloseHandler = Box<dyn Fn(&mut Window, &mut App)>;
 
@@ -61,6 +125,32 @@ pub struct CommitBrowser {
     search_epoch: u64,
     repo_filter: Option<RepoId>,
     unassigned_only: bool,
+
+    author_input: Entity<TextInput>,
+    from_input: Entity<TextInput>,
+    to_input: Entity<TextInput>,
+    /// Typed text vs the author the loaded results are for.
+    typed_author: String,
+    applied_author: String,
+    author_epoch: u64,
+    /// Last text seen in the From/To boxes (to ignore no-op notifications).
+    from_text: String,
+    to_text: String,
+    date_epoch: u64,
+    date_preset: DatePreset,
+    /// Applied range (unix seconds, inclusive); `until` is end of its day.
+    since: Option<i64>,
+    until: Option<i64>,
+    /// Inline error for the date boxes; the invalid input is not applied.
+    date_error: Option<String>,
+    /// Applied branch filter, the project's branch names (loaded in the
+    /// background), and whether the overflow list is open.
+    branch_filter: Option<String>,
+    branches: Vec<String>,
+    branches_for: Vec<RepoId>,
+    branches_open: bool,
+    /// Repos that lack the chosen branch, from the latest pages.
+    missing_branch: Vec<String>,
 
     selected: HashSet<CommitKey>,
     /// Row (index into `visible`) a Shift-click range extends from.
@@ -125,9 +215,60 @@ impl CommitBrowser {
         })
         .detach();
 
+        let author_input = cx.new(|cx| TextInput::new(cx, "Author…", theme));
+        let from_input = cx.new(|cx| TextInput::new(cx, "From YYYY-MM-DD", theme));
+        let to_input = cx.new(|cx| TextInput::new(cx, "To YYYY-MM-DD", theme));
+
+        cx.observe(&author_input, |this, input, cx| {
+            let typed = input.read(cx).content.to_string();
+            if typed == this.typed_author {
+                return;
+            }
+            this.typed_author = typed;
+            this.author_epoch += 1;
+            let epoch = this.author_epoch;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(SEARCH_DEBOUNCE).await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.author_epoch == epoch && this.applied_author != this.typed_author {
+                        this.applied_author = this.typed_author.clone();
+                        this.reload(cx);
+                    }
+                });
+            })
+            .detach();
+        })
+        .detach();
+
+        for input in [&from_input, &to_input] {
+            cx.observe(input, |this, _, cx| {
+                let from = this.from_input.read(cx).content.to_string();
+                let to = this.to_input.read(cx).content.to_string();
+                if from == this.from_text && to == this.to_text {
+                    return;
+                }
+                this.from_text = from;
+                this.to_text = to;
+                this.date_epoch += 1;
+                let epoch = this.date_epoch;
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(SEARCH_DEBOUNCE).await;
+                    let _ = this.update(cx, |this, cx| {
+                        if this.date_epoch == epoch {
+                            this.apply_custom_dates(cx);
+                        }
+                    });
+                })
+                .detach();
+            })
+            .detach();
+        }
+
         // Links/tasks change from outside (mapping, unlinking): re-filter.
+        // A different set of linked repos also means a different branch list.
         cx.observe(&state, |this, _, cx| {
             this.refilter(cx);
+            this.reload_branches(cx);
             cx.notify();
         })
         .detach();
@@ -151,13 +292,152 @@ impl CommitBrowser {
             search_epoch: 0,
             repo_filter: None,
             unassigned_only: false,
+            author_input,
+            from_input,
+            to_input,
+            typed_author: String::new(),
+            applied_author: String::new(),
+            author_epoch: 0,
+            from_text: String::new(),
+            to_text: String::new(),
+            date_epoch: 0,
+            date_preset: DatePreset::Any,
+            since: None,
+            until: None,
+            date_error: None,
+            branch_filter: None,
+            branches: Vec::new(),
+            branches_for: Vec::new(),
+            branches_open: false,
+            missing_branch: Vec::new(),
             selected: HashSet::new(),
             anchor: None,
             new_status: CommitLinkStatus::Linked,
             notice: None,
         };
+        browser.reload_branches(cx);
         browser.load_more(cx);
         browser
+    }
+
+    /// The git-side filter for the applied UI state.
+    fn history_filter(&self) -> HistoryFilter {
+        HistoryFilter {
+            text: self.applied_query.clone(),
+            branch: self.branch_filter.clone(),
+            author: Some(self.applied_author.clone()),
+            since: self.since,
+            until: self.until,
+        }
+    }
+
+    /// True when a branch, author or date filter is applied.
+    fn filters_active(&self) -> bool {
+        self.branch_filter.is_some()
+            || !self.applied_author.trim().is_empty()
+            || self.since.is_some()
+            || self.until.is_some()
+    }
+
+    /// Loads the project's branch names on a background task, but only when
+    /// the set of linked repos changed since the last load.
+    fn reload_branches(&mut self, cx: &mut Context<Self>) {
+        let repos = self.state.read(cx).repos.clone();
+        let ids: Vec<RepoId> = repos.iter().map(|r| r.id).collect();
+        if ids == self.branches_for {
+            return;
+        }
+        self.branches_for = ids.clone();
+        cx.spawn(async move |this, cx| {
+            let branches = cx
+                .background_executor()
+                .spawn(async move { devspace_git::project_branches(&repos) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                // Ignore a stale answer if the repos changed meanwhile.
+                if this.branches_for == ids {
+                    this.branches = branches;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Applies a quick date range and clears the From/To boxes.
+    fn set_preset(&mut self, preset: DatePreset, window: &mut Window, cx: &mut Context<Self>) {
+        self.date_epoch += 1;
+        self.from_text.clear();
+        self.to_text.clear();
+        self.from_input.update(cx, |i, cx| i.reset(window, cx));
+        self.to_input.update(cx, |i, cx| i.reset(window, cx));
+        self.date_error = None;
+        let (since, until) = preset.range(now_unix());
+        self.date_preset = preset;
+        if (since, until) != (self.since, self.until) {
+            self.since = since;
+            self.until = until;
+            self.reload(cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    /// Reads the From/To boxes. Invalid input shows an error and leaves the
+    /// applied range as it was; valid input (blank = open end) is applied,
+    /// with `To` covering its whole day.
+    fn apply_custom_dates(&mut self, cx: &mut Context<Self>) {
+        let (from, to) = match (parse_bound(&self.from_text), parse_bound(&self.to_text)) {
+            (Ok(from), Ok(to)) => (from, to.map(|t| t + DAY_SECONDS - 1)),
+            (Err(()), _) => {
+                self.date_error = Some("From must be a date like 2026-01-31".into());
+                cx.notify();
+                return;
+            }
+            (_, Err(())) => {
+                self.date_error = Some("To must be a date like 2026-01-31".into());
+                cx.notify();
+                return;
+            }
+        };
+        if from.zip(to).is_some_and(|(f, t)| f > t) {
+            self.date_error = Some("From is after To".into());
+            cx.notify();
+            return;
+        }
+        self.date_error = None;
+        self.date_preset = if from.is_none() && to.is_none() {
+            DatePreset::Any
+        } else {
+            DatePreset::Custom
+        };
+        if (from, to) != (self.since, self.until) {
+            self.since = from;
+            self.until = to;
+            self.reload(cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    /// Drops the branch, author and date filters in one reload.
+    fn clear_filters(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.branch_filter = None;
+        self.branches_open = false;
+        self.typed_author.clear();
+        self.applied_author.clear();
+        self.author_epoch += 1;
+        self.author_input.update(cx, |i, cx| i.reset(window, cx));
+        self.date_epoch += 1;
+        self.from_text.clear();
+        self.to_text.clear();
+        self.from_input.update(cx, |i, cx| i.reset(window, cx));
+        self.to_input.update(cx, |i, cx| i.reset(window, cx));
+        self.date_error = None;
+        self.date_preset = DatePreset::Any;
+        self.since = None;
+        self.until = None;
+        self.reload(cx);
     }
 
     /// Starts over for a new query/filter: drops results and loads page one.
@@ -171,6 +451,7 @@ impl CommitBrowser {
         self.selected.clear();
         self.anchor = None;
         self.unreadable.clear();
+        self.missing_branch.clear();
         self.load_more(cx);
         cx.notify();
     }
@@ -194,12 +475,12 @@ impl CommitBrowser {
         let generation = self.generation;
         let repos = self.repos_in_scope(cx);
         let cursor = self.cursor.clone();
-        let query = self.applied_query.clone();
+        let filter = self.history_filter();
         cx.spawn(async move |this, cx| {
             let page = cx
                 .background_executor()
                 .spawn(async move {
-                    devspace_git::search_history(&repos, PAGE_SIZE, cursor.as_ref(), &query)
+                    devspace_git::filtered_history(&repos, PAGE_SIZE, cursor.as_ref(), &filter)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -209,17 +490,24 @@ impl CommitBrowser {
                 this.loading = false;
                 this.has_more = page.next.is_some();
                 this.cursor = page.next;
-                let names: Vec<String> = {
+                let (unreadable, missing): (Vec<String>, Vec<String>) = {
                     let state = this.state.read(cx);
-                    page.unreadable
-                        .iter()
-                        .filter_map(|id| state.repos.iter().find(|r| r.id == *id))
-                        .map(|r| r.name.clone())
-                        .collect()
+                    let names = |ids: &[RepoId]| {
+                        ids.iter()
+                            .filter_map(|id| state.repos.iter().find(|r| r.id == *id))
+                            .map(|r| r.name.clone())
+                            .collect::<Vec<_>>()
+                    };
+                    (names(&page.unreadable), names(&page.missing_branch))
                 };
-                for name in names {
+                for name in unreadable {
                     if !this.unreadable.contains(&name) {
                         this.unreadable.push(name);
+                    }
+                }
+                for name in missing {
+                    if !this.missing_branch.contains(&name) {
+                        this.missing_branch.push(name);
                     }
                 }
                 this.commits.extend(page.commits);
@@ -500,6 +788,162 @@ impl CommitBrowser {
                         )
                     }),
             )
+            .into_any_element()
+    }
+
+    /// One branch chip; selecting the active branch again clears it.
+    fn branch_chip(&self, name: &str, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let target = name.to_owned();
+        let active = self.branch_filter.as_deref() == Some(name);
+        self.chip(name.to_owned(), active, ("branch-filter", ix as u64))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let next = if this.branch_filter.as_deref() == Some(target.as_str()) {
+                    None
+                } else {
+                    Some(target.clone())
+                };
+                this.branch_filter = next;
+                this.reload(cx);
+            }))
+            .into_any_element()
+    }
+
+    /// Branch, author and date filters, under the search box.
+    fn render_filter_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = self.theme;
+        let overflow = self.branches.len().saturating_sub(INLINE_BRANCHES);
+        // The selected branch is always visible, even when it is past the cut.
+        let selected_far = self
+            .branch_filter
+            .as_deref()
+            .and_then(|b| self.branches.iter().position(|n| n == b))
+            .filter(|&ix| ix >= INLINE_BRANCHES);
+
+        let mut branch_row = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(theme.space_1)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.text_secondary)
+                    .child("Branch"),
+            )
+            .child(
+                self.chip("All branches", self.branch_filter.is_none(), "branch-all")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if this.branch_filter.take().is_some() {
+                            this.reload(cx);
+                        }
+                    })),
+            );
+        for (ix, name) in self.branches.iter().enumerate().take(INLINE_BRANCHES) {
+            branch_row = branch_row.child(self.branch_chip(name, ix, cx));
+        }
+        if let Some(ix) = selected_far {
+            branch_row = branch_row.child(self.branch_chip(&self.branches[ix], ix, cx));
+        }
+        if overflow > 0 {
+            branch_row = branch_row.child(
+                self.chip(
+                    if self.branches_open {
+                        "Fewer".to_string()
+                    } else {
+                        format!("More… ({overflow})")
+                    },
+                    self.branches_open,
+                    "branch-more",
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.branches_open = !this.branches_open;
+                    cx.notify();
+                })),
+            );
+        }
+
+        let more_list = (self.branches_open && overflow > 0).then(|| {
+            div()
+                .id("branch-overflow")
+                .flex()
+                .flex_wrap()
+                .gap(theme.space_1)
+                .p(theme.space_2)
+                .max_h(px(120.0))
+                .overflow_y_scroll()
+                .rounded(theme.radius_sm)
+                .border_1()
+                .border_color(theme.border_subtle)
+                .bg(theme.surface_raised)
+                .children(
+                    self.branches
+                        .iter()
+                        .enumerate()
+                        .skip(INLINE_BRANCHES)
+                        .map(|(ix, name)| self.branch_chip(name, ix, cx)),
+                )
+        });
+
+        let date_row = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(theme.space_1)
+            .child(
+                div()
+                    .w(px(160.0))
+                    .flex_none()
+                    .child(self.author_input.clone()),
+            )
+            .children(DatePreset::QUICK.iter().map(|&preset| {
+                self.chip(
+                    preset.label(),
+                    self.date_preset == preset,
+                    ("date-preset", preset as u64),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.set_preset(preset, window, cx);
+                }))
+            }))
+            .child(
+                div()
+                    .w(px(140.0))
+                    .flex_none()
+                    .child(self.from_input.clone()),
+            )
+            .child(div().w(px(140.0)).flex_none().child(self.to_input.clone()))
+            .when(self.filters_active(), |d| {
+                d.child(
+                    self.chip("Clear filters", false, "clear-filters")
+                        .text_color(theme.warning)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.clear_filters(window, cx);
+                        })),
+                )
+            });
+
+        let missing_note =
+            (self.branch_filter.is_some() && !self.missing_branch.is_empty()).then(|| {
+                format!(
+                    "Branch “{}” not in: {}",
+                    self.branch_filter.as_deref().unwrap_or(""),
+                    self.missing_branch.join(", ")
+                )
+            });
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(theme.space_1)
+            .child(branch_row)
+            .children(more_list)
+            .child(date_row)
+            .when_some(self.date_error.clone(), |d, error| {
+                d.child(div().text_xs().text_color(theme.danger).child(error))
+            })
+            .when_some(missing_note, |d, note| {
+                d.child(div().text_xs().text_color(theme.warning).child(note))
+            })
             .into_any_element()
     }
 
@@ -795,7 +1239,10 @@ impl Render for CommitBrowser {
         let status_line = if self.commits.is_empty() && self.loading {
             "Loading history…".to_string()
         } else if self.visible.is_empty() {
-            if self.applied_query.trim().is_empty() && !self.unassigned_only {
+            if self.applied_query.trim().is_empty()
+                && !self.unassigned_only
+                && !self.filters_active()
+            {
                 "No commits. Link a repository on the project page to see its history.".to_string()
             } else {
                 "No commits match.".to_string()
@@ -921,6 +1368,7 @@ impl Render for CommitBrowser {
                                 }),
                             )),
                     )
+                    .child(self.render_filter_bar(cx))
                     .child(
                         div()
                             .text_xs()

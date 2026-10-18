@@ -122,8 +122,21 @@ remaining gap is visible at a glance.
       Desktop-style list, virtualized (`uniform_list`), pages of 200 loaded
       on a background task and prefetched near the end; live debounced search
       by title / author / hash prefix (`search_history`); repo filter chips;
-      "Unassigned only" filter; "Select all". Open items: filter by branch and
-      date range, keyboard navigation (arrows), a full diff/detail view.
+      "Unassigned only" filter; "Select all". Open items: keyboard navigation
+      (arrows), a full diff/detail view.
+- [x] History filters by branch, author and date range:
+      `devspace_git::filtered_history(repos, limit, after, &HistoryFilter)`
+      (`search_history`/`merged_history` are thin wrappers). Branch reads that
+      branch (local, then `origin/<name>`) per repo; repos without it are
+      reported in `HistoryPage::missing_branch` (UI: "Branch x not in: ...");
+      names are validated like `is_safe_ref_name`, git2 only. Author is a
+      case-insensitive name substring; since/until are inclusive and the walk
+      stops early once commits are older than `since`. `list_branches(repo)`
+      (current, locals, remote-only) and `project_branches(repos)` feed the
+      browser's filter bar: branch chips (first 12 + "More…"), author box,
+      Any time / Today / Last 7 / Last 30 days chips, From/To `YYYY-MM-DD`
+      boxes with inline errors, "Clear filters". Day boundaries are UTC.
+      UI verified by compilation only (not run); git side by unit tests.
 - [x] Tag/map commits to tasks: click / Ctrl-click / Shift-click range
       selection, then pick any task from the project's tree (indented by
       depth) in the side panel, with a label (Linked / Needs migration /

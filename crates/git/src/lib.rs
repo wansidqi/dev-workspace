@@ -133,6 +133,64 @@ pub struct HistoryPage {
     /// repo must not hide the others' history, so they're reported here for
     /// the UI to flag instead of failing the whole page.
     pub unreadable: Vec<RepoId>,
+    /// Repos that were readable but lack the requested branch (or the branch
+    /// name was unusable). Not an error: a project's repos rarely share every
+    /// branch, so the UI shows "not in: <repo>" and the rest still list.
+    pub missing_branch: Vec<RepoId>,
+}
+
+/// Optional narrowing of the merged history. All fields are conjunctive and
+/// the default matches everything, so existing callers are unaffected.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HistoryFilter {
+    /// Case-insensitive match on title, author or hash prefix.
+    pub text: String,
+    /// Read this branch (local first, then `origin/<name>`) instead of HEAD.
+    pub branch: Option<String>,
+    /// Case-insensitive substring of the author's name.
+    pub author: Option<String>,
+    /// Inclusive lower bound on commit time (unix seconds).
+    pub since: Option<i64>,
+    /// Inclusive upper bound on commit time (unix seconds). Callers wanting
+    /// "through the whole day" pass the day's last second.
+    pub until: Option<i64>,
+}
+
+/// A [`HistoryFilter`] normalised once per call instead of once per commit.
+struct Prepared {
+    needle: String,
+    branch: Option<String>,
+    author: Option<String>,
+    since: Option<i64>,
+    until: Option<i64>,
+}
+
+impl Prepared {
+    fn new(f: &HistoryFilter) -> Self {
+        let nonblank = |s: &Option<String>| {
+            s.as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        };
+        Self {
+            needle: f.text.trim().to_lowercase(),
+            branch: nonblank(&f.branch),
+            author: nonblank(&f.author).map(|a| a.to_lowercase()),
+            since: f.since,
+            until: f.until,
+        }
+    }
+
+    fn accepts(&self, commit: &CommitInfo) -> bool {
+        self.since.is_none_or(|s| commit.time >= s)
+            && self.until.is_none_or(|u| commit.time <= u)
+            && self
+                .author
+                .as_deref()
+                .is_none_or(|a| commit.author.to_lowercase().contains(a))
+            && matches_search(commit, &self.needle)
+    }
 }
 
 type SortKey = (std::cmp::Reverse<i64>, RepoId, String);
@@ -145,23 +203,37 @@ fn sort_key(c: &RepoCommit) -> SortKey {
     )
 }
 
-/// Reads up to `limit` commits per repo from `repo`'s HEAD that sort after
-/// `after`. Newest-first by commit time (libgit2 time sorting; with clock
-/// skew inside one repo the order is as git itself reports it).
+/// Reads up to `limit` commits from `repo`'s HEAD (or the filter's branch)
+/// that sort after `after` and pass the filter. Newest-first by commit time
+/// (libgit2 time sorting; with clock skew inside one repo the order is as git
+/// itself reports it). `Ok(None)` means the requested branch doesn't exist in
+/// this repo. Once a commit is older than `since` the walk stops: in time
+/// order everything after it is older still.
 fn repo_page(
     repo: &Repo,
     limit: usize,
     after: Option<&SortKey>,
-    needle: &str,
-) -> Result<Vec<RepoCommit>, GitError> {
+    filter: &Prepared,
+) -> Result<Option<Vec<RepoCommit>>, GitError> {
     let git = Repository::open(&repo.path)?;
     // A freshly `git init`-ed repo has no commits yet: empty, not broken.
     if git.is_empty()? {
-        return Ok(Vec::new());
+        return Ok(filter.branch.is_none().then(Vec::new));
     }
     let mut revwalk = git.revwalk()?;
     revwalk.set_sorting(git2::Sort::TIME)?;
-    revwalk.push_head()?;
+    match filter.branch.as_deref() {
+        None => revwalk.push_head()?,
+        Some(branch) => {
+            let tip = is_safe_ref_name(branch)
+                .then(|| resolve_branch(&git, branch))
+                .flatten();
+            match tip {
+                Some(oid) => revwalk.push(oid)?,
+                None => return Ok(None),
+            }
+        }
+    }
 
     let mut out = Vec::new();
     for oid in revwalk {
@@ -177,10 +249,13 @@ fn repo_page(
                 time: commit.time().seconds(),
             },
         };
+        if filter.since.is_some_and(|s| entry.commit.time < s) {
+            break;
+        }
         if after.is_some_and(|key| sort_key(&entry) <= *key) {
             continue;
         }
-        if !matches_search(&entry.commit, needle) {
+        if !filter.accepts(&entry.commit) {
             continue;
         }
         out.push(entry);
@@ -188,7 +263,7 @@ fn repo_page(
             break;
         }
     }
-    Ok(out)
+    Ok(Some(out))
 }
 
 /// Case-insensitive match on a commit's title, author or hash prefix.
@@ -216,15 +291,35 @@ pub fn search_history(
     after: Option<&HistoryCursor>,
     text: &str,
 ) -> HistoryPage {
-    let needle = text.trim().to_lowercase();
+    let filter = HistoryFilter {
+        text: text.to_owned(),
+        ..HistoryFilter::default()
+    };
+    filtered_history(repos, limit, after, &filter)
+}
+
+/// The full-featured history entry point: text search plus branch, author and
+/// date-range filters, merged newest first across `repos`. Paging uses the
+/// same cursor as [`merged_history`] and works unchanged under any filter.
+/// Repos lacking the requested branch are listed in
+/// [`HistoryPage::missing_branch`] instead of failing. Walks history, so call
+/// it off the UI thread.
+pub fn filtered_history(
+    repos: &[Repo],
+    limit: usize,
+    after: Option<&HistoryCursor>,
+    filter: &HistoryFilter,
+) -> HistoryPage {
+    let prepared = Prepared::new(filter);
     let after_key = after.map(|c| (std::cmp::Reverse(c.time), c.repo_id, c.hash.clone()));
     let mut page = HistoryPage::default();
     let mut all = Vec::new();
     for repo in repos {
         // One extra per repo so "this repo has more" is detectable: without
         // it a page that ends exactly at the limit would claim to be last.
-        match repo_page(repo, limit + 1, after_key.as_ref(), &needle) {
-            Ok(commits) => all.extend(commits),
+        match repo_page(repo, limit + 1, after_key.as_ref(), &prepared) {
+            Ok(Some(commits)) => all.extend(commits),
+            Ok(None) => page.missing_branch.push(repo.id),
             Err(_) => page.unreadable.push(repo.id),
         }
     }
@@ -234,6 +329,74 @@ pub fn search_history(
     page.next = more.then(|| all.last().map(HistoryCursor::of)).flatten();
     page.commits = all;
     page
+}
+
+/// One repo's branches, plus the checked-out branch if there is one.
+fn branches_and_current(repo: &Repo) -> Result<(Vec<String>, Option<String>), GitError> {
+    let git = Repository::open(&repo.path)?;
+    let current = git
+        .head()
+        .ok()
+        .filter(|h| h.is_branch())
+        .and_then(|h| h.shorthand().map(str::to_owned));
+    let mut local = Vec::new();
+    let mut remote = Vec::new();
+    for entry in git.branches(None)? {
+        let (branch, kind) = entry?;
+        let Some(name) = branch.name()?.map(str::to_owned) else {
+            continue;
+        };
+        match kind {
+            git2::BranchType::Local => local.push(name),
+            git2::BranchType::Remote => {
+                if let Some(short) = name.strip_prefix("origin/") {
+                    if short != "HEAD" {
+                        remote.push(short.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    local.sort();
+    local.dedup();
+    remote.sort();
+    remote.dedup();
+    remote.retain(|r| local.binary_search(r).is_err());
+    let current = current.filter(|c| local.contains(c));
+    if let Some(cur) = &current {
+        local.retain(|b| b != cur);
+    }
+    let mut out = Vec::with_capacity(local.len() + remote.len() + 1);
+    out.extend(current.clone());
+    out.extend(local);
+    out.extend(remote);
+    Ok((out, current))
+}
+
+/// Branch names of one repo: the checked-out branch first, then the other
+/// local branches, then `origin/` branches without a local twin (named
+/// without the prefix, as [`filtered_history`] resolves them), each group
+/// sorted. Pure git2 reads.
+pub fn list_branches(repo: &Repo) -> Result<Vec<String>, GitError> {
+    branches_and_current(repo).map(|(branches, _)| branches)
+}
+
+/// The union of every readable repo's branches, deduplicated by name. Names
+/// checked out in some repo come first, then alphabetical, so the common
+/// working branches sit at the top of a picker. Unreadable repos are skipped.
+pub fn project_branches(repos: &[Repo]) -> Vec<String> {
+    let mut checked_out = std::collections::HashSet::new();
+    let mut all = std::collections::BTreeSet::new();
+    for repo in repos {
+        if let Ok((branches, current)) = branches_and_current(repo) {
+            checked_out.extend(current);
+            all.extend(branches);
+        }
+    }
+    let mut out: Vec<String> = all.into_iter().collect();
+    // Stable sort keeps the alphabetical order inside each group.
+    out.sort_by_key(|b| !checked_out.contains(b));
+    out
 }
 
 /// True when `c` can be part of an identifier-like run. Task references
@@ -1027,5 +1190,313 @@ mod tests {
             assert_eq!(v.target, None);
             assert_eq!(v.commits.len(), 4, "unfiltered: feat has base + 3");
         }
+    }
+
+    // ---- filtered_history / list_branches ----
+
+    fn commit_by(dir: &std::path::Path, message: &str, time: i64, author: &str) {
+        std::fs::write(dir.join(format!("{time}.txt")), message).unwrap();
+        git_in(dir, &["add", "."], None);
+        let author = format!("--author={author} <x@example.com>");
+        git_in(dir, &["commit", "-q", "-m", message, &author], Some(time));
+    }
+
+    fn titles(page: &HistoryPage) -> Vec<&str> {
+        page.commits
+            .iter()
+            .map(|c| c.commit.summary.as_str())
+            .collect()
+    }
+
+    fn run(dir: &std::path::Path, args: &[&str]) {
+        git_in(dir, args, None);
+    }
+
+    /// Repo with `base` on the default branch and `feat 1/2` on `feature`,
+    /// leaving the default branch checked out.
+    fn repo_with_branch() -> (tempfile::TempDir, String) {
+        let r = init_empty_repo();
+        commit_at(r.path(), "base", 100);
+        let default = {
+            let git = Repository::open(r.path()).unwrap();
+            let head = git.head().unwrap();
+            head.shorthand().unwrap().to_owned()
+        };
+        run(r.path(), &["checkout", "-q", "-b", "feature"]);
+        commit_at(r.path(), "feat 1", 200);
+        commit_at(r.path(), "feat 2", 300);
+        run(r.path(), &["checkout", "-q", &default]);
+        (r, default)
+    }
+
+    fn branch_filter(name: &str) -> HistoryFilter {
+        HistoryFilter {
+            branch: Some(name.to_owned()),
+            ..HistoryFilter::default()
+        }
+    }
+
+    #[test]
+    fn default_filter_matches_merged_history() {
+        let (r, _) = repo_with_branch();
+        let repos = [repo_of(1, "a", &r)];
+        assert_eq!(
+            filtered_history(&repos, 10, None, &HistoryFilter::default()),
+            merged_history(&repos, 10, None)
+        );
+    }
+
+    #[test]
+    fn branch_filter_reads_that_branch_and_reports_repos_without_it() {
+        let (a, _) = repo_with_branch();
+        let b = init_empty_repo();
+        commit_at(b.path(), "b only", 250);
+        let empty = init_empty_repo();
+        let repos = [
+            repo_of(1, "a", &a),
+            repo_of(2, "b", &b),
+            repo_of(3, "empty", &empty),
+        ];
+
+        let page = filtered_history(&repos, 10, None, &branch_filter("feature"));
+        assert_eq!(titles(&page), vec!["feat 2", "feat 1", "base"]);
+        assert_eq!(page.missing_branch, vec![RepoId(2), RepoId(3)]);
+        assert!(page.unreadable.is_empty());
+
+        // HEAD of `a` does not have the feature commits.
+        let head = filtered_history(&repos, 10, None, &HistoryFilter::default());
+        assert!(!titles(&head).contains(&"feat 1"));
+        assert!(head.missing_branch.is_empty());
+    }
+
+    #[test]
+    fn branch_filter_falls_back_to_origin_and_prefers_local() {
+        let (r, default) = repo_with_branch();
+        let repos = [repo_of(1, "a", &r)];
+        // Remote-only branch pointing at feature's tip, no local twin.
+        run(
+            r.path(),
+            &["update-ref", "refs/remotes/origin/only-remote", "feature"],
+        );
+        let page = filtered_history(&repos, 10, None, &branch_filter("only-remote"));
+        assert_eq!(titles(&page), vec!["feat 2", "feat 1", "base"]);
+
+        // A stale origin/<default> must not shadow the local branch.
+        run(
+            r.path(),
+            &[
+                "update-ref",
+                &format!("refs/remotes/origin/{default}"),
+                "feature",
+            ],
+        );
+        let page = filtered_history(&repos, 10, None, &branch_filter(&default));
+        assert_eq!(titles(&page), vec!["base"]);
+    }
+
+    #[test]
+    fn hostile_branch_names_match_nothing_and_do_not_error() {
+        let (r, _) = repo_with_branch();
+        let repos = [repo_of(1, "a", &r)];
+        for bad in [
+            "--all",
+            "-x",
+            "feature --all",
+            "fea\nture",
+            "..",
+            "feature^{commit}",
+            "HEAD~1 ",
+            "origin/../feature",
+        ] {
+            let page = filtered_history(&repos, 10, None, &branch_filter(bad));
+            assert!(page.commits.is_empty(), "{bad:?} must not match");
+            assert!(page.unreadable.is_empty(), "{bad:?} is not an error");
+            // Blank (whitespace-only) means "no branch filter".
+        }
+        let blank = filtered_history(&repos, 10, None, &branch_filter("  "));
+        assert_eq!(titles(&blank), vec!["base"]);
+    }
+
+    #[test]
+    fn date_range_is_inclusive_and_open_ended() {
+        let r = init_empty_repo();
+        for (m, t) in [("c1", 1000), ("c2", 2000), ("c3", 3000), ("c4", 4000)] {
+            commit_at(r.path(), m, t);
+        }
+        let repos = [repo_of(1, "a", &r)];
+        let range = |since, until| {
+            let f = HistoryFilter {
+                since,
+                until,
+                ..HistoryFilter::default()
+            };
+            let page = filtered_history(&repos, 10, None, &f);
+            page.commits
+                .iter()
+                .map(|c| c.commit.summary.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(range(Some(2000), Some(3000)), vec!["c3", "c2"]);
+        assert_eq!(range(Some(2001), Some(2999)), Vec::<String>::new());
+        assert_eq!(range(Some(3000), None), vec!["c4", "c3"]);
+        assert_eq!(range(None, Some(2000)), vec!["c2", "c1"]);
+        assert_eq!(range(Some(4001), None), Vec::<String>::new());
+        assert_eq!(range(None, Some(999)), Vec::<String>::new());
+        assert_eq!(range(Some(3000), Some(2000)), Vec::<String>::new());
+    }
+
+    #[test]
+    fn author_filter_is_case_insensitive_substring_on_name() {
+        let r = init_empty_repo();
+        commit_by(r.path(), "one", 100, "Alice Smith");
+        commit_by(r.path(), "two", 200, "Bob Jones");
+        commit_by(r.path(), "three", 300, "alice cooper");
+        let repos = [repo_of(1, "a", &r)];
+        let by = |a: &str| {
+            let f = HistoryFilter {
+                author: Some(a.to_owned()),
+                ..HistoryFilter::default()
+            };
+            filtered_history(&repos, 10, None, &f)
+        };
+        assert_eq!(titles(&by("ALICE")), vec!["three", "one"]);
+        assert_eq!(titles(&by("jones")), vec!["two"]);
+        assert!(by("nobody").commits.is_empty());
+        assert_eq!(by("  ").commits.len(), 3, "blank author is no filter");
+        // Email is not part of the author-name match.
+        assert!(by("example.com").commits.is_empty());
+    }
+
+    #[test]
+    fn filters_combine_with_text_search_and_paging() {
+        let a = init_empty_repo();
+        let b = init_empty_repo();
+        for i in 0..6 {
+            commit_by(a.path(), &format!("fix a{i}"), 1000 + i * 10, "Alice");
+            commit_by(b.path(), &format!("fix b{i}"), 1005 + i * 10, "Alice");
+            commit_by(a.path(), &format!("feat a{i}"), 1002 + i * 10, "Bob");
+        }
+        let repos = [repo_of(1, "a", &a), repo_of(2, "b", &b)];
+        let filter = HistoryFilter {
+            text: "FIX".into(),
+            author: Some("alice".into()),
+            since: Some(1010),
+            until: Some(1044),
+            ..HistoryFilter::default()
+        };
+        let all = filtered_history(&repos, 100, None, &filter);
+        // Alice fix commits, 1010 <= t <= 1044.
+        let expected: Vec<&str> = vec![
+            "fix a4", "fix b3", "fix a3", "fix b2", "fix a2", "fix b1", "fix a1",
+        ];
+        assert_eq!(titles(&all), expected);
+        assert!(all.next.is_none());
+
+        // Page by 4 then 2, exactly at the boundary: no repeats, no gaps.
+        let p1 = filtered_history(&repos, 4, None, &filter);
+        assert_eq!(titles(&p1), expected[..4].to_vec());
+        let cursor = p1.next.clone().expect("more pages");
+        let p2 = filtered_history(&repos, 4, Some(&cursor), &filter);
+        assert_eq!(titles(&p2), expected[4..].to_vec());
+        assert!(p2.next.is_none());
+
+        // A page that ends exactly at the limit must not claim more.
+        let exact = filtered_history(&repos, 7, None, &filter);
+        assert_eq!(exact.commits.len(), 7);
+        assert!(exact.next.is_none());
+    }
+
+    #[test]
+    fn branch_filter_pages_across_repos_newest_first() {
+        let (a, _) = repo_with_branch();
+        let (b, _) = repo_with_branch();
+        // Interleave: push b's feature commits a little later in time.
+        run(b.path(), &["checkout", "-q", "feature"]);
+        commit_at(b.path(), "b feat 3", 350);
+        let repos = [repo_of(1, "a", &a), repo_of(2, "b", &b)];
+        let filter = branch_filter("feature");
+        let p1 = filtered_history(&repos, 3, None, &filter);
+        assert_eq!(titles(&p1), vec!["b feat 3", "feat 2", "feat 2"]);
+        let p2 = filtered_history(&repos, 3, p1.next.as_ref(), &filter);
+        assert_eq!(titles(&p2), vec!["feat 1", "feat 1", "base"]);
+        let p3 = filtered_history(&repos, 3, p2.next.as_ref(), &filter);
+        assert_eq!(titles(&p3), vec!["base"]);
+        assert!(p3.next.is_none());
+    }
+
+    #[test]
+    fn since_stops_the_walk_early_but_keeps_newer_commits() {
+        let r = init_empty_repo();
+        for i in 0..50 {
+            commit_at(r.path(), &format!("c{i}"), 1000 + i);
+        }
+        let repos = [repo_of(1, "a", &r)];
+        let f = HistoryFilter {
+            since: Some(1045),
+            ..HistoryFilter::default()
+        };
+        let page = filtered_history(&repos, 100, None, &f);
+        assert_eq!(page.commits.len(), 5);
+        assert_eq!(page.commits[0].commit.summary, "c49");
+    }
+
+    #[test]
+    fn list_branches_orders_current_then_local_then_remote_only() {
+        let (r, default) = repo_with_branch();
+        run(r.path(), &["branch", "alpha"]);
+        run(r.path(), &["branch", "zeta"]);
+        run(
+            r.path(),
+            &["update-ref", "refs/remotes/origin/beta", "feature"],
+        );
+        run(
+            r.path(),
+            &["update-ref", "refs/remotes/origin/alpha", "feature"],
+        );
+        run(
+            r.path(),
+            &["update-ref", "refs/remotes/origin/HEAD", "feature"],
+        );
+        let repo = repo_of(1, "a", &r);
+
+        let branches = list_branches(&repo).unwrap();
+        let mut locals = vec![
+            "alpha".to_string(),
+            "feature".to_string(),
+            "zeta".to_string(),
+        ];
+        locals.retain(|b| *b != default);
+        let mut expected = vec![default.clone()];
+        expected.extend(locals);
+        expected.sort_by_key(|b| *b != default); // stable: default first, rest alphabetical
+        expected.push("beta".to_string());
+        assert_eq!(branches, expected);
+        assert!(!branches.iter().any(|b| b == "HEAD" || b.contains('/')));
+
+        // Not a repo: an error, not a panic.
+        let plain = tempdir().unwrap();
+        assert!(list_branches(&repo_of(2, "x", &plain)).is_err());
+    }
+
+    #[test]
+    fn project_branches_unions_repos_with_checked_out_first() {
+        let (a, default) = repo_with_branch();
+        let b = init_empty_repo();
+        commit_at(b.path(), "b", 100);
+        run(b.path(), &["checkout", "-q", "-b", "hotfix"]);
+        let plain = tempdir().unwrap();
+        let repos = [
+            repo_of(1, "a", &a),
+            repo_of(2, "b", &b),
+            repo_of(3, "x", &plain),
+        ];
+        let all = project_branches(&repos);
+        // Both checked-out branches lead, alphabetically; then the rest.
+        let mut head: Vec<String> = vec![default.clone(), "hotfix".to_string()];
+        head.sort();
+        assert_eq!(all[..2].to_vec(), head);
+        assert!(all.contains(&"feature".to_string()));
+        let mut seen = std::collections::HashSet::new();
+        assert!(all.iter().all(|b| seen.insert(b.clone())), "deduplicated");
     }
 }
