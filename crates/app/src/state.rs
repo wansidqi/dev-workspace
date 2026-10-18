@@ -118,6 +118,7 @@ impl AppState {
             next_repo_id: 1,
         };
         state.reload_projects();
+        state.refresh_id_counters();
         if let Some(first) = state.projects.first() {
             state.select_project(first.id);
         }
@@ -719,6 +720,62 @@ impl AppState {
             .map(|repo| std::path::PathBuf::from(&repo.path))
             .or_else(dirs::home_dir)
             .unwrap_or_else(|| self.paths.root().to_path_buf())
+    }
+
+    // --- hooks for settings.rs / ide.rs / workspace_tools.rs -------------
+
+    /// The workspace layout, cloned for background jobs (backup/export/
+    /// import) that open their own database connection.
+    pub fn workspace_paths(&self) -> WorkspacePaths {
+        self.paths.clone()
+    }
+
+    /// The folder "Open in IDE" should open: the first linked repo, or the
+    /// project's own data folder when none is linked yet.
+    pub fn project_folder(&self) -> Option<std::path::PathBuf> {
+        let project = self.selected_project?;
+        match self.repos.first() {
+            Some(repo) => Some(std::path::PathBuf::from(&repo.path)),
+            None => {
+                self.paths.ensure_dirs(Some(project)).ok()?;
+                Some(self.paths.project_dir(project))
+            }
+        }
+    }
+
+    /// Makes the id counters clear every id in the database, not just the
+    /// selected project's rows. Needed because ids are global: another
+    /// project's rows (or an import) may use ids above this project's.
+    fn refresh_id_counters(&mut self) {
+        let max = |table: &str| -> i64 {
+            self.conn
+                .query_row(
+                    &format!("SELECT COALESCE(MAX(id), 0) FROM {table}"),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0)
+        };
+        let projects = max("projects") + 1;
+        let tasks = max("tasks") + 1;
+        let notes = max("notes") + 1;
+        let repos = max("repos") + 1;
+        let attachments = max("attachments") + 1;
+        let links = max("commit_links") + 1;
+        self.next_project_id = self.next_project_id.max(projects);
+        self.next_task_id = self.next_task_id.max(tasks);
+        self.next_note_id = self.next_note_id.max(notes);
+        self.next_repo_id = self.next_repo_id.max(repos);
+        self.next_attachment_id = self.next_attachment_id.max(attachments);
+        self.next_commit_link_id = self.next_commit_link_id.max(links);
+    }
+
+    /// Picks up a project that was added to the database behind this
+    /// state's back (an import on a background connection) and selects it.
+    pub fn adopt_imported_project(&mut self, id: ProjectId) {
+        self.reload_projects();
+        self.refresh_id_counters();
+        self.select_project(id);
     }
 }
 

@@ -140,6 +140,12 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ),
 ];
 
+/// The newest schema version this build knows. Import refuses databases
+/// made by a newer app than this.
+pub fn latest_migration_version() -> i64 {
+    MIGRATIONS.last().map(|(v, _)| *v).unwrap_or(0)
+}
+
 /// Applies every migration not yet recorded in `schema_migrations`, in a
 /// transaction per migration.
 pub fn run_migrations(conn: &mut Connection) -> Result<(), StorageError> {
