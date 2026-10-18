@@ -1,0 +1,271 @@
+# CLAUDE.md
+
+Guidance for Claude when working in this repository.
+
+## Project overview
+
+A local-first **developer workspace** desktop app. It organizes work around projects, tasks, notes, attachments, credentials and git commits, and launches the developer's existing IDE and terminal. It is the layer around the IDE, not an IDE replacement.
+
+Goals:
+- Low memory and CPU use (the reason for Rust + GPUI)
+- Local-first: no account, no network required
+- Plain files for user content (markdown, attachments) so data stays portable
+- Secure handling of credentials
+- A modern, glassy UI (translucent layered surfaces, soft light, depth) that stays fast and readable
+
+Non-goals:
+- Building a code editor (launch VS Code or another IDE instead)
+- Container orchestration
+- Team or cloud sync
+
+## Tech stack
+
+| Area | Choice |
+| --- | --- |
+| Language | Rust (stable, edition 2021 or later) |
+| UI | GPUI (pin an exact version or git revision; the API is pre-1.0 and changes) |
+| Component helpers | gpui-component (evaluate before writing custom widgets) |
+| Database | SQLite via rusqlite (bundled feature), migrations in code |
+| Git | git2 (libgit2) for history and diffs; shell out to the git CLI only for cherry-pick export text |
+| Terminal | alacritty_terminal (emulation) + portable-pty (shell process) |
+| Markdown | pulldown-cmark for parsing and preview |
+| PDF viewing | pdfium-render (or mupdf); render pages to images |
+| Secrets | keyring crate for the master key; AEAD encryption (chacha20poly1305 or aes-gcm) for stored credentials |
+| Async | smol or GPUI's own executor; avoid pulling in tokio unless a dependency requires it |
+| Errors | thiserror in library code, anyhow at app boundaries |
+| Logging | tracing + tracing-subscriber |
+| Paths | dirs crate for OS data directories |
+
+## Features to implement
+
+1. **Projects**: create, edit, archive, switch; link one or more git repos; dashboard with open tasks, recent notes, recent commits.
+2. **Tasks and subtasks**: unlimited nesting; status, priority, due date, tags; optional branch per task; each has notes, attachments and linked commits.
+3. **Notes**: markdown at project, task and subtask level; types: note, script, SQL; syntax highlighting; live preview; search. Stored as plain files.
+4. **Attachments**: PDFs, images, other files on a project, task or subtask; built-in PDF viewer; copy into workspace or link by path.
+5. **Credentials vault**: per project; encrypted; reveal/copy with auto-hide and clipboard auto-clear; optional injection into terminal sessions as environment variables.
+6. **Git integration**: commit history browser (search, filter by branch/author/date); select single, multiple or range and attach to a task; per-link note and status (needs migration, cherry-picked, deployed); badges on linked commits; unassigned commits view; branch view (commits on task branch not in target); suggested commits (task ID in message or branch); export ordered cherry-pick list; warn when a linked commit is missing after rebase or squash.
+7. **Developer tools**: integrated terminal with tabs starting in the project folder; launch external IDE on the project folder; per-project run commands with log view.
+8. **Search and navigation**: global search; command palette; keyboard shortcuts; restore last project, task and layout on startup.
+9. **Data and safety**: backup and export/import of a project; local-first.
+
+## Architecture
+
+Keep a strict separation:
+
+- **core**: domain types and logic. No GPUI imports. Pure Rust, unit-testable.
+- **storage**: SQLite access, file layout, migrations, encryption.
+- **services**: git, terminal, process runner, IDE launcher, PDF rendering.
+- **ui**: GPUI views, components, actions, keybindings. Talks to core and services only through plain function calls or channels.
+
+Suggested layout:
+
+```
+.
+├── Cargo.toml
+├── CLAUDE.md
+├── crates/
+│   ├── core/        # domain models, rules, no UI
+│   ├── storage/     # sqlite, migrations, crypto, file store
+│   ├── git/         # git2 wrapper, commit linking, patch-id
+│   ├── terminal/    # pty + alacritty_terminal wrapper
+│   └── app/         # GPUI app, views, actions, main.rs
+├── assets/          # icons, fonts, themes
+└── docs/
+```
+
+A Cargo workspace is preferred so core, storage and git can be tested without compiling the UI.
+
+## Data and storage
+
+Location (use the dirs crate, never hardcode paths):
+
+```
+<data_dir>/devspace/
+├── app.db                      # SQLite: metadata
+├── projects/<project_id>/
+│   ├── notes/                  # markdown files
+│   └── attachments/            # copied files
+└── backups/
+```
+
+Core tables (names are guidance, keep them stable once created):
+
+```
+projects(id, name, description, archived, created_at, updated_at)
+repos(id, project_id, path, name)
+tasks(id, project_id, parent_id NULL, title, status, priority, due_at, branch, created_at, updated_at)
+notes(id, project_id, task_id NULL, kind, title, file_path, updated_at)
+attachments(id, project_id, task_id NULL, name, file_path, is_linked, created_at)
+credentials(id, project_id, label, kind, nonce, ciphertext, created_at)
+commit_links(id, task_id, repo_id, hash, patch_id, status, note, created_at)
+run_commands(id, project_id, name, command, cwd)
+```
+
+Rules:
+- Commit links store only repo and hash (plus patch_id). Message, author and date are read from git at display time.
+- Store the repo reference on every commit link from the start; projects can have several repos.
+- Every schema change is a numbered migration. Never edit an applied migration.
+- Use transactions for multi-step writes. Enable WAL mode and foreign keys.
+
+## Security rules
+
+- Credentials are encrypted at rest. The master key lives in the OS keychain, never on disk in plain text.
+- Never log credential values, decrypted or not. Never include them in error messages or panic output.
+- Zero sensitive buffers after use where practical (zeroize crate).
+- Clipboard copy of a secret must auto-clear after a short timeout.
+- Injected terminal environment variables apply to that session only. Avoid writing secrets to shell history.
+- Validate and canonicalize all file paths. Attachments and notes must stay inside the project directory.
+- Treat git repo contents and attached files as untrusted input.
+
+## GPUI guidelines
+
+- Keep views small; split large views into components.
+- State lives in models/entities, not in view structs. Update state through GPUI's entity update calls and call notify when it changes so views re-render.
+- Never block the UI thread. Run git, disk, PDF rendering and database work on background tasks and send results back to the UI.
+- Use actions and keybindings for user commands so everything is reachable from the command palette.
+- Virtualize long lists (commit history, notes lists, search results). Do not render thousands of rows.
+- Cache rendered PDF pages and drop them when off screen to keep memory low.
+- Since GPUI documentation is thin, read the gpui source and the Zed codebase for patterns before inventing new ones. Do not guess APIs; check the pinned version.
+
+## UI design: modern glass concept
+
+The app should feel modern and glassy: translucent layered surfaces, subtle light edges, soft shadows, generous spacing, smooth motion. Readability and performance always win over effect.
+
+### How glass is achieved in GPUI
+
+GPUI has no CSS-style backdrop-filter for individual panels. Achieve the look in two layers:
+
+1. **Window-level backdrop**: ask the OS for a blurred or translucent window background (GPUI exposes a window background appearance option, for example blurred, with OS-specific results: acrylic/Mica on Windows, vibrancy on macOS, compositor blur on some Linux setups). Verify what the pinned GPUI version supports before relying on it.
+2. **In-app surfaces**: fake depth with semi-transparent fills, a 1px light border, a faint top-to-bottom gradient, and a soft shadow. Do not try to blur behind each panel.
+
+Always provide a fallback: if the window blur is unavailable, render the same tokens with a more opaque background so the UI still looks intentional.
+
+### Theme tokens
+
+All colors, radii, spacing and shadows come from a central theme. No hardcoded colors in views.
+
+```rust
+pub struct GlassTheme {
+    // Backgrounds (use alpha)
+    pub window_tint: Hsla,        // tint over the OS blur
+    pub surface: Hsla,            // panels, sidebar (alpha about 0.55 to 0.70)
+    pub surface_raised: Hsla,     // cards, popovers (alpha about 0.70 to 0.85)
+    pub surface_solid: Hsla,      // fallback when blur is unavailable
+    // Edges and light
+    pub border_light: Hsla,       // 1px top/left highlight (white, low alpha)
+    pub border_subtle: Hsla,      // 1px general separator
+    pub shadow: Hsla,
+    // Content
+    pub text_primary: Hsla,
+    pub text_secondary: Hsla,
+    pub accent: Hsla,
+    pub success: Hsla,
+    pub warning: Hsla,
+    pub danger: Hsla,
+    // Shape
+    pub radius_sm: Pixels,        // 8
+    pub radius_md: Pixels,        // 12
+    pub radius_lg: Pixels,        // 16
+}
+```
+
+Provide a dark theme first and a light theme second, switchable at runtime and following the OS setting by default.
+
+### Visual rules
+
+- **Layering**: window tint at the back, sidebar and panels above, cards and popovers on top. Higher layers are more opaque and have stronger shadows.
+- **Edges**: every glass surface gets a 1px light border; the top edge can be slightly brighter to suggest light from above.
+- **Radius**: rounded corners everywhere, consistent scale (8, 12, 16).
+- **Spacing**: use a 4px grid. Prefer generous padding over dense layouts.
+- **Typography**: one clean sans-serif UI font and one monospace font for code, terminal, hashes and SQL. Clear size scale; avoid more than three weights.
+- **Color**: a single accent color, used sparingly for selection, focus and primary actions. Status colors (success, warning, danger) are muted, not neon.
+- **Icons**: one consistent line-icon set, same stroke width.
+- **Motion**: short, subtle transitions (about 120 to 200 ms, ease-out) for hover, panel open and selection. No long or bouncy animation. Respect a reduced-motion setting.
+
+### Readability rules
+
+- Text must keep sufficient contrast over any background. Aim for WCAG AA (4.5:1 for body text) against the worst-case wallpaper behind the window.
+- Content-heavy areas must be more opaque than navigation chrome: the terminal, markdown editor and preview, PDF viewer, commit list and credentials vault use near-solid surfaces. Glass is for chrome (sidebar, title bar, toolbars, popovers, command palette), not for reading areas.
+- Secrets screens should never be see-through.
+- Test every screen on both a light and a dark wallpaper.
+
+### Performance rules for glass
+
+Translucency and shadows cost GPU time and memory, which conflicts with this project's efficiency goal:
+- Limit stacked translucent layers to 3 deep.
+- Avoid large soft shadows on long scrolling lists; use a thin border instead.
+- Do not animate blur or large translucent areas.
+- Reuse theme values; do not allocate per-frame styles.
+- Provide a setting to reduce transparency (solid surfaces), also used automatically when the OS requests reduced transparency.
+
+### Layout concept
+
+- Custom title bar blended into the window (draggable, with window controls styled to match).
+- Left glass sidebar: projects, then tasks tree.
+- Center: the selected task or project with notes, attachments and linked commits in tabs.
+- Right or bottom: collapsible panels for terminal, commit browser and credentials.
+- Command palette as a centered floating glass popover with a soft shadow.
+- Empty states have a short message and one primary action.
+
+## Performance rules
+
+Memory efficiency is a core goal:
+- Load data lazily; do not load all tasks, notes or commits at startup.
+- Page git history (for example 200 commits at a time).
+- Avoid cloning large strings and buffers; prefer references, Arc, and Cow.
+- Stream large files instead of reading them whole.
+- Cap terminal scrollback (configurable, sensible default).
+- Profile before optimizing. Add a note in the PR or commit when a change is performance-motivated.
+
+## Coding conventions
+
+- Run formatting and lint before finishing any change:
+
+```bash
+cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+- No unwrap or expect in non-test code unless the invariant is documented in a comment.
+- Prefer small functions and explicit types at module boundaries.
+- Public items get doc comments. Explain why, not what.
+- Keep dependencies minimal. Justify any new crate (maintenance, size, license) in the commit message.
+- Name things by domain (Project, Task, CommitLink), not by technical role.
+
+## Commands
+
+```bash
+cargo build                         # debug build
+cargo run -p app                    # run the app
+cargo build --release               # optimized build
+cargo test --workspace              # all tests
+cargo test -p core                  # domain tests only
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all
+```
+
+## Testing
+
+- core and storage must have unit tests (use in-memory SQLite for storage tests).
+- git crate tests create temporary repos with git2 and assert commit linking, branch views and patch-id matching, including the rebase and missing-commit case.
+- Encryption tests: round trip, wrong key fails, nonce is never reused.
+- UI is tested manually; keep logic out of views so it can be tested elsewhere.
+
+## Cross-platform notes
+
+- Target Windows, macOS and Linux. Check GPUI's current platform support for each before relying on a feature.
+- Terminal: ConPTY on Windows (handled by portable-pty). Default shell differs per OS; make it configurable.
+- IDE launching: run the configured command (for example code) with the project path. Keep the command configurable per user.
+- Use std::path and dirs; never assume path separators.
+
+## How Claude should work here
+
+- Read the relevant crate and existing patterns before making changes.
+- Make focused changes. Do not refactor unrelated code in the same change.
+- Ask before adding a new dependency, changing the database schema, or changing the encryption scheme.
+- If a GPUI API is uncertain, check the pinned version's source instead of guessing.
+- After changes, run fmt, clippy and tests, and report any failures honestly.
+- Never commit secrets, test credentials or personal paths.
+- For any UI work, use the theme tokens; never hardcode colors, radii or shadows in a view.
+- Check that every new screen is readable on light and dark backgrounds and works with transparency reduced.
+-

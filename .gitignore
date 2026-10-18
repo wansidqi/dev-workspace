@@ -1,0 +1,12 @@
+/target
+**/*.rs.bk
+*.pdb
+
+.claude/
+
+.vscode/
+.idea/
+*.swp
+
+.DS_Store
+Thumbs.db

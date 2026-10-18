@@ -1,0 +1,22 @@
+[package]
+name = "app"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "devspace"
+path = "src/main.rs"
+
+[dependencies]
+devspace-core = { path = "../core" }
+devspace-storage = { path = "../storage" }
+devspace-git = { path = "../git" }
+devspace-terminal = { path = "../terminal" }
+rusqlite = { version = "0.31", features = ["bundled"] }
+unicode-segmentation = "1"
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+dirs.workspace = true
+gpui = { git = "https://github.com/zed-industries/zed", rev = "56934ec0560bce8929025497411de7f5322fb6ca", package = "gpui" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "56934ec0560bce8929025497411de7f5322fb6ca", package = "gpui_platform" }

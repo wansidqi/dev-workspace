@@ -1,0 +1,10 @@
+[package]
+name = "devspace-terminal"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+anyhow.workspace = true
+portable-pty = "0.9"
+alacritty_terminal = "0.26"

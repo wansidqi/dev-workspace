@@ -1,0 +1,13 @@
+[package]
+name = "devspace-git"
+version.workspace = true
+edition.workspace = true
+build = "build.rs"
+
+[dependencies]
+devspace-core = { path = "../core" }
+git2 = "0.18"
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
