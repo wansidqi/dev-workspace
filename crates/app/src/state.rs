@@ -572,6 +572,49 @@ impl AppState {
         self.update_task(id, |task| task.branch = branch);
     }
 
+    /// Adds a tag to a task. Returns `Ok(false)` if it already had it
+    /// (ignoring case), or a message fit for the UI if the tag is invalid.
+    pub fn add_task_tag(&mut self, id: TaskId, tag: &str) -> Result<bool, String> {
+        if !self.tasks.iter().any(|t| t.id == id) {
+            return Err("Task not found".into());
+        }
+        let added = TaskRepo::add_tag(&self.conn, id, tag).map_err(|e| e.to_string())?;
+        if added {
+            // The repository already validated the tag; mirror it in memory.
+            if let Some(task) = self.tasks.iter_mut().find(|t| t.id == id) {
+                let _ = task.add_tag(tag, now());
+            }
+        }
+        Ok(added)
+    }
+
+    pub fn remove_task_tag(&mut self, id: TaskId, tag: &str) {
+        if TaskRepo::remove_tag(&self.conn, id, tag).is_ok() {
+            if let Some(task) = self.tasks.iter_mut().find(|t| t.id == id) {
+                task.remove_tag(tag, now());
+            }
+        }
+    }
+
+    /// Every tag used in the selected project with how many tasks carry it,
+    /// grouped ignoring case (first spelling wins) and sorted by name — the
+    /// options for the project page's tag filter.
+    pub fn project_tags(&self) -> Vec<(String, usize)> {
+        let mut counts: Vec<(String, usize)> = Vec::new();
+        for tag in self.tasks.iter().flat_map(|t| t.tags.iter()) {
+            let lower = tag.to_lowercase();
+            match counts
+                .iter_mut()
+                .find(|(name, _)| name.to_lowercase() == lower)
+            {
+                Some((_, n)) => *n += 1,
+                None => counts.push((tag.clone(), 1)),
+            }
+        }
+        counts.sort_by_key(|(name, _)| name.to_lowercase());
+        counts
+    }
+
     fn update_task(&mut self, id: TaskId, change: impl FnOnce(&mut Task)) {
         let Some(task) = self.tasks.iter_mut().find(|t| t.id == id) else {
             return;
@@ -872,6 +915,44 @@ mod tests {
             TaskPriority::Medium,
             "full cycle"
         );
+    }
+
+    #[test]
+    fn tags_persist_across_a_reload_and_feed_the_project_tag_list() {
+        let scratch = Scratch::new();
+        let (mut state, a, b) = setup(&scratch);
+        assert_eq!(state.add_task_tag(a, " Backend "), Ok(true));
+        assert_eq!(state.add_task_tag(a, "BACKEND"), Ok(false));
+        assert_eq!(state.add_task_tag(b, "backend"), Ok(true));
+        assert_eq!(state.add_task_tag(b, "ui"), Ok(true));
+        assert!(state.add_task_tag(b, "a,b").is_err());
+        assert!(state.add_task_tag(TaskId(9999), "x").is_err());
+
+        // Counts group ignoring case and the first spelling is shown.
+        assert_eq!(
+            state.project_tags(),
+            vec![("Backend".to_string(), 2), ("ui".to_string(), 1)]
+        );
+
+        // A reload from the database sees the same tags.
+        let project = state.selected_project.unwrap();
+        state.select_project(project);
+        let tags_of = |s: &AppState, id| s.tasks.iter().find(|t| t.id == id).unwrap().tags.clone();
+        assert_eq!(tags_of(&state, a), vec!["Backend".to_string()]);
+        assert_eq!(
+            tags_of(&state, b),
+            vec!["backend".to_string(), "ui".to_string()]
+        );
+
+        state.remove_task_tag(b, "BACKEND");
+        assert_eq!(tags_of(&state, b), vec!["ui".to_string()]);
+        state.select_project(project);
+        assert_eq!(
+            tags_of(&state, b),
+            vec!["ui".to_string()],
+            "removal persisted"
+        );
+        assert_eq!(state.project_tags().len(), 2);
     }
 
     #[test]

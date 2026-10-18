@@ -44,8 +44,15 @@ remaining gap is visible at a glance.
 - [x] Due date: click-to-edit on the task detail page (`YYYY-MM-DD`, empty
       clears, typos are rejected with a message); shows "Overdue" in red for
       unfinished tasks past their date (UTC day)
-- [ ] Tags — the domain type has `tags` but the `tasks` table has no column,
-      so this needs a migration (ask first)
+- [x] Tags (migration 3, approved): `task_tags(task_id, tag)` with a
+      case-insensitive primary key and cascade on task delete. Add/remove on
+      the task detail page (chips + "Add tag…", Enter adds; rules: trimmed,
+      inner whitespace collapsed, max 32 chars, no commas or control
+      characters, unique per task ignoring case), chips on task rows (first
+      3 + "+N"), and a tag filter row on the project page ("All" + each tag
+      with its task count; filtered tasks show flat since parents may be
+      hidden). Rules live in `devspace-core::normalize_tag` and are enforced
+      again in `TaskRepo::add_tag`.
 - [x] Branch field: click-to-edit on the task detail page (blank clears);
       feeds the branch view and suggested commits
 - [x] Task detail page (`task_detail.rs`, "Open" on a task row): breadcrumb
@@ -393,3 +400,9 @@ remaining gap is visible at a glance.
 - Task detail extras (`refresh_extras`) are computed in the background and
   keyed on (branch, linked repos, mapped commits); a stale result is dropped
   if the key changed while it ran, same generation idea as the commit browser.
+- Migration 3 added `task_tags` (see Tasks). Tags load with their tasks:
+  `TaskRepo::list_for_project` runs one extra query for the whole project
+  (not one per task) and `get` loads a single task's tags. `TaskRepo::insert`
+  saves a task's tags in the same transaction. `update` does not touch tags —
+  use `add_tag`/`remove_tag`. The upgrade path is tested (a database built at
+  migration 2 with existing data gets migration 3 applied cleanly).

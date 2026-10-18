@@ -59,6 +59,8 @@ struct Root {
     /// Repo whose unlink is awaiting a second click because it still has
     /// commit mappings (they are deleted along with it).
     confirm_unlink_repo: Option<devspace_core::RepoId>,
+    /// Project-page filter: show only tasks carrying this tag.
+    tag_filter: Option<String>,
     terminal_open: bool,
 }
 
@@ -166,6 +168,37 @@ fn create_row(theme: &GlassTheme, input: &Entity<TextInput>) -> impl IntoElement
                 .text_xs()
                 .child("Press Enter to create, Esc to cancel"),
         )
+}
+
+/// One chip in the project page's tag filter row.
+fn tag_filter_chip(
+    theme: &GlassTheme,
+    label: String,
+    active: bool,
+    id: gpui::ElementId,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let theme = *theme;
+    div()
+        .id(id)
+        .px(theme.space_3)
+        .py(theme.space_1)
+        .rounded(theme.radius_sm)
+        .border_1()
+        .text_xs()
+        .cursor_pointer()
+        .when(active, |d| {
+            d.border_color(theme.accent)
+                .text_color(theme.accent)
+                .bg(theme.accent.opacity(0.12))
+        })
+        .when(!active, |d| {
+            d.border_color(theme.border_subtle)
+                .text_color(theme.text_secondary)
+                .hover(move |s| s.bg(theme.surface_raised))
+        })
+        .on_click(on_click)
+        .child(label)
 }
 
 fn stat_tile(
@@ -599,6 +632,23 @@ impl Render for Root {
             .cloned();
         let raw_tasks = state.tasks.clone();
         let tasks = flatten_tasks(&state.tasks);
+        // Tag filter: keep only tasks with the tag (any depth), flattened to
+        // one level since their parents may be filtered out. A filter whose
+        // tag no longer exists anywhere is ignored rather than showing nothing.
+        let project_tags = state.project_tags();
+        let active_tag: Option<String> = self.tag_filter.clone().filter(|wanted| {
+            project_tags
+                .iter()
+                .any(|(name, _)| name.to_lowercase() == wanted.to_lowercase())
+        });
+        let tasks: Vec<(Task, usize)> = match &active_tag {
+            Some(tag) => tasks
+                .into_iter()
+                .filter(|(t, _)| t.has_tag(tag))
+                .map(|(t, _)| (t, 0))
+                .collect(),
+            None => tasks,
+        };
         // Per task: (notes, attachments, mapped commits), for row badges.
         let mut task_counts: std::collections::HashMap<TaskId, (usize, usize, usize)> =
             std::collections::HashMap::new();
@@ -910,6 +960,41 @@ impl Render for Root {
                     "Select or create a project"
                 },
             ))
+            .when(!project_tags.is_empty(), |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(theme.space_1)
+                        .child(tag_filter_chip(
+                            &theme,
+                            "All".to_string(),
+                            active_tag.is_none(),
+                            "tag-filter-all".into(),
+                            cx.listener(|this, _, _, cx| {
+                                this.tag_filter = None;
+                                cx.notify();
+                            }),
+                        ))
+                        .children(project_tags.iter().enumerate().map(|(ix, (name, count))| {
+                            let active = active_tag
+                                .as_ref()
+                                .is_some_and(|t| t.to_lowercase() == name.to_lowercase());
+                            let wanted = name.clone();
+                            tag_filter_chip(
+                                &theme,
+                                format!("{name} · {count}"),
+                                active,
+                                ("tag-filter", ix as u64).into(),
+                                cx.listener(move |this, _, _, cx| {
+                                    this.tag_filter = Some(wanted.clone());
+                                    cx.notify();
+                                }),
+                            )
+                        })),
+                )
+            })
             .children(tasks.into_iter().map(|(task, depth)| {
                 let id = task.id;
 
@@ -972,6 +1057,23 @@ impl Render for Root {
                                         .text_xs()
                                         .text_color(theme.text_secondary)
                                         .child(counts.join(" · ")),
+                                )
+                            })
+                            .children(task.tags.iter().take(3).map(|tag| {
+                                div()
+                                    .px(theme.space_2)
+                                    .rounded(theme.radius_sm)
+                                    .bg(theme.accent.opacity(0.12))
+                                    .text_xs()
+                                    .text_color(theme.accent)
+                                    .child(tag.clone())
+                            }))
+                            .when(task.tags.len() > 3, |d| {
+                                d.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.text_secondary)
+                                        .child(format!("+{}", task.tags.len() - 3)),
                                 )
                             }),
                     )
@@ -1477,6 +1579,7 @@ fn main() -> Result<()> {
                         open_history: None,
                         open_task: None,
                         confirm_unlink_repo: None,
+                        tag_filter: None,
                     }
                 })
             },

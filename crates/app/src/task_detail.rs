@@ -52,6 +52,8 @@ pub struct TaskDetail {
     task_id: TaskId,
     tab: Tab,
     new_note_input: Entity<TextInput>,
+    /// "Add tag…" input on the task page; Enter adds the tag.
+    tag_input: Entity<TextInput>,
     /// Copy picked files into the workspace (default) vs link by path.
     copy_files: bool,
     /// Result of the last action: (message, is_error).
@@ -123,6 +125,15 @@ impl TaskDetail {
             }));
         });
 
+        let tag_input = cx.new(|cx| TextInput::new(cx, "Add tag…", theme));
+        let me_for_tags = cx.entity();
+        tag_input.update(cx, |input, _| {
+            input.on_confirm = Some(Box::new(move |tag, _window, cx| {
+                let tag = tag.to_string();
+                me_for_tags.update(cx, |this, cx| this.add_tag(&tag, cx));
+            }));
+        });
+
         // Links/tasks/notes change from elsewhere (commit browser, deletes).
         cx.observe(&state, |this, _, cx| {
             this.refresh_commits(cx);
@@ -136,6 +147,7 @@ impl TaskDetail {
             task_id,
             tab: Tab::Notes,
             new_note_input,
+            tag_input,
             copy_files: true,
             notice: None,
             commit_info: HashMap::new(),
@@ -229,6 +241,69 @@ impl TaskDetail {
         self.notice = None;
         self.editing = None;
         cx.notify();
+    }
+
+    fn add_tag(&mut self, tag: &str, cx: &mut Context<Self>) {
+        if tag.trim().is_empty() {
+            return;
+        }
+        let task = self.task_id;
+        let result = self.state.update(cx, |state, cx| {
+            let r = state.add_task_tag(task, tag);
+            cx.notify();
+            r
+        });
+        self.notice = match result {
+            Ok(true) => None,
+            Ok(false) => Some(("That tag is already on this task".into(), true)),
+            Err(message) => Some((message, true)),
+        };
+        cx.notify();
+    }
+
+    /// The task's tags as removable chips, plus the "Add tag…" input.
+    fn tags_row(&self, task: &devspace_core::Task, cx: &mut Context<Self>) -> AnyElement {
+        let theme = self.theme;
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(theme.space_2)
+            .children(task.tags.iter().enumerate().map(|(ix, tag)| {
+                let name = tag.clone();
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(theme.space_2)
+                    .pl(theme.space_3)
+                    .pr(theme.space_2)
+                    .py(theme.space_1)
+                    .rounded(theme.radius_sm)
+                    .bg(theme.accent.opacity(0.12))
+                    .border_1()
+                    .border_color(theme.accent.opacity(0.4))
+                    .text_sm()
+                    .text_color(theme.accent)
+                    .child(tag.clone())
+                    .child(
+                        div()
+                            .id(("remove-tag", ix as u64))
+                            .text_xs()
+                            .cursor_pointer()
+                            .hover(move |s| s.text_color(theme.danger))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let id = this.task_id;
+                                let name = name.clone();
+                                this.state.update(cx, |state, cx| {
+                                    state.remove_task_tag(id, &name);
+                                    cx.notify();
+                                });
+                            }))
+                            .child("✕"),
+                    )
+            }))
+            .child(div().w(px(180.0)).child(self.tag_input.clone()))
+            .into_any_element()
     }
 
     /// Priority, due date and branch, each editable in place.
@@ -1463,6 +1538,7 @@ impl Render for TaskDetail {
                     ),
             )
             .child(self.details_row(&task, cx))
+            .child(self.tags_row(&task, cx))
             .child(
                 div()
                     .flex()

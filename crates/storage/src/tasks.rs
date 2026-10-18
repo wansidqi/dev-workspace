@@ -1,4 +1,6 @@
-use devspace_core::{ProjectId, Task, TaskId, TaskPriority, TaskStatus};
+use std::collections::HashMap;
+
+use devspace_core::{normalize_tag, ProjectId, Task, TaskId, TaskPriority, TaskStatus};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::StorageError;
@@ -7,7 +9,8 @@ pub struct TaskRepo;
 
 impl TaskRepo {
     pub fn insert(conn: &Connection, task: &Task) -> Result<(), StorageError> {
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO tasks (id, project_id, parent_id, title, status, priority, due_at, branch, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
@@ -23,7 +26,47 @@ impl TaskRepo {
                 task.updated_at,
             ],
         )?;
+        // A task built in memory with tags keeps them (same transaction, so
+        // a bad tag leaves no half-saved task).
+        for tag in &task.tags {
+            Self::add_tag_in(&tx, task.id, tag)?;
+        }
+        tx.commit()?;
         Ok(())
+    }
+
+    /// Adds a tag to a task. The tag is normalized by `devspace-core`
+    /// (trimmed, length and character rules) and is unique per task ignoring
+    /// case. Returns `false` if the task already had it.
+    pub fn add_tag(conn: &Connection, task: TaskId, tag: &str) -> Result<bool, StorageError> {
+        Self::add_tag_in(conn, task, tag)
+    }
+
+    fn add_tag_in(conn: &Connection, task: TaskId, tag: &str) -> Result<bool, StorageError> {
+        let tag = normalize_tag(tag).map_err(|e| StorageError::Domain(e.into()))?;
+        let added = conn.execute(
+            "INSERT OR IGNORE INTO task_tags (task_id, tag) VALUES (?1, ?2)",
+            params![task.0, tag],
+        )?;
+        Ok(added > 0)
+    }
+
+    /// Removes a tag from a task, ignoring case. Returns whether it existed.
+    pub fn remove_tag(conn: &Connection, task: TaskId, tag: &str) -> Result<bool, StorageError> {
+        // The column is COLLATE NOCASE, so this matches any capitalisation.
+        let removed = conn.execute(
+            "DELETE FROM task_tags WHERE task_id = ?1 AND tag = ?2",
+            params![task.0, tag.trim()],
+        )?;
+        Ok(removed > 0)
+    }
+
+    fn tags_for_task(conn: &Connection, task: TaskId) -> Result<Vec<String>, StorageError> {
+        let mut stmt = conn
+            .prepare("SELECT tag FROM task_tags WHERE task_id = ?1 ORDER BY tag COLLATE NOCASE")?;
+        let rows = stmt.query_map(params![task.0], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::from)
     }
 
     pub fn update(conn: &Connection, task: &Task) -> Result<(), StorageError> {
@@ -46,14 +89,21 @@ impl TaskRepo {
     }
 
     pub fn get(conn: &Connection, id: TaskId) -> Result<Option<Task>, StorageError> {
-        conn.query_row(
-            "SELECT id, project_id, parent_id, title, status, priority, due_at, branch, created_at, updated_at
-             FROM tasks WHERE id = ?1",
-            params![id.0],
-            Self::from_row,
-        )
-        .optional()
-        .map_err(StorageError::from)
+        let task = conn
+            .query_row(
+                "SELECT id, project_id, parent_id, title, status, priority, due_at, branch, created_at, updated_at
+                 FROM tasks WHERE id = ?1",
+                params![id.0],
+                Self::from_row,
+            )
+            .optional()?;
+        match task {
+            Some(mut task) => {
+                task.tags = Self::tags_for_task(conn, id)?;
+                Ok(Some(task))
+            }
+            None => Ok(None),
+        }
     }
 
     pub fn list_for_project(
@@ -65,8 +115,27 @@ impl TaskRepo {
              FROM tasks WHERE project_id = ?1 ORDER BY created_at",
         )?;
         let rows = stmt.query_map(params![project_id.0], Self::from_row)?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(StorageError::from)
+        let mut tasks = rows.collect::<Result<Vec<_>, _>>()?;
+
+        // One query for every tag in the project rather than one per task.
+        let mut tags: HashMap<i64, Vec<String>> = HashMap::new();
+        let mut stmt = conn.prepare(
+            "SELECT g.task_id, g.tag FROM task_tags g
+             JOIN tasks t ON t.id = g.task_id
+             WHERE t.project_id = ?1
+             ORDER BY g.tag COLLATE NOCASE",
+        )?;
+        let pairs = stmt.query_map(params![project_id.0], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for pair in pairs {
+            let (task_id, tag) = pair?;
+            tags.entry(task_id).or_default().push(tag);
+        }
+        for task in &mut tasks {
+            task.tags = tags.remove(&task.id.0).unwrap_or_default();
+        }
+        Ok(tasks)
     }
 
     pub fn delete(conn: &Connection, id: TaskId) -> Result<(), StorageError> {
@@ -165,6 +234,92 @@ mod tests {
         assert_eq!(tasks[0].title, "b");
         assert_eq!(tasks[1].title, "a");
         assert_eq!(tasks[1].status, TaskStatus::Done);
+    }
+
+    #[test]
+    fn tags_round_trip_through_insert_get_and_list_sorted_ignoring_case() {
+        let conn = setup();
+        let mut task = Task::new(TaskId(1), ProjectId(1), "t", 0).unwrap();
+        task.add_tag("zeta", 0).unwrap();
+        task.add_tag("Alpha", 0).unwrap();
+        TaskRepo::insert(&conn, &task).unwrap();
+        let plain = Task::new(TaskId(2), ProjectId(1), "plain", 1).unwrap();
+        TaskRepo::insert(&conn, &plain).unwrap();
+
+        let fetched = TaskRepo::get(&conn, TaskId(1)).unwrap().unwrap();
+        assert_eq!(fetched.tags, vec!["Alpha".to_string(), "zeta".to_string()]);
+        assert_eq!(fetched, task, "full round trip including tags");
+
+        let listed = TaskRepo::list_for_project(&conn, ProjectId(1)).unwrap();
+        assert_eq!(
+            listed[0].tags,
+            vec!["Alpha".to_string(), "zeta".to_string()]
+        );
+        assert!(listed[1].tags.is_empty(), "untagged task has no tags");
+    }
+
+    #[test]
+    fn add_tag_is_unique_ignoring_case_and_remove_ignores_case() {
+        let conn = setup();
+        TaskRepo::insert(&conn, &Task::new(TaskId(1), ProjectId(1), "t", 0).unwrap()).unwrap();
+
+        assert!(TaskRepo::add_tag(&conn, TaskId(1), "  Bug ").unwrap());
+        assert!(
+            !TaskRepo::add_tag(&conn, TaskId(1), "BUG").unwrap(),
+            "duplicate"
+        );
+        let tags = TaskRepo::get(&conn, TaskId(1)).unwrap().unwrap().tags;
+        assert_eq!(
+            tags,
+            vec!["Bug".to_string()],
+            "first spelling kept, trimmed"
+        );
+
+        assert!(TaskRepo::remove_tag(&conn, TaskId(1), "bUg").unwrap());
+        assert!(!TaskRepo::remove_tag(&conn, TaskId(1), "bug").unwrap());
+        assert!(TaskRepo::get(&conn, TaskId(1))
+            .unwrap()
+            .unwrap()
+            .tags
+            .is_empty());
+    }
+
+    #[test]
+    fn storage_enforces_the_tag_rules_not_just_the_ui() {
+        let conn = setup();
+        TaskRepo::insert(&conn, &Task::new(TaskId(1), ProjectId(1), "t", 0).unwrap()).unwrap();
+        for bad in ["", "   ", "a,b", "a\u{7}b", &"x".repeat(33)] {
+            assert!(
+                TaskRepo::add_tag(&conn, TaskId(1), bad).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
+        // And a task for a tag that does not exist is refused by the foreign key.
+        assert!(TaskRepo::add_tag(&conn, TaskId(99), "ok").is_err());
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM task_tags", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn deleting_a_task_deletes_its_tags_and_tags_stay_per_project() {
+        let conn = setup();
+        ProjectRepo::insert(&conn, &Project::new(ProjectId(2), "Q", 0).unwrap()).unwrap();
+        TaskRepo::insert(&conn, &Task::new(TaskId(1), ProjectId(1), "a", 0).unwrap()).unwrap();
+        TaskRepo::insert(&conn, &Task::new(TaskId(2), ProjectId(2), "b", 0).unwrap()).unwrap();
+        TaskRepo::add_tag(&conn, TaskId(1), "shared").unwrap();
+        TaskRepo::add_tag(&conn, TaskId(2), "shared").unwrap();
+
+        let p1 = TaskRepo::list_for_project(&conn, ProjectId(1)).unwrap();
+        assert_eq!(p1.len(), 1);
+        assert_eq!(p1[0].tags, vec!["shared".to_string()]);
+
+        TaskRepo::delete(&conn, TaskId(1)).unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM task_tags", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "only the other project's tag remains");
     }
 
     #[test]

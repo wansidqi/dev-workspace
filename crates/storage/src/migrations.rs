@@ -122,6 +122,22 @@ const MIGRATIONS: &[(i64, &str)] = &[
         END;
         "#,
     ),
+    (
+        3,
+        r#"
+        -- Task tags. One row per (task, tag); the primary key makes a tag
+        -- unique per task ignoring case ("Bug" and "bug" are the same tag).
+        -- Deleting a task deletes its tags.
+        CREATE TABLE task_tags (
+            task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            tag     TEXT    NOT NULL COLLATE NOCASE,
+            PRIMARY KEY (task_id, tag)
+        );
+
+        -- "Which tasks have this tag" (the tag filter).
+        CREATE INDEX idx_task_tags_tag ON task_tags(tag);
+        "#,
+    ),
 ];
 
 /// Applies every migration not yet recorded in `schema_migrations`, in a
@@ -168,6 +184,61 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn migration_three_upgrades_a_database_that_already_has_data() {
+        // Build a database exactly as it was at migration 2, with a task in
+        // it, then let `run_migrations` apply what is missing.
+        let mut conn = open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);")
+            .unwrap();
+        for (version, sql) in MIGRATIONS.iter().filter(|(v, _)| *v <= 2) {
+            conn.execute_batch(sql).unwrap();
+            conn.execute(
+                "INSERT INTO schema_migrations (version) VALUES (?1)",
+                [version],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO projects (id, name, archived, created_at, updated_at) VALUES (1, 'P', 0, 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, project_id, title, status, priority, created_at, updated_at)
+             VALUES (1, 1, 'existing', 'todo', 'medium', 0, 0)",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute("INSERT INTO task_tags (task_id, tag) VALUES (1, 'x')", [])
+                .is_err(),
+            "task_tags must not exist before migration 3"
+        );
+
+        run_migrations(&mut conn).unwrap();
+
+        conn.execute("INSERT INTO task_tags (task_id, tag) VALUES (1, 'Bug')", [])
+            .unwrap();
+        assert!(
+            conn.execute("INSERT INTO task_tags (task_id, tag) VALUES (1, 'BUG')", [])
+                .is_err(),
+            "unique ignoring case"
+        );
+        let titles: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE title = 'existing'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(titles, 1, "existing data survives the upgrade");
+        let versions: i64 = conn
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(versions, 3);
     }
 
     #[test]

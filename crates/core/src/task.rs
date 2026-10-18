@@ -37,6 +37,12 @@ pub enum TaskError {
     EmptyTitle,
     #[error("a task cannot be its own parent")]
     SelfParent,
+    #[error("a tag must not be empty")]
+    EmptyTag,
+    #[error("a tag can be at most 32 characters")]
+    TagTooLong,
+    #[error("a tag cannot contain commas or control characters")]
+    InvalidTagChar,
 }
 
 impl Task {
@@ -78,6 +84,62 @@ impl Task {
         self.status = status;
         self.updated_at = now;
     }
+
+    /// Adds a tag (normalized, see [`normalize_tag`]). Tags are unique
+    /// ignoring case and kept sorted that way. Returns `false` if the task
+    /// already had it.
+    pub fn add_tag(&mut self, raw: &str, now: i64) -> Result<bool, TaskError> {
+        let tag = normalize_tag(raw)?;
+        if self.has_tag(&tag) {
+            return Ok(false);
+        }
+        self.tags.push(tag);
+        self.tags.sort_by_key(|t| t.to_lowercase());
+        self.updated_at = now;
+        Ok(true)
+    }
+
+    /// Removes a tag, ignoring case. Returns whether it was present.
+    pub fn remove_tag(&mut self, raw: &str, now: i64) -> bool {
+        let wanted = raw.trim().to_lowercase();
+        let before = self.tags.len();
+        self.tags.retain(|t| t.to_lowercase() != wanted);
+        let removed = self.tags.len() != before;
+        if removed {
+            self.updated_at = now;
+        }
+        removed
+    }
+
+    pub fn has_tag(&self, raw: &str) -> bool {
+        let wanted = raw.trim().to_lowercase();
+        self.tags.iter().any(|t| t.to_lowercase() == wanted)
+    }
+}
+
+/// Longest tag, in characters. Tags are labels, not sentences.
+pub const MAX_TAG_CHARS: usize = 32;
+
+/// Validates and cleans a user-typed tag: surrounding whitespace is dropped
+/// and inner whitespace runs collapse to one space. Rejects empty tags,
+/// tags over [`MAX_TAG_CHARS`], and commas or control characters (commas
+/// would make a comma-separated tag list ambiguous). Case is preserved —
+/// uniqueness ignores it, display keeps what the user wrote.
+pub fn normalize_tag(raw: &str) -> Result<String, TaskError> {
+    if raw
+        .chars()
+        .any(|c| c == ',' || c.is_control() && !c.is_whitespace())
+    {
+        return Err(TaskError::InvalidTagChar);
+    }
+    let tag = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if tag.is_empty() {
+        return Err(TaskError::EmptyTag);
+    }
+    if tag.chars().count() > MAX_TAG_CHARS {
+        return Err(TaskError::TagTooLong);
+    }
+    Ok(tag)
 }
 
 /// Given a flat list of tasks, returns the ids of every descendant of
@@ -113,6 +175,42 @@ mod tests {
             Task::new(TaskId(1), ProjectId(1), "", 0).unwrap_err(),
             TaskError::EmptyTitle
         );
+    }
+
+    #[test]
+    fn tags_are_normalized_unique_ignoring_case_and_sorted() {
+        let mut t = Task::new(TaskId(1), ProjectId(1), "t", 0).unwrap();
+        assert_eq!(t.add_tag("  Backend  ", 5), Ok(true));
+        assert_eq!(t.add_tag("api   v2", 6), Ok(true));
+        assert_eq!(t.add_tag("BACKEND", 7), Ok(false), "same tag, other case");
+        assert_eq!(t.tags, vec!["api v2".to_string(), "Backend".to_string()]);
+        assert_eq!(t.updated_at, 6, "a rejected duplicate changes nothing");
+        assert!(t.has_tag("backend"));
+    }
+
+    #[test]
+    fn invalid_tags_are_rejected() {
+        let mut t = Task::new(TaskId(1), ProjectId(1), "t", 0).unwrap();
+        assert_eq!(t.add_tag("", 0), Err(TaskError::EmptyTag));
+        assert_eq!(t.add_tag("   ", 0), Err(TaskError::EmptyTag));
+        assert_eq!(t.add_tag("a,b", 0), Err(TaskError::InvalidTagChar));
+        assert_eq!(t.add_tag("a\u{0}b", 0), Err(TaskError::InvalidTagChar));
+        let long = "x".repeat(MAX_TAG_CHARS + 1);
+        assert_eq!(t.add_tag(&long, 0), Err(TaskError::TagTooLong));
+        assert!(t.add_tag(&"x".repeat(MAX_TAG_CHARS), 0).is_ok());
+        // Tabs and newlines are whitespace: collapsed, not rejected.
+        assert_eq!(normalize_tag("a\tb\nc").unwrap(), "a b c");
+        assert!(t.tags.len() == 1);
+    }
+
+    #[test]
+    fn remove_tag_ignores_case_and_reports_presence() {
+        let mut t = Task::new(TaskId(1), ProjectId(1), "t", 0).unwrap();
+        t.add_tag("Bug", 1).unwrap();
+        assert!(t.remove_tag(" bug ", 2));
+        assert!(!t.remove_tag("bug", 3));
+        assert!(t.tags.is_empty());
+        assert_eq!(t.updated_at, 2);
     }
 
     #[test]

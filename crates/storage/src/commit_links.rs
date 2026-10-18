@@ -452,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn migration_two_applies_on_top_of_an_existing_v1_database() {
+    fn all_migrations_apply_on_a_database_with_a_migrations_table() {
         // A database created before migration 2 must upgrade cleanly.
         let mut conn = open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);")
@@ -461,6 +461,6 @@ mod tests {
         let versions: i64 = conn
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(versions, 2);
+        assert_eq!(versions, 3);
     }
 }
