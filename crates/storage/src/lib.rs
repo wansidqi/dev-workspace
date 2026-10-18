@@ -1,6 +1,7 @@
 //! SQLite-backed storage: connection setup, migrations and the plain-file
 //! layout under the OS data directory. No GPUI imports here.
 
+mod attachments;
 mod commit_links;
 mod migrations;
 mod notes;
@@ -9,6 +10,7 @@ mod projects;
 mod repos;
 mod tasks;
 
+pub use attachments::AttachmentRepo;
 pub use commit_links::CommitLinkRepo;
 pub use migrations::run_migrations;
 pub use notes::NoteRepo;

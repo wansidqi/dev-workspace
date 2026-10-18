@@ -3,16 +3,55 @@
 //! themselves (CLAUDE.md GPUI guidelines).
 
 use devspace_core::{
-    CommitLink, CommitLinkId, CommitLinkStatus, Note, NoteId, NoteKind, Project, ProjectId, Repo,
-    RepoId, Task, TaskId, TaskStatus,
+    descendants_of, sanitize_file_name, Attachment, AttachmentId, CommitLink, CommitLinkId,
+    CommitLinkStatus, Note, NoteId, NoteKind, Project, ProjectId, Repo, RepoId, Task, TaskId,
+    TaskPriority, TaskStatus,
 };
-use devspace_storage::{CommitLinkRepo, NoteRepo, ProjectRepo, RepoRepo, TaskRepo, WorkspacePaths};
+use devspace_storage::{
+    AttachmentRepo, CommitLinkRepo, NoteRepo, ProjectRepo, RepoRepo, TaskRepo, WorkspacePaths,
+};
 use rusqlite::Connection;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// How many commits the dashboard's "recent commits" section shows. Paged
 /// rather than loading full history (CLAUDE.md performance rule).
 const RECENT_COMMITS_LIMIT: usize = 5;
+
+/// A prepared attachment: the row to insert and, for copied files, the
+/// source/destination pair. Splitting preparation from execution lets the
+/// (possibly large) file copy run on a background task instead of the UI
+/// thread (CLAUDE.md GPUI guidelines).
+pub struct AttachmentJob {
+    attachment: Attachment,
+    copy: Option<(std::path::PathBuf, std::path::PathBuf)>,
+}
+
+impl AttachmentJob {
+    /// Streams the file into the workspace. Never overwrites: the
+    /// destination name carries the attachment id, so it can't already
+    /// exist; if it does something is wrong and we stop. A partial copy is
+    /// removed on failure.
+    pub fn run(&self) -> std::io::Result<()> {
+        let Some((from, to)) = &self.copy else {
+            return Ok(());
+        };
+        let mut input = std::fs::File::open(from)?;
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(to)?;
+        if let Err(e) = std::io::copy(&mut input, &mut output) {
+            drop(output);
+            let _ = std::fs::remove_file(to);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    pub fn name(&self) -> &str {
+        &self.attachment.name
+    }
+}
 
 pub struct AppState {
     conn: Connection,
@@ -34,6 +73,9 @@ pub struct AppState {
     /// the commit browser's badges and the unassigned filter.
     pub commit_links: Vec<CommitLink>,
     next_commit_link_id: i64,
+    /// Attachments of the selected project (project-level and per-task).
+    pub attachments: Vec<Attachment>,
+    next_attachment_id: i64,
     next_project_id: i64,
     next_task_id: i64,
     next_note_id: i64,
@@ -61,6 +103,8 @@ impl AppState {
             unreadable_repos: Vec::new(),
             commit_links: Vec::new(),
             next_commit_link_id: 1,
+            attachments: Vec::new(),
+            next_attachment_id: 1,
             next_project_id: 1,
             next_task_id: 1,
             next_note_id: 1,
@@ -119,6 +163,7 @@ impl AppState {
         }
         self.reload_recent_commits();
         self.reload_commit_links();
+        self.reload_attachments();
     }
 
     fn reload_commit_links(&mut self) {
@@ -162,6 +207,146 @@ impl AppState {
             CommitLinkRepo::insert_skipping_existing(&self.conn, &links).map_err(|e| e.to_string());
         self.reload_commit_links();
         created
+    }
+
+    fn reload_attachments(&mut self) {
+        let Some(project) = self.selected_project else {
+            self.attachments.clear();
+            return;
+        };
+        self.attachments =
+            AttachmentRepo::list_for_project(&self.conn, project).unwrap_or_default();
+        if let Some(max) = self.attachments.iter().map(|a| a.id.0).max() {
+            self.next_attachment_id = self.next_attachment_id.max(max + 1);
+        }
+    }
+
+    pub fn attachments_for_task(&self, task: TaskId) -> Vec<Attachment> {
+        self.attachments
+            .iter()
+            .filter(|a| a.task_id == Some(task))
+            .cloned()
+            .collect()
+    }
+
+    /// Step one of attaching a file to a task/subtask (or the project when
+    /// `task` is `None`): validates the source and allocates the stored
+    /// name. `copy` copies the file into the project's attachments folder;
+    /// otherwise the attachment links to the original path. Run the returned
+    /// job (off the UI thread), then pass it to [`Self::finish_attachment`].
+    pub fn prepare_attachment(
+        &mut self,
+        task: Option<TaskId>,
+        source: &std::path::Path,
+        copy: bool,
+    ) -> Result<AttachmentJob, String> {
+        let project = self.selected_project.ok_or("No project selected")?;
+        if let Some(task_id) = task {
+            if !self.tasks.iter().any(|t| t.id == task_id) {
+                return Err("Task not found in this project".into());
+            }
+        }
+        if !source.is_file() {
+            return Err("That is not a file".into());
+        }
+        let name = source
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .ok_or("File has no name")?;
+        let id = AttachmentId(Self::next_id(
+            &mut self.next_attachment_id,
+            self.attachments.iter().map(|a| a.id.0).max().unwrap_or(0),
+        ));
+
+        let (stored_path, job_copy) = if copy {
+            self.paths
+                .ensure_dirs(Some(project))
+                .map_err(|e| e.to_string())?;
+            // The id prefix keeps two files with the same name apart.
+            let stored = format!("{}-{}", id.0, sanitize_file_name(&name));
+            let dest = self.paths.attachments_dir(project).join(&stored);
+            (stored, Some((source.to_path_buf(), dest)))
+        } else {
+            (source.to_string_lossy().to_string(), None)
+        };
+        let mut attachment = Attachment::new(id, project, name, stored_path, !copy, now())
+            .map_err(|e| e.to_string())?;
+        attachment.task_id = task;
+        Ok(AttachmentJob {
+            attachment,
+            copy: job_copy,
+        })
+    }
+
+    /// Step two: records the attachment once its file (if any) is in place.
+    /// If the row can't be saved, the copied file is removed again.
+    pub fn finish_attachment(&mut self, job: AttachmentJob) -> Result<(), String> {
+        match AttachmentRepo::insert(&self.conn, &job.attachment) {
+            Ok(()) => {
+                self.attachments.push(job.attachment);
+                Ok(())
+            }
+            Err(e) => {
+                if let Some((_, dest)) = &job.copy {
+                    let _ = std::fs::remove_file(dest);
+                }
+                Err(e.to_string())
+            }
+        }
+    }
+
+    /// The file an attachment points at, or `None` if it can't be trusted.
+    /// Copied attachments must resolve (symlinks included) to somewhere
+    /// inside the project's attachments folder; linked ones are the user's
+    /// own path and are returned as stored.
+    pub fn attachment_path(&self, attachment: &Attachment) -> Option<std::path::PathBuf> {
+        if attachment.is_linked {
+            return Some(std::path::PathBuf::from(&attachment.file_path));
+        }
+        let base = std::fs::canonicalize(self.paths.attachments_dir(attachment.project_id)).ok()?;
+        let full = std::fs::canonicalize(base.join(&attachment.file_path)).ok()?;
+        full.starts_with(&base).then_some(full)
+    }
+
+    /// Removes an attachment. A copied file is deleted from the workspace
+    /// (only if it verifiably lives there); a linked file is never touched.
+    pub fn remove_attachment(&mut self, id: AttachmentId) {
+        let Some(attachment) = self.attachments.iter().find(|a| a.id == id).cloned() else {
+            return;
+        };
+        if !attachment.is_linked {
+            if let Some(path) = self.attachment_path(&attachment) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        if AttachmentRepo::delete(&self.conn, id).is_ok() {
+            self.attachments.retain(|a| a.id != id);
+        }
+    }
+
+    /// Deletes the files that belong to `tasks` (copied attachments and note
+    /// files). The database cascades their rows when a task is deleted but
+    /// knows nothing about the files, which would otherwise be orphaned.
+    fn remove_task_files(&self, tasks: &[TaskId]) {
+        let Some(project) = self.selected_project else {
+            return;
+        };
+        for attachment in self
+            .attachments
+            .iter()
+            .filter(|a| !a.is_linked && a.task_id.is_some_and(|t| tasks.contains(&t)))
+        {
+            if let Some(path) = self.attachment_path(attachment) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        for note in self
+            .notes
+            .iter()
+            .filter(|n| n.task_id.is_some_and(|t| tasks.contains(&t)))
+        {
+            let _ = std::fs::remove_file(self.paths.notes_dir(project).join(&note.file_path));
+        }
     }
 
     pub fn unlink_commit(&mut self, id: CommitLinkId) {
@@ -238,27 +423,54 @@ impl AppState {
     /// Creates a project-level markdown note: writes an empty file under
     /// `<project>/notes/` and inserts the db row pointing at it.
     pub fn create_note(&mut self, title: &str) {
-        let Some(project_id) = self.selected_project else {
-            return;
-        };
+        self.create_note_for(None, title);
+    }
+
+    /// Creates a markdown note on the project (`task == None`) or on a task
+    /// or subtask at any depth. The task must belong to the selected
+    /// project. Returns the new note's id.
+    pub fn create_note_for(&mut self, task: Option<TaskId>, title: &str) -> Option<NoteId> {
+        let project_id = self.selected_project?;
+        if let Some(task_id) = task {
+            if !self.tasks.iter().any(|t| t.id == task_id) {
+                return None;
+            }
+        }
         let id = NoteId(Self::next_id(
             &mut self.next_note_id,
             self.notes.iter().map(|n| n.id.0).max().unwrap_or(0),
         ));
         let file_name = format!("{}.md", id.0);
-        let Ok(note) = Note::new(id, project_id, NoteKind::Note, title, &file_name, now()) else {
-            return;
-        };
-        if self.paths.ensure_dirs(Some(project_id)).is_err() {
-            return;
-        }
+        let mut note = Note::new(id, project_id, NoteKind::Note, title, &file_name, now()).ok()?;
+        note.task_id = task;
+        self.paths.ensure_dirs(Some(project_id)).ok()?;
         let full_path = self.paths.notes_dir(project_id).join(&file_name);
-        if std::fs::write(&full_path, "").is_err() {
-            return;
+        std::fs::write(&full_path, "").ok()?;
+        if NoteRepo::insert(&self.conn, &note).is_err() {
+            let _ = std::fs::remove_file(&full_path);
+            return None;
         }
-        if NoteRepo::insert(&self.conn, &note).is_ok() {
-            self.select_project(project_id);
-        }
+        // Newest first, matching how `select_project` orders them.
+        self.notes.insert(0, note);
+        Some(id)
+    }
+
+    /// Notes attached to one task or subtask, newest first.
+    pub fn notes_for_task(&self, task: TaskId) -> Vec<Note> {
+        self.notes
+            .iter()
+            .filter(|n| n.task_id == Some(task))
+            .cloned()
+            .collect()
+    }
+
+    /// Project-level notes only (not those belonging to a task).
+    pub fn project_notes(&self) -> Vec<Note> {
+        self.notes
+            .iter()
+            .filter(|n| n.task_id.is_none())
+            .cloned()
+            .collect()
     }
 
     pub fn rename_note(&mut self, id: NoteId, title: &str) {
@@ -336,6 +548,39 @@ impl AppState {
         let _ = TaskRepo::update(&self.conn, task);
     }
 
+    /// Cycles Low -> Medium -> High -> Urgent -> Low.
+    pub fn cycle_task_priority(&mut self, id: TaskId) {
+        let next = |p| match p {
+            TaskPriority::Low => TaskPriority::Medium,
+            TaskPriority::Medium => TaskPriority::High,
+            TaskPriority::High => TaskPriority::Urgent,
+            TaskPriority::Urgent => TaskPriority::Low,
+        };
+        self.update_task(id, |task| task.priority = next(task.priority));
+    }
+
+    /// Sets or clears (`None`) a task's due date (unix seconds, UTC midnight).
+    pub fn set_task_due(&mut self, id: TaskId, due_at: Option<i64>) {
+        self.update_task(id, |task| task.due_at = due_at);
+    }
+
+    /// Sets or clears the git branch a task is worked on. Blank clears it.
+    pub fn set_task_branch(&mut self, id: TaskId, branch: Option<String>) {
+        let branch = branch
+            .map(|b| b.trim().to_string())
+            .filter(|b| !b.is_empty());
+        self.update_task(id, |task| task.branch = branch);
+    }
+
+    fn update_task(&mut self, id: TaskId, change: impl FnOnce(&mut Task)) {
+        let Some(task) = self.tasks.iter_mut().find(|t| t.id == id) else {
+            return;
+        };
+        change(task);
+        task.updated_at = now();
+        let _ = TaskRepo::update(&self.conn, task);
+    }
+
     pub fn rename_project(&mut self, id: ProjectId, name: &str) {
         let Some(project) = self.projects.iter_mut().find(|p| p.id == id) else {
             return;
@@ -373,13 +618,19 @@ impl AppState {
     }
 
     pub fn delete_task(&mut self, id: TaskId) {
+        let mut doomed = descendants_of(&self.tasks, id);
+        doomed.push(id);
         if TaskRepo::delete(&self.conn, id).is_ok() {
             // The database cascades to every descendant (and their commit
-            // links); reload rather than patching only direct children.
+            // links, notes and attachment rows). Remove the files those rows
+            // pointed at, then reload rather than patching in memory.
+            self.remove_task_files(&doomed);
             if let Some(project) = self.selected_project {
                 self.tasks = TaskRepo::list_for_project(&self.conn, project).unwrap_or_default();
+                self.notes = NoteRepo::list_for_project(&self.conn, project).unwrap_or_default();
             }
             self.reload_commit_links();
+            self.reload_attachments();
         }
     }
 
@@ -411,5 +662,247 @@ impl AppState {
             .map(|repo| std::path::PathBuf::from(&repo.path))
             .or_else(dirs::home_dir)
             .unwrap_or_else(|| self.paths.root().to_path_buf())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use devspace_storage::{open_in_memory, run_migrations};
+    use std::path::{Path, PathBuf};
+
+    /// A scratch workspace under the OS temp dir, removed on drop. (No
+    /// `tempfile` dependency in this crate; this is all the tests need.)
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new() -> Self {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let dir = std::env::temp_dir().join(format!(
+                "devspace-state-test-{}-{nanos}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// State with project "P" selected and a root task "A" plus subtask "B"
+    /// under it, with its data under a scratch directory.
+    fn setup(scratch: &Scratch) -> (AppState, TaskId, TaskId) {
+        let mut conn = open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        let mut state = AppState::new(conn, WorkspacePaths::new(scratch.path().join("data")));
+        state.create_project("P");
+        state.create_task("A");
+        let a = state.tasks[0].id;
+        let b = state.create_subtask(a, "B").unwrap();
+        (state, a, b)
+    }
+
+    fn source_file(scratch: &Scratch, name: &str, content: &str) -> PathBuf {
+        let path = scratch.path().join(name);
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    fn attach(state: &mut AppState, task: TaskId, source: &Path, copy: bool) -> AttachmentId {
+        let job = state.prepare_attachment(Some(task), source, copy).unwrap();
+        job.run().unwrap();
+        let id = job.attachment.id;
+        state.finish_attachment(job).unwrap();
+        id
+    }
+
+    #[test]
+    fn copied_attachment_lands_in_the_project_folder_and_is_removed_with_its_row() {
+        let scratch = Scratch::new();
+        let (mut state, _a, b) = setup(&scratch);
+        let source = source_file(&scratch, "spec.pdf", "hello");
+
+        let id = attach(&mut state, b, &source, true);
+        let attachment = state.attachments_for_task(b).pop().unwrap();
+        assert!(!attachment.is_linked);
+        let stored = state.attachment_path(&attachment).unwrap();
+        assert!(stored.starts_with(
+            std::fs::canonicalize(state.paths.attachments_dir(attachment.project_id)).unwrap()
+        ));
+        assert_eq!(std::fs::read_to_string(&stored).unwrap(), "hello");
+
+        state.remove_attachment(id);
+        assert!(!stored.exists(), "copied file removed from the workspace");
+        assert!(source.exists(), "the original is never touched");
+        assert!(state.attachments_for_task(b).is_empty());
+    }
+
+    #[test]
+    fn same_file_name_attached_twice_does_not_collide() {
+        let scratch = Scratch::new();
+        let (mut state, _a, b) = setup(&scratch);
+        let one = source_file(&scratch, "notes.txt", "one");
+        attach(&mut state, b, &one, true);
+        attach(&mut state, b, &one, true);
+        let paths: Vec<_> = state
+            .attachments_for_task(b)
+            .iter()
+            .map(|a| a.file_path.clone())
+            .collect();
+        assert_eq!(paths.len(), 2);
+        assert_ne!(paths[0], paths[1]);
+    }
+
+    #[test]
+    fn linked_attachment_keeps_the_path_and_never_deletes_the_original() {
+        let scratch = Scratch::new();
+        let (mut state, _a, b) = setup(&scratch);
+        let source = source_file(&scratch, "design.png", "png");
+        let id = attach(&mut state, b, &source, false);
+
+        let attachment = state.attachments_for_task(b).pop().unwrap();
+        assert!(attachment.is_linked);
+        assert_eq!(state.attachment_path(&attachment).unwrap(), source);
+
+        state.remove_attachment(id);
+        assert!(source.exists());
+        assert!(state.attachments.is_empty());
+    }
+
+    #[test]
+    fn a_tampered_copied_path_cannot_escape_the_attachments_folder() {
+        let scratch = Scratch::new();
+        let (mut state, _a, b) = setup(&scratch);
+        let secret = source_file(&scratch, "secret.txt", "top secret");
+        attach(&mut state, b, &secret, true);
+        let mut evil = state.attachments_for_task(b).pop().unwrap();
+        // As if the db row had been edited by hand.
+        // attachments/ -> projects/<id> -> projects -> data -> scratch root,
+        // where `secret.txt` really exists, so only the containment check
+        // (not a missing file) can reject it.
+        evil.file_path = "../../../../secret.txt".into();
+        assert!(state
+            .paths
+            .attachments_dir(evil.project_id)
+            .join(&evil.file_path)
+            .exists());
+        assert!(state.attachment_path(&evil).is_none());
+        // And removing it must not delete the file it pointed at.
+        state.attachments.push(evil.clone());
+        state.remove_attachment(evil.id);
+        assert!(secret.exists());
+    }
+
+    #[test]
+    fn directories_and_missing_files_are_rejected() {
+        let scratch = Scratch::new();
+        let (mut state, _a, b) = setup(&scratch);
+        assert!(state
+            .prepare_attachment(Some(b), scratch.path(), true)
+            .is_err());
+        let missing = scratch.path().join("nope.txt");
+        assert!(state.prepare_attachment(Some(b), &missing, true).is_err());
+        assert!(state
+            .prepare_attachment(
+                Some(TaskId(9999)),
+                &source_file(&scratch, "x.txt", "x"),
+                true
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn notes_attach_to_tasks_at_any_depth_and_stay_out_of_the_project_list() {
+        let scratch = Scratch::new();
+        let (mut state, a, b) = setup(&scratch);
+        state.create_note("project note");
+        let on_a = state.create_note_for(Some(a), "on A").unwrap();
+        let on_b = state.create_note_for(Some(b), "on B").unwrap();
+
+        assert_eq!(state.project_notes().len(), 1);
+        assert_eq!(state.notes_for_task(a).len(), 1);
+        assert_eq!(state.notes_for_task(a)[0].id, on_a);
+        assert_eq!(state.notes_for_task(b)[0].id, on_b);
+        // Notes are real files the editor can read back.
+        assert_eq!(state.read_note_content(on_b).as_deref(), Some(""));
+        // A task that is not in the selected project is refused.
+        assert!(state.create_note_for(Some(TaskId(9999)), "ghost").is_none());
+    }
+
+    #[test]
+    fn priority_due_date_and_branch_persist_and_can_be_cleared() {
+        let scratch = Scratch::new();
+        let (mut state, _a, b) = setup(&scratch);
+        let project = state.selected_project.unwrap();
+        let reload = |state: &mut AppState| {
+            state.select_project(project);
+            state.tasks.iter().find(|t| t.id == b).cloned().unwrap()
+        };
+
+        state.cycle_task_priority(b);
+        state.set_task_due(b, Some(1_793_318_400));
+        state.set_task_branch(b, Some("  feature/login  ".into()));
+        let task = reload(&mut state);
+        assert_eq!(task.priority, TaskPriority::High, "Medium -> High");
+        assert_eq!(task.due_at, Some(1_793_318_400));
+        assert_eq!(task.branch.as_deref(), Some("feature/login"), "trimmed");
+
+        state.set_task_due(b, None);
+        state.set_task_branch(b, Some("   ".into()));
+        let task = reload(&mut state);
+        assert_eq!(task.due_at, None);
+        assert_eq!(task.branch, None, "blank branch clears it");
+
+        for _ in 0..3 {
+            state.cycle_task_priority(b);
+        }
+        assert_eq!(
+            reload(&mut state).priority,
+            TaskPriority::Medium,
+            "full cycle"
+        );
+    }
+
+    #[test]
+    fn deleting_a_task_removes_its_and_its_subtasks_files() {
+        let scratch = Scratch::new();
+        let (mut state, a, b) = setup(&scratch);
+        let note = state.create_note_for(Some(b), "deep note").unwrap();
+        let project = state.selected_project.unwrap();
+        let note_file = state
+            .paths
+            .notes_dir(project)
+            .join(&state.notes.iter().find(|n| n.id == note).unwrap().file_path);
+        let source = source_file(&scratch, "spec.pdf", "pdf");
+        let id = attach(&mut state, b, &source, true);
+        let attachment = state
+            .attachments
+            .iter()
+            .find(|x| x.id == id)
+            .cloned()
+            .unwrap();
+        let stored = state.attachment_path(&attachment).unwrap();
+        assert!(note_file.exists() && stored.exists());
+
+        // Delete the *parent*: the subtask's files must go too.
+        state.delete_task(a);
+
+        assert!(!note_file.exists(), "subtask note file removed");
+        assert!(!stored.exists(), "subtask attachment file removed");
+        assert!(state.notes.is_empty());
+        assert!(state.attachments.is_empty());
+        assert!(state.tasks.is_empty());
+        assert!(source.exists(), "originals are never touched");
     }
 }

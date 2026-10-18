@@ -53,6 +53,44 @@ pub fn repo_root(path: &std::path::Path) -> Option<std::path::PathBuf> {
     repo.workdir().map(|p| p.to_path_buf())
 }
 
+/// Looks up specific commits by `(repo, hash)` — what a task's linked
+/// commits need, since links store only the identity and the message, author
+/// and date are read from git at display time (CLAUDE.md). A commit that
+/// can't be found (rebased or squashed away, repo moved) maps to `None` so
+/// the UI can warn instead of showing stale data.
+pub fn lookup_commits(
+    repos: &[Repo],
+    keys: &[(RepoId, String)],
+) -> Vec<((RepoId, String), Option<RepoCommit>)> {
+    let mut opened: std::collections::HashMap<RepoId, Option<Repository>> =
+        std::collections::HashMap::new();
+    keys.iter()
+        .map(|(repo_id, hash)| {
+            let found = repos.iter().find(|r| r.id == *repo_id).and_then(|repo| {
+                let git = opened
+                    .entry(*repo_id)
+                    .or_insert_with(|| Repository::open(&repo.path).ok())
+                    .as_ref()?;
+                let oid = git2::Oid::from_str(hash).ok()?;
+                let commit = git.find_commit(oid).ok()?;
+                let entry = RepoCommit {
+                    repo_id: repo.id,
+                    repo_name: repo.name.clone(),
+                    commit: CommitInfo {
+                        hash: commit.id().to_string(),
+                        patch_id: commit.tree_id().to_string(),
+                        summary: commit.summary().unwrap_or("").to_string(),
+                        author: commit.author().name().unwrap_or("").to_string(),
+                        time: commit.time().seconds(),
+                    },
+                };
+                Some(entry)
+            });
+            ((*repo_id, hash.clone()), found)
+        })
+        .collect()
+}
+
 /// A commit tagged with the linked repo it came from. A hash is only unique
 /// within one repo, so `(repo_id, commit.hash)` is the commit's identity
 /// (CLAUDE.md storage rules).
@@ -198,22 +236,223 @@ pub fn search_history(
     page
 }
 
-/// Returns the commits in `repo` whose message or author mentions a task
-/// id or branch name fragment — used to surface "suggested commits" for a
+/// True when `c` can be part of an identifier-like run. Task references
+/// only care about alphanumerics and `_`; branch names also contain `-` and
+/// `/`, so those count as part of a longer name there.
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+fn is_branch_char(c: char) -> bool {
+    is_word_char(c) || c == '-' || c == '/'
+}
+
+/// Case-insensitive search for `needle` in `haystack` that only counts a hit
+/// not glued to a longer identifier run on either side, so `#4` never
+/// matches inside `#42` and branch `login` never matches `relogin`. Works on
+/// lowercased copies of both so non-ASCII text can't split a char boundary.
+fn contains_token(haystack: &str, needle: &str, is_ident: fn(char) -> bool) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let hay = haystack.to_lowercase();
+    let needle = needle.to_lowercase();
+    hay.match_indices(&needle).any(|(i, m)| {
+        let before = hay[..i].chars().next_back();
+        let after = hay[i + m.len()..].chars().next();
+        !before.is_some_and(is_ident) && !after.is_some_and(is_ident)
+    })
+}
+
+/// Whether a commit summary refers to the task (`#<id>`) or, when given a
+/// non-blank branch name, mentions that branch, both on token boundaries.
+fn summary_mentions_task(summary: &str, task_id: TaskId, branch: Option<&str>) -> bool {
+    contains_token(summary, &format!("#{}", task_id.0), is_word_char)
+        || branch
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+            .is_some_and(|b| contains_token(summary, b, is_branch_char))
+}
+
+/// Returns the commits whose summary mentions the task id (`#<id>`) or
+/// branch name as a whole token — used to surface "suggested commits" for a
 /// task that hasn't had anything linked yet.
 pub fn suggest_commits_for_task(
     commits: &[CommitInfo],
     task_id: TaskId,
     branch: Option<&str>,
 ) -> Vec<CommitInfo> {
-    let id_fragment = format!("#{}", task_id.0);
     commits
         .iter()
-        .filter(|c| {
-            c.summary.contains(&id_fragment) || branch.is_some_and(|b| c.summary.contains(b))
-        })
+        .filter(|c| summary_mentions_task(&c.summary, task_id, branch))
         .cloned()
         .collect()
+}
+
+/// Suggests commits across a project's repos that probably belong to a task
+/// with nothing linked yet: the summary mentions `#<task_id>` or the task's
+/// branch name. Only the newest `scan_limit` commits of each repo are
+/// examined (never unbounded history), commits in `already_linked` are
+/// skipped, and the result is newest first, at most `max_results`.
+pub fn suggested_for_task(
+    repos: &[Repo],
+    task_id: TaskId,
+    branch: Option<&str>,
+    already_linked: &std::collections::HashSet<(RepoId, String)>,
+    scan_limit: usize,
+    max_results: usize,
+) -> Vec<RepoCommit> {
+    if max_results == 0 || scan_limit == 0 {
+        return Vec::new();
+    }
+    let mut found = Vec::new();
+    for repo in repos {
+        // Per repo, so one busy repo can't use up another's scan budget.
+        let page = merged_history(std::slice::from_ref(repo), scan_limit, None);
+        found.extend(page.commits.into_iter().filter(|c| {
+            !already_linked.contains(&(c.repo_id, c.commit.hash.clone()))
+                && summary_mentions_task(&c.commit.summary, task_id, branch)
+        }));
+    }
+    found.sort_by_key(sort_key);
+    found.truncate(max_results);
+    found
+}
+
+/// Commits on a task's branch that are not in the target branch.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BranchView {
+    /// False when the branch exists neither locally nor as `origin/<branch>`
+    /// (or its name is unusable). Normal for a task whose branch was never
+    /// created, so it is a state, not an error.
+    pub branch_found: bool,
+    /// The target actually compared against; `None` when none could be
+    /// resolved and the branch's commits are shown unfiltered.
+    pub target: Option<String>,
+    /// Newest first.
+    pub commits: Vec<CommitInfo>,
+    /// More commits existed beyond `limit`.
+    pub truncated: bool,
+}
+
+/// Branch and target names are user-entered; refuse anything git would read
+/// as an option or that carries whitespace/control characters.
+fn is_safe_ref_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('-')
+        && !name.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+fn commit_oid_of(git: &Repository, spec: &str) -> Option<git2::Oid> {
+    let obj = git.revparse_single(spec).ok()?;
+    Some(obj.peel_to_commit().ok()?.id())
+}
+
+fn resolve_branch(git: &Repository, branch: &str) -> Option<git2::Oid> {
+    let local = git
+        .find_branch(branch, git2::BranchType::Local)
+        .ok()
+        .and_then(|b| b.get().peel_to_commit().ok());
+    local
+        .or_else(|| {
+            git.find_reference(&format!("refs/remotes/origin/{branch}"))
+                .ok()
+                .and_then(|r| r.peel_to_commit().ok())
+        })
+        .map(|c| c.id())
+}
+
+fn default_target_in(git: &Repository) -> Option<String> {
+    if let Some(name) = git
+        .find_reference("refs/remotes/origin/HEAD")
+        .ok()
+        .and_then(|r| r.symbolic_target().map(str::to_owned))
+        .and_then(|t| t.strip_prefix("refs/remotes/").map(str::to_owned))
+    {
+        if commit_oid_of(git, &name).is_some() {
+            return Some(name);
+        }
+    }
+    for base in ["main", "master", "develop"] {
+        if git.find_branch(base, git2::BranchType::Local).is_ok() {
+            return Some(base.to_owned());
+        }
+        let remote = format!("origin/{base}");
+        if git.find_branch(&remote, git2::BranchType::Remote).is_ok() {
+            return Some(remote);
+        }
+    }
+    None
+}
+
+/// The branch tasks are normally merged into: the symbolic target of
+/// `origin/HEAD`, else `main`, `master` or `develop` (local first, then
+/// `origin/`). Returned as a name `revparse_single` accepts; `None` if the
+/// repo can't be opened or has none of them.
+pub fn default_target_branch(repo_path: &std::path::Path) -> Option<String> {
+    default_target_in(&Repository::open(repo_path).ok()?)
+}
+
+/// Commits reachable from `branch` but not from the target (`target..branch`),
+/// newest first, at most `limit`. `target: None` uses
+/// [`default_target_branch`]; when no target resolves (including an explicit
+/// one that doesn't exist or has an unsafe name) the branch's commits are
+/// returned unfiltered with `target: None`. An unsafe or missing branch name
+/// yields `branch_found: false` rather than an error. Git2 only, no shelling
+/// out.
+pub fn branch_only_commits(
+    repo: &Repo,
+    branch: &str,
+    target: Option<&str>,
+    limit: usize,
+) -> Result<BranchView, GitError> {
+    let git = Repository::open(&repo.path)?;
+    let branch = branch.trim();
+    let tip = if is_safe_ref_name(branch) {
+        resolve_branch(&git, branch)
+    } else {
+        None
+    };
+    let Some(tip) = tip else {
+        return Ok(BranchView::default());
+    };
+
+    let target_name = match target.map(str::trim) {
+        Some(t) if is_safe_ref_name(t) => Some(t.to_owned()),
+        Some(_) => None,
+        None => default_target_in(&git),
+    };
+    let resolved = target_name.and_then(|name| commit_oid_of(&git, &name).map(|oid| (name, oid)));
+
+    let mut walk = git.revwalk()?;
+    walk.set_sorting(git2::Sort::TIME)?;
+    walk.push(tip)?;
+    if let Some((_, oid)) = &resolved {
+        walk.hide(*oid)?;
+    }
+
+    let mut commits = Vec::new();
+    let mut truncated = false;
+    for oid in walk {
+        if commits.len() >= limit {
+            truncated = true;
+            break;
+        }
+        let commit = git.find_commit(oid?)?;
+        commits.push(CommitInfo {
+            hash: commit.id().to_string(),
+            patch_id: commit.tree_id().to_string(),
+            summary: commit.summary().unwrap_or("").to_string(),
+            author: commit.author().name().unwrap_or("").to_string(),
+            time: commit.time().seconds(),
+        });
+    }
+    Ok(BranchView {
+        branch_found: true,
+        target: resolved.map(|(name, _)| name),
+        commits,
+        truncated,
+    })
 }
 
 #[cfg(test)]
@@ -283,6 +522,33 @@ mod tests {
             .iter()
             .map(|c| (c.repo_name.as_str(), c.commit.summary.as_str()))
             .collect()
+    }
+
+    #[test]
+    fn lookup_finds_commits_and_reports_missing_ones() {
+        let a = init_empty_repo();
+        commit_at(a.path(), "real commit", 100);
+        let repos = [repo_of(1, "a", &a)];
+        let hash = merged_history(&repos, 5, None).commits[0]
+            .commit
+            .hash
+            .clone();
+        let gone = "0123456789abcdef0123456789abcdef01234567".to_string();
+
+        let found = lookup_commits(
+            &repos,
+            &[
+                (RepoId(1), hash.clone()),
+                (RepoId(1), gone.clone()),
+                (RepoId(9), hash.clone()), // repo no longer linked
+                (RepoId(1), "not-a-hash".to_string()),
+            ],
+        );
+        assert_eq!(found[0].1.as_ref().unwrap().commit.summary, "real commit");
+        assert_eq!(found[0].1.as_ref().unwrap().repo_name, "a");
+        assert!(found[1].1.is_none(), "unknown hash is reported missing");
+        assert!(found[2].1.is_none(), "unlinked repo is reported missing");
+        assert!(found[3].1.is_none(), "malformed hash does not panic");
     }
 
     #[test]
@@ -456,5 +722,310 @@ mod tests {
         };
         let matches = suggest_commits_for_task(&[a.clone(), b], TaskId(42), None);
         assert_eq!(matches, vec![a]);
+    }
+
+    fn commit_info(summary: &str) -> CommitInfo {
+        CommitInfo {
+            hash: summary.into(),
+            patch_id: String::new(),
+            summary: summary.into(),
+            author: "x".into(),
+            time: 0,
+        }
+    }
+
+    #[test]
+    fn task_reference_matches_whole_tokens_only() {
+        let hits =
+            |s: &str| !suggest_commits_for_task(&[commit_info(s)], TaskId(4), None).is_empty();
+        assert!(hits("fix #4"));
+        assert!(hits("fix (#4)"));
+        assert!(hits("#4: thing"));
+        assert!(hits("[#4] thing"));
+        assert!(hits("#4"));
+        assert!(!hits("fix #42"));
+        assert!(!hits("fix #4a"));
+        assert!(!hits("fix #4_x"));
+        assert!(!hits("no reference"));
+    }
+
+    #[test]
+    fn branch_name_matches_case_insensitively_on_boundaries() {
+        let hits = |s: &str| {
+            !suggest_commits_for_task(&[commit_info(s)], TaskId(1), Some("feature/Login"))
+                .is_empty()
+        };
+        assert!(hits("merge feature/login into main"));
+        assert!(hits("wip (FEATURE/LOGIN)"));
+        assert!(!hits("merge feature/login-v2"));
+        assert!(!hits("prefeature/login"));
+        // A blank branch must not match everything.
+        let blank = suggest_commits_for_task(&[commit_info("anything")], TaskId(1), Some("  "));
+        assert!(blank.is_empty());
+    }
+
+    #[test]
+    fn non_ascii_summaries_do_not_panic() {
+        for text in ["İstanbul #4 日本語", "ÀÉ#4é", "日本語 feat/ÜBER ✓", "#"] {
+            let _ = suggest_commits_for_task(&[commit_info(text)], TaskId(4), Some("feat/über"));
+        }
+        let id = suggest_commits_for_task(&[commit_info("日本語 #4 完了")], TaskId(4), None);
+        assert_eq!(id.len(), 1);
+        let br = suggest_commits_for_task(
+            &[commit_info("日本語 feat/ÜBER ✓")],
+            TaskId(4),
+            Some("feat/über"),
+        );
+        assert_eq!(br.len(), 1);
+    }
+
+    #[test]
+    fn suggested_for_task_filters_orders_and_limits() {
+        let a = init_empty_repo();
+        let b = init_empty_repo();
+        commit_at(a.path(), "a old #4", 100);
+        commit_at(b.path(), "b mid #42 not it", 200);
+        commit_at(b.path(), "b fix (#4)", 300);
+        commit_at(a.path(), "a work on feat/x", 400);
+        commit_at(a.path(), "a unrelated", 500);
+        let repos = [repo_of(1, "a", &a), repo_of(2, "b", &b)];
+        let none = std::collections::HashSet::new();
+
+        let got = suggested_for_task(&repos, TaskId(4), Some("feat/x"), &none, 50, 10);
+        let titles: Vec<_> = got.iter().map(|c| c.commit.summary.as_str()).collect();
+        assert_eq!(titles, vec!["a work on feat/x", "b fix (#4)", "a old #4"]);
+        assert_eq!(got[1].repo_name, "b");
+
+        // Without a branch only the id matches.
+        let ids = suggested_for_task(&repos, TaskId(4), None, &none, 50, 10);
+        assert_eq!(ids.len(), 2);
+
+        // max_results keeps the newest.
+        let capped = suggested_for_task(&repos, TaskId(4), Some("feat/x"), &none, 50, 2);
+        assert_eq!(capped.len(), 2);
+        assert_eq!(capped[0].commit.summary, "a work on feat/x");
+
+        // Already linked commits are skipped.
+        let linked: std::collections::HashSet<_> =
+            [(got[1].repo_id, got[1].commit.hash.clone())].into();
+        let rest = suggested_for_task(&repos, TaskId(4), Some("feat/x"), &linked, 50, 10);
+        assert_eq!(rest.len(), 2);
+        assert!(rest.iter().all(|c| c.commit.summary != "b fix (#4)"));
+
+        // Identity is (repo, hash): the same hash under another repo id stays.
+        let other_repo: std::collections::HashSet<_> =
+            [(RepoId(99), got[1].commit.hash.clone())].into();
+        let all = suggested_for_task(&repos, TaskId(4), Some("feat/x"), &other_repo, 50, 10);
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn suggested_for_task_respects_scan_limit() {
+        let a = init_empty_repo();
+        commit_at(a.path(), "old #4", 100);
+        commit_at(a.path(), "newer", 200);
+        commit_at(a.path(), "newest", 300);
+        let repos = [repo_of(1, "a", &a)];
+        let none = std::collections::HashSet::new();
+        assert!(suggested_for_task(&repos, TaskId(4), None, &none, 2, 10).is_empty());
+        assert_eq!(
+            suggested_for_task(&repos, TaskId(4), None, &none, 3, 10).len(),
+            1
+        );
+        assert!(suggested_for_task(&repos, TaskId(4), None, &none, 3, 0).is_empty());
+    }
+
+    /// Repo whose unborn HEAD is `name`, so tests don't depend on the
+    /// machine's `init.defaultBranch`.
+    fn init_repo_on(name: &str) -> tempfile::TempDir {
+        let dir = init_empty_repo();
+        git_in(
+            dir.path(),
+            &["symbolic-ref", "HEAD", &format!("refs/heads/{name}")],
+            None,
+        );
+        dir
+    }
+
+    /// main with one base commit, plus `feat` with three commits; HEAD ends
+    /// on `feat`.
+    fn repo_with_feature() -> tempfile::TempDir {
+        let dir = init_repo_on("main");
+        commit_at(dir.path(), "base", 100);
+        git_in(dir.path(), &["checkout", "-q", "-b", "feat"], None);
+        commit_at(dir.path(), "f1", 200);
+        commit_at(dir.path(), "f2", 300);
+        commit_at(dir.path(), "f3", 400);
+        dir
+    }
+
+    fn view_titles(v: &BranchView) -> Vec<&str> {
+        v.commits.iter().map(|c| c.summary.as_str()).collect()
+    }
+
+    #[test]
+    fn branch_view_lists_only_commits_missing_from_target() {
+        let dir = repo_with_feature();
+        let repo = repo_of(1, "r", &dir);
+        let v = branch_only_commits(&repo, "feat", None, 50).unwrap();
+        assert!(v.branch_found);
+        assert_eq!(v.target.as_deref(), Some("main"));
+        assert_eq!(view_titles(&v), vec!["f3", "f2", "f1"]);
+        assert!(!v.truncated);
+
+        let explicit = branch_only_commits(&repo, "feat", Some("main"), 50).unwrap();
+        assert_eq!(explicit, v);
+    }
+
+    #[test]
+    fn branch_view_is_empty_after_merge() {
+        let dir = repo_with_feature();
+        git_in(dir.path(), &["checkout", "-q", "main"], None);
+        git_in(
+            dir.path(),
+            &["merge", "-q", "--no-ff", "feat", "-m", "merge feat"],
+            Some(500),
+        );
+        let repo = repo_of(1, "r", &dir);
+        let v = branch_only_commits(&repo, "feat", None, 50).unwrap();
+        assert!(v.branch_found);
+        assert!(v.commits.is_empty());
+        assert!(!v.truncated);
+    }
+
+    #[test]
+    fn branch_view_missing_branch_is_not_an_error() {
+        let dir = repo_with_feature();
+        let repo = repo_of(1, "r", &dir);
+        let v = branch_only_commits(&repo, "nope", None, 50).unwrap();
+        assert!(!v.branch_found);
+        assert!(v.commits.is_empty());
+        assert_eq!(v.target, None);
+
+        let empty = init_empty_repo();
+        let v = branch_only_commits(&repo_of(2, "e", &empty), "feat", None, 5).unwrap();
+        assert!(!v.branch_found);
+    }
+
+    #[test]
+    fn branch_view_falls_back_to_origin_branch() {
+        let dir = repo_with_feature();
+        git_in(
+            dir.path(),
+            &["update-ref", "refs/remotes/origin/feat", "HEAD"],
+            None,
+        );
+        git_in(dir.path(), &["checkout", "-q", "main"], None);
+        git_in(dir.path(), &["branch", "-q", "-D", "feat"], None);
+        let repo = repo_of(1, "r", &dir);
+        let v = branch_only_commits(&repo, "feat", None, 50).unwrap();
+        assert!(v.branch_found);
+        assert_eq!(view_titles(&v), vec!["f3", "f2", "f1"]);
+    }
+
+    #[test]
+    fn branch_view_truncates_at_limit() {
+        let dir = repo_with_feature();
+        let repo = repo_of(1, "r", &dir);
+        let v = branch_only_commits(&repo, "feat", None, 2).unwrap();
+        assert_eq!(view_titles(&v), vec!["f3", "f2"]);
+        assert!(v.truncated);
+        let exact = branch_only_commits(&repo, "feat", None, 3).unwrap();
+        assert_eq!(exact.commits.len(), 3);
+        assert!(!exact.truncated);
+    }
+
+    #[test]
+    fn default_target_prefers_origin_head_then_main_master_develop() {
+        let main = init_repo_on("main");
+        commit_at(main.path(), "c", 100);
+        assert_eq!(default_target_branch(main.path()).as_deref(), Some("main"));
+
+        let master = init_repo_on("master");
+        commit_at(master.path(), "c", 100);
+        assert_eq!(
+            default_target_branch(master.path()).as_deref(),
+            Some("master")
+        );
+
+        let dev = init_repo_on("develop");
+        commit_at(dev.path(), "c", 100);
+        assert_eq!(
+            default_target_branch(dev.path()).as_deref(),
+            Some("develop")
+        );
+
+        let odd = init_repo_on("trunk");
+        commit_at(odd.path(), "c", 100);
+        assert_eq!(default_target_branch(odd.path()), None);
+        git_in(
+            odd.path(),
+            &["update-ref", "refs/remotes/origin/trunk", "HEAD"],
+            None,
+        );
+        git_in(
+            odd.path(),
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/trunk",
+            ],
+            None,
+        );
+        assert_eq!(
+            default_target_branch(odd.path()).as_deref(),
+            Some("origin/trunk")
+        );
+
+        // Remote-only main is found as origin/main.
+        let remote_only = init_repo_on("work");
+        commit_at(remote_only.path(), "c", 100);
+        git_in(
+            remote_only.path(),
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
+            None,
+        );
+        assert_eq!(
+            default_target_branch(remote_only.path()).as_deref(),
+            Some("origin/main")
+        );
+
+        let plain = tempdir().unwrap();
+        assert_eq!(default_target_branch(plain.path()), None);
+    }
+
+    #[test]
+    fn branch_view_without_any_target_is_unfiltered() {
+        let dir = init_repo_on("trunk");
+        commit_at(dir.path(), "t1", 100);
+        commit_at(dir.path(), "t2", 200);
+        let repo = repo_of(1, "r", &dir);
+        let v = branch_only_commits(&repo, "trunk", None, 50).unwrap();
+        assert!(v.branch_found);
+        assert_eq!(v.target, None);
+        assert_eq!(view_titles(&v), vec!["t2", "t1"]);
+
+        // An explicit target that doesn't exist degrades the same way.
+        let v = branch_only_commits(&repo, "trunk", Some("ghost"), 50).unwrap();
+        assert_eq!(v.target, None);
+        assert_eq!(v.commits.len(), 2);
+    }
+
+    #[test]
+    fn branch_view_rejects_hostile_names() {
+        let dir = repo_with_feature();
+        let repo = repo_of(1, "r", &dir);
+        for bad in ["--all", "-x", "a b", "fe\nat", "feat\tx", ""] {
+            let v = branch_only_commits(&repo, bad, None, 50).unwrap();
+            assert!(!v.branch_found, "{bad:?} must be treated as not found");
+            assert!(v.commits.is_empty());
+        }
+        // Hostile target names are ignored, not passed to git.
+        for bad in ["--all", "a b"] {
+            let v = branch_only_commits(&repo, "feat", Some(bad), 50).unwrap();
+            assert!(v.branch_found);
+            assert_eq!(v.target, None);
+            assert_eq!(v.commits.len(), 4, "unfiltered: feat has base + 3");
+        }
     }
 }

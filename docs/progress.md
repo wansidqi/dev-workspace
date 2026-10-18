@@ -39,18 +39,31 @@ remaining gap is visible at a glance.
 - [x] Status cycling (Todo -> In Progress -> Done; Blocked not reachable
       from the UI yet, only via direct `status` field)
 - [x] Create, rename, delete (delete cascades to subtasks)
-- [ ] Priority (field exists in `devspace-core`, no UI)
-- [ ] Due date
-- [ ] Tags
-- [ ] Branch field
-- [ ] Per-task notes, attachments, linked commits
+- [x] Priority: chip on the task detail page, click cycles
+      Low -> Medium -> High -> Urgent (colour-coded)
+- [x] Due date: click-to-edit on the task detail page (`YYYY-MM-DD`, empty
+      clears, typos are rejected with a message); shows "Overdue" in red for
+      unfinished tasks past their date (UTC day)
+- [ ] Tags — the domain type has `tags` but the `tasks` table has no column,
+      so this needs a migration (ask first)
+- [x] Branch field: click-to-edit on the task detail page (blank clears);
+      feeds the branch view and suggested commits
+- [x] Task detail page (`task_detail.rs`, "Open" on a task row): breadcrumb
+      of ancestors, status chip, tabs for **Notes**, **Attachments** and
+      **Commits** with counts; task rows show "2 notes · 1 file · 3 commits"
+- [x] Commits tab: the task's mapped commits (title/author/date read from
+      git in the background), per-link status chip (click to cycle), unlink,
+      "Map commits…" jumps to the commit browser; a commit git can no longer
+      find (rebased/squashed or repo moved) is shown with a warning
 
 ## Notes
 
 - [x] Create, rename, delete (project-level only)
 - [x] Open and edit content (multiline editor, autosaves to the file)
 - [x] Markdown stored as plain files under `WorkspacePaths::notes_dir`
-- [ ] Task-level notes (schema/storage support task_id already; no UI)
+- [x] Task-level notes: create, open (same editor), delete from the task
+      detail page → Notes tab; works at any subtask depth. The project page
+      lists only project-level notes.
 - [ ] Kind selector — everything is created as `NoteKind::Note`; Script/SQL
       kinds exist in the domain type but aren't reachable from the UI
 - [ ] Syntax highlighting
@@ -59,9 +72,24 @@ remaining gap is visible at a glance.
 
 ## Attachments
 
-- [ ] Not started: PDFs, images, other files on project/task/subtask
-- [ ] Built-in PDF viewer
-- [ ] Copy-into-workspace vs link-by-path
+- [x] Attach files to a task or subtask at any depth (task detail page →
+      Attachments tab): "Add files…" opens the native multi-file picker.
+      Per attach you choose **Copy into workspace** (streamed on a background
+      task into `<project>/attachments/<id>-<sanitized name>`, never
+      overwriting) or **Link by path** (only the path is stored).
+- [x] Open an attachment with the OS default app; programs and scripts
+      (`.exe`, `.bat`, `.ps1`, `.lnk`, `.jar`, extension-less, ...) are only
+      revealed in the file manager, never launched (attachments are
+      untrusted input). "Show in folder" and remove (✕) per file; removing a
+      copied file deletes it from the workspace, a linked original is never
+      touched.
+- [x] Path safety: a copied attachment must canonicalize to inside the
+      project's attachments folder (symlinks and tampered db rows are
+      rejected for open and delete); deleting a task deletes its (and its
+      subtasks') copied files and note files, not just the db rows.
+- [ ] Project-level attachments (storage supports `task_id = NULL`, no UI)
+- [ ] Built-in PDF viewer (PDFs open in the default app for now)
+- [ ] Image preview, rename, drag-and-drop onto the page
 
 ## Credentials vault
 
@@ -108,17 +136,36 @@ remaining gap is visible at a glance.
       status+note update, delete, `count_for_repo`). Migration 2 adds
       UNIQUE(task_id, repo_id, hash) and the project-scope triggers.
 - [x] Unassigned commits view (the "Unassigned only" filter in the browser)
-- [ ] Badges on a *task* listing its linked commits (task rows on the project
-      page do not show them yet)
-- [ ] Repo unlink handling when links exist — `count_for_repo` is ready for
-      the warning; the unlink button still deletes (and cascades) silently
-- [ ] Branch view (commits on task branch not in target)
-- [ ] Cherry-pick export list (`ordered_for_cherry_pick` exists in core; no
-      export UI or git CLI shell-out yet)
-- [ ] Suggested commits (task id in message / branch) in the mapping panel —
-      `suggest_commits_for_task` exists but is not wired to the UI
-- [ ] Missing-commit detection after rebase/squash (needs real patch-ids;
-      `CommitInfo::patch_id` is currently the tree id, and links store none)
+- [x] Badges on a *task*: the project page rows show "N commits", and the
+      task detail Commits tab lists them
+- [x] Repo unlink handling when links exist: the ✕ on a linked repo warns
+      "N commit mappings will be deleted with this repo" and needs a second
+      click (with Cancel); repos with no mappings unlink immediately
+- [x] Branch view: set a branch on a task and its Commits tab lists, per
+      repo, the commits on that branch that are not in the target (target
+      auto-detected: `origin/HEAD`, then `main`, `master`, `develop`; local
+      branch first, then `origin/<branch>`), with a one-click "Map to task"
+      and "Mapped ✓" for ones already linked. git2 only; unsafe names are
+      refused. (`devspace_git::branch_only_commits`, `default_target_branch`)
+- [x] Cherry-pick export: "Copy cherry-pick list" on the Commits tab copies
+      per-repo shell text, oldest commit first, `git cherry-pick <hashes>`
+      with a `# run inside: <path>` comment (no `cd`), missing commits as
+      comments. Output is injection-safe (only comments and validated hex
+      hashes). Pure logic in `devspace_core::cherry_pick_script`. Ordering is
+      by commit time; same-second commits keep link order, not parent order.
+- [x] Suggested commits: the Commits tab lists commits that mention `#<task
+      id>` or the task's branch name (whole-token match, so `#4` never
+      matches `#42`), newest first, scanning the newest 2000 commits per
+      repo, with one-click mapping. (`devspace_git::suggested_for_task`;
+      this also fixed `suggest_commits_for_task`, which used a naive
+      substring match.) Message references work
+      only if you write `#<id>` in the message; the id is shown next to the
+      title on the task detail page.
+- [ ] Missing-commit detection after rebase/squash: partly there — the task
+      detail Commits tab warns for any mapped commit git cannot find
+      (`devspace_git::lookup_commits` returns `None`), but nothing re-matches
+      it by patch-id or marks the link `Missing` yet (`CommitInfo::patch_id`
+      is currently the tree id, and links store none)
 
 ## Developer tools
 
@@ -314,3 +361,35 @@ remaining gap is visible at a glance.
 - Not unit-tested: the GPUI views (terminal panel/view, commit browser) —
   per CLAUDE.md they are tested manually, with the logic kept in
   `devspace-terminal`, `devspace-git`, `devspace-core` and `devspace-storage`.
+- Task detail page (`crates/app/src/task_detail.rs`): `Root::open_task`
+  stays set while a note is open, and the main-content precedence is
+  history > note > task > project, so closing a note from the task page
+  returns to the task page. Notes opened from the project page behave as
+  before. Git details for the Commits tab are fetched in the background and
+  re-fetched when the set of mapped commits changes (state observer).
+- Attachments are a two-step operation in `AppState`:
+  `prepare_attachment` (validate, allocate the id-prefixed stored name) →
+  `AttachmentJob::run` (streams the copy; call it off the UI thread) →
+  `finish_attachment` (insert the row, or delete the half-made copy if that
+  fails). `AttachmentRepo::insert` checks the task belongs to the
+  attachment's project in code; unlike commit links there is no DB trigger
+  for it (that would need migration 3 — ask first).
+- `is_launch_risky` / `sanitize_file_name` live in `devspace-core`
+  (`attachment.rs`) so the "never launch executables" rule and the stored
+  name rules are unit-tested without the UI. `external.rs` passes paths as
+  discrete process arguments (`explorer.exe`, `open`, `xdg-open`) — never
+  through a shell, so a hostile file name cannot inject a command.
+- `AppState` now has unit tests (`state.rs`), using a self-cleaning scratch
+  dir under the OS temp folder instead of adding the `tempfile` crate to the
+  app crate. They cover the attachment copy/link/remove flows, the
+  tampered-path containment check, task notes at depth, and file cleanup
+  when a parent task is deleted.
+- The cherry-pick export and the git branch/suggestion functions were written
+  by two parallel subagents, split by file (`core/commit_link.rs` and
+  `git/lib.rs`) so they could not collide; the UI wiring in `task_detail.rs`
+  was done afterwards in the main session. Each was checked by re-running its
+  tests and reading the security-relevant code (hash and ref-name validation,
+  no shelling out outside tests) rather than trusting the hand-back.
+- Task detail extras (`refresh_extras`) are computed in the background and
+  keyed on (branch, linked repos, mapped commits); a stale result is dropped
+  if the key changed while it ran, same generation idea as the commit browser.

@@ -5,8 +5,10 @@
 
 mod commit_browser;
 mod date;
+mod external;
 mod note_editor;
 mod state;
+mod task_detail;
 mod terminal_panel;
 mod terminal_view;
 mod text_input;
@@ -23,6 +25,7 @@ use gpui::{
 };
 use note_editor::NoteEditor;
 use state::AppState;
+use task_detail::TaskDetail;
 use terminal_panel::TerminalPanel;
 use text_input::TextInput;
 use theme::GlassTheme;
@@ -50,6 +53,12 @@ struct Root {
     /// The commit history browser, replacing the main content while open
     /// (like `open_note`).
     open_history: Option<Entity<CommitBrowser>>,
+    /// The task/subtask detail page (notes, attachments, commits). Stays
+    /// open underneath the note editor so closing a note returns to it.
+    open_task: Option<Entity<TaskDetail>>,
+    /// Repo whose unlink is awaiting a second click because it still has
+    /// commit mappings (they are deleted along with it).
+    confirm_unlink_repo: Option<devspace_core::RepoId>,
     terminal_open: bool,
 }
 
@@ -471,6 +480,40 @@ impl Root {
         cx.notify();
     }
 
+    /// Opens the detail page (notes, attachments, commits) for a task or
+    /// subtask at any depth, in place of the project page.
+    fn open_task_detail(&mut self, task: TaskId, cx: &mut Context<Self>) {
+        let theme = self.theme;
+        let state = self.state.clone();
+        let root = cx.entity();
+        let detail = cx.new(|cx| {
+            let mut detail = TaskDetail::new(cx, state, theme, task);
+            let close_root = root.clone();
+            detail.on_close = Some(Box::new(move |_window, cx| {
+                close_root.update(cx, |root, cx| {
+                    root.open_task = None;
+                    cx.notify();
+                });
+            }));
+            let note_root = root.clone();
+            detail.on_open_note = Some(Box::new(move |id, title, _window, cx| {
+                note_root.update(cx, |root, cx| root.open_note(id, title, cx));
+            }));
+            let history_root = root.clone();
+            detail.on_open_history = Some(Box::new(move |_window, cx| {
+                history_root.update(cx, |root, cx| {
+                    root.open_task = None;
+                    if root.open_history.is_none() {
+                        root.toggle_history(cx);
+                    }
+                });
+            }));
+            detail
+        });
+        self.open_task = Some(detail);
+        cx.notify();
+    }
+
     /// Opens the OS folder picker and links the chosen folder as a repo of
     /// the selected project. A subfolder resolves to its repo root so git
     /// history works; a folder outside any repo is still linked and shows
@@ -526,6 +569,7 @@ impl Root {
             browser
         });
         self.open_note = None;
+        self.open_task = None;
         self.open_history = Some(browser);
         cx.notify();
     }
@@ -555,7 +599,30 @@ impl Render for Root {
             .cloned();
         let raw_tasks = state.tasks.clone();
         let tasks = flatten_tasks(&state.tasks);
-        let notes = state.notes.clone();
+        // Per task: (notes, attachments, mapped commits), for row badges.
+        let mut task_counts: std::collections::HashMap<TaskId, (usize, usize, usize)> =
+            std::collections::HashMap::new();
+        for note in state.notes.iter().filter(|n| n.task_id.is_some()) {
+            if let Some(t) = note.task_id {
+                task_counts.entry(t).or_default().0 += 1;
+            }
+        }
+        for attachment in &state.attachments {
+            if let Some(t) = attachment.task_id {
+                task_counts.entry(t).or_default().1 += 1;
+            }
+        }
+        for link in &state.commit_links {
+            task_counts.entry(link.task_id).or_default().2 += 1;
+        }
+        let confirm_unlink = self.confirm_unlink_repo;
+        // Mapped commits per repo, so unlinking a repo can warn first.
+        let mut repo_link_counts: std::collections::HashMap<devspace_core::RepoId, usize> =
+            std::collections::HashMap::new();
+        for link in &state.commit_links {
+            *repo_link_counts.entry(link.repo_id).or_default() += 1;
+        }
+        let notes = state.project_notes();
         let repos = state.repos.clone();
         let recent_commits = state.recent_commits.clone();
         let unreadable_repos = state.unreadable_repos.clone();
@@ -683,6 +750,8 @@ impl Render for Root {
                 row.on_click(cx.listener(move |this, _, _, cx| {
                     // The history view belongs to one project: leave it.
                     this.open_history = None;
+                    this.open_task = None;
+                    this.open_note = None;
                     this.state.update(cx, |state, _| {
                         state.select_project(id);
                     });
@@ -860,6 +929,17 @@ impl Render for Root {
                     TaskStatus::Todo => theme.text_secondary,
                 };
                 let title = task.title.clone();
+                let (note_count, file_count, commit_count) =
+                    task_counts.get(&id).copied().unwrap_or_default();
+                let counts: Vec<String> = [
+                    (note_count, "note"),
+                    (file_count, "file"),
+                    (commit_count, "commit"),
+                ]
+                .iter()
+                .filter(|(n, _)| *n > 0)
+                .map(|(n, label)| format!("{n} {label}{}", if *n == 1 { "" } else { "s" }))
+                .collect();
                 div()
                     .ml(px(depth as f32 * 20.0))
                     .id(("task", id.0 as u64))
@@ -878,14 +958,48 @@ impl Render for Root {
                     .hover(move |s| s.border_color(theme.border_light))
                     .child(
                         div()
-                            .text_color(theme.text_primary)
-                            .child(task.title.clone()),
+                            .flex()
+                            .items_center()
+                            .gap(theme.space_3)
+                            .child(
+                                div()
+                                    .text_color(theme.text_primary)
+                                    .child(task.title.clone()),
+                            )
+                            .when(!counts.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.text_secondary)
+                                        .child(counts.join(" · ")),
+                                )
+                            }),
                     )
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap(theme.space_2)
+                            .child(
+                                div()
+                                    .id(("task-open", id.0 as u64))
+                                    .px(theme.space_2)
+                                    .py(theme.space_1)
+                                    .rounded(theme.radius_sm)
+                                    .border_1()
+                                    .border_color(theme.border_light)
+                                    .text_sm()
+                                    .text_color(theme.text_secondary)
+                                    .cursor_pointer()
+                                    .hover(move |s| {
+                                        s.bg(theme.surface_raised).text_color(theme.text_primary)
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.open_task_detail(id, cx);
+                                        cx.stop_propagation();
+                                    }))
+                                    .child("Open"),
+                            )
                             .child(
                                 div()
                                     .px(theme.space_2)
@@ -1032,6 +1146,8 @@ impl Render for Root {
                 )
                 .children(repos.into_iter().map(|repo: Repo| {
                     let id = repo.id;
+                    let link_count = repo_link_counts.get(&id).copied().unwrap_or(0);
+                    let confirming = confirm_unlink == Some(id);
                     div()
                         .id(("repo", id.0 as u64))
                         .flex()
@@ -1058,7 +1174,35 @@ impl Render for Root {
                                         .text_xs()
                                         .text_color(theme.text_secondary)
                                         .child(repo.path.clone()),
-                                ),
+                                )
+                                .when(confirming, |d| {
+                                    d.child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(theme.space_2)
+                                            .text_xs()
+                                            .child(div().text_color(theme.warning).child(format!(
+                                                "{link_count} commit mapping{} will be deleted \
+                                                 with this repo. Click ✕ again to confirm.",
+                                                if link_count == 1 { "" } else { "s" }
+                                            )))
+                                            .child(
+                                                div()
+                                                    .id(("repo-unlink-cancel", id.0 as u64))
+                                                    .text_color(theme.text_secondary)
+                                                    .cursor_pointer()
+                                                    .hover(move |s| {
+                                                        s.text_color(theme.text_primary)
+                                                    })
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.confirm_unlink_repo = None;
+                                                        cx.notify();
+                                                    }))
+                                                    .child("Cancel"),
+                                            ),
+                                    )
+                                }),
                         )
                         .child(
                             icon_button_tinted(
@@ -1069,6 +1213,14 @@ impl Render for Root {
                             )
                             .on_click(cx.listener(
                                 move |this, _, _, cx| {
+                                    // Mapped commits go with the repo (the
+                                    // database cascades); ask first.
+                                    if link_count > 0 && this.confirm_unlink_repo != Some(id) {
+                                        this.confirm_unlink_repo = Some(id);
+                                        cx.notify();
+                                        return;
+                                    }
+                                    this.confirm_unlink_repo = None;
                                     this.state.update(cx, |state, cx| {
                                         state.unlink_repo(id);
                                         cx.notify();
@@ -1115,6 +1267,14 @@ impl Render for Root {
                 .h_full()
                 .min_w(px(0.0))
                 .child(history.clone())
+                .into_any_element()
+        } else if let (Some(detail), None) = (&self.open_task, &self.open_note) {
+            div()
+                .flex()
+                .flex_1()
+                .h_full()
+                .min_w(px(0.0))
+                .child(detail.clone())
                 .into_any_element()
         } else if let Some((_, title, editor)) = &self.open_note {
             div()
@@ -1315,6 +1475,8 @@ fn main() -> Result<()> {
                         terminal_open: false,
                         focus_handle,
                         open_history: None,
+                        open_task: None,
+                        confirm_unlink_repo: None,
                     }
                 })
             },
