@@ -98,6 +98,7 @@ notes(id, project_id, task_id NULL, kind, title, file_path, updated_at)
 attachments(id, project_id, task_id NULL, name, file_path, is_linked, created_at)
 credentials(id, project_id, label, kind, nonce, ciphertext, created_at)
 commit_links(id, task_id, repo_id, hash, patch_id, status, note, created_at)
+task_tags(task_id, tag)               # tag is COLLATE NOCASE; primary key (task_id, tag)
 run_commands(id, project_id, name, command, cwd)
 ```
 
@@ -108,6 +109,8 @@ Rules:
 - Project scoping: a commit link is valid only if the task's project_id equals the repo's project_id. Enforce this in core/storage (not just the UI) and test it. A task may be at any depth of the subtask tree.
 - Commit links are many-to-many between tasks and commits: unique on (task_id, repo_id, hash), but the same commit may link to several tasks. Deleting a task deletes its links (cascade); unlinking a repo from a project must handle or warn about its existing links rather than orphaning them silently.
 - The commit browser and dashboard must cover every linked repo, not just the first. Page each repo's history and merge by commit time.
+- Tags are unique per task ignoring case (the first spelling is kept), at most 32 characters, no commas or control characters. The rule lives in core (`normalize_tag`) and is enforced again in storage.
+- Deleting a task cascades to its notes, attachments, commit links and tags in the database, so the code must also delete the files those rows point at (copied attachments, note files) — the database knows nothing about files.
 - Every schema change is a numbered migration. Never edit an applied migration.
 - Use transactions for multi-step writes. Enable WAL mode and foreign keys.
 
@@ -119,6 +122,7 @@ Rules:
 - Clipboard copy of a secret must auto-clear after a short timeout.
 - Injected terminal environment variables apply to that session only. Avoid writing secrets to shell history.
 - Validate and canonicalize all file paths. Attachments and notes must stay inside the project directory.
+- Never launch an attached file that could run code (executables, scripts, installers, shortcuts): reveal it in the file manager instead. Open files by passing the path as a process argument, never through a shell.
 - Treat git repo contents and attached files as untrusted input.
 
 ## GPUI guidelines

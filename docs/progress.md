@@ -65,7 +65,8 @@ remaining gap is visible at a glance.
 
 ## Notes
 
-- [x] Create, rename, delete (project-level only)
+- [x] Project-level notes: create, rename, delete. (Task notes: create, open,
+      delete from the task detail page — no rename yet.)
 - [x] Open and edit content (multiline editor, autosaves to the file)
 - [x] Markdown stored as plain files under `WorkspacePaths::notes_dir`
 - [x] Task-level notes: create, open (same editor), delete from the task
@@ -308,11 +309,13 @@ remaining gap is visible at a glance.
   project, and a project can have multiple git repos. Delivered: the commit
   browser merges all repos' history; links key on (repo_id, hash) with the
   project-scope check in core, storage and DB triggers.
-- Next most valuable slices: showing linked commits on task rows + the
-  repo-unlink warning (both small, storage is ready), suggested commits and
-  cherry-pick export, the command palette (unblocked by `TextInput`), a
-  credentials vault (needs the keyring + AEAD decisions CLAUDE.md calls
-  out), and due dates/tags/branch field on tasks.
+- Next most valuable slices (everything from the previous list — task rows,
+  repo-unlink warning, suggestions, cherry-pick export, due date/branch/tags
+  — is done): the command palette and global search (unblocked by
+  `TextInput`), a credentials vault (needs the keyring + AEAD decisions
+  CLAUDE.md calls out), restore last project/task/layout on startup,
+  project backup/export, IDE launcher and per-project run commands, the
+  built-in PDF viewer, and markdown preview/syntax highlighting.
 - GPUI flexbox gotcha hit wiring the terminal panel: a flex child with
   `.flex_1()` but no `.min_h(px(0.0))` won't shrink below its content's
   natural height, so a fixed-size sibling (the terminal panel) after it
