@@ -11,6 +11,8 @@ use devspace_storage::{
     AttachmentRepo, CommitLinkRepo, NoteRepo, ProjectRepo, RepoRepo, TaskRepo, WorkspacePaths,
 };
 use rusqlite::Connection;
+
+mod run_commands; // run-command helpers (state/run_commands.rs)
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// How many commits the dashboard's "recent commits" section shows. Paged
@@ -76,6 +78,9 @@ pub struct AppState {
     /// Attachments of the selected project (project-level and per-task).
     pub attachments: Vec<Attachment>,
     next_attachment_id: i64,
+    /// Saved run commands of the selected project (`state/run_commands.rs`).
+    pub run_commands: Vec<devspace_core::RunCommand>,
+    next_run_command_id: i64,
     next_project_id: i64,
     next_task_id: i64,
     next_note_id: i64,
@@ -105,6 +110,8 @@ impl AppState {
             next_commit_link_id: 1,
             attachments: Vec::new(),
             next_attachment_id: 1,
+            run_commands: Vec::new(),
+            next_run_command_id: 1,
             next_project_id: 1,
             next_task_id: 1,
             next_note_id: 1,
@@ -164,6 +171,7 @@ impl AppState {
         self.reload_recent_commits();
         self.reload_commit_links();
         self.reload_attachments();
+        self.reload_run_commands();
     }
 
     fn reload_commit_links(&mut self) {

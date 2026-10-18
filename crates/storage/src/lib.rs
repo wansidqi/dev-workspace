@@ -8,6 +8,7 @@ mod notes;
 mod paths;
 mod projects;
 mod repos;
+mod run_commands;
 mod tasks;
 
 pub use attachments::AttachmentRepo;
@@ -17,6 +18,7 @@ pub use notes::NoteRepo;
 pub use paths::WorkspacePaths;
 pub use projects::ProjectRepo;
 pub use repos::RepoRepo;
+pub use run_commands::RunCommandRepo;
 pub use tasks::TaskRepo;
 
 use rusqlite::Connection;

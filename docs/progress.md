@@ -196,7 +196,10 @@ remaining gap is visible at a glance.
 - [ ] Terminal: tab rename, drag-to-resize panel width, split panes
 - [ ] Terminal: scrollback setting in a settings UI
 - [ ] IDE launcher (configurable external command)
-- [ ] Per-project run commands + log view
+- [x] Per-project run commands + log view (`devspace-runner` crate,
+      `run_panel.rs`; sidebar "Run commands"; add/edit/delete, Start/Stop,
+      status chip, virtualised auto-scrolling log, Clear, Copy log; verified
+      by compilation and unit tests only, not launched)
 
 ## Search and navigation
 
@@ -409,3 +412,19 @@ remaining gap is visible at a glance.
   saves a task's tags in the same transaction. `update` does not touch tags —
   use `add_tag`/`remove_tag`. The upgrade path is tested (a database built at
   migration 2 with existing data gets migration 3 applied cleanly).
+- Run commands: `crates/runner` (`devspace-runner`) is std-only. It runs the
+  user's saved command line via `cmd /S /C` (Windows) or `sh -c` and never
+  interpolates anything else into it. stdout+stderr are split into lines by
+  reader threads (lone `\r` ends a line, raw line bytes capped), sanitised
+  (ANSI/OSC escapes, control chars and bidi overrides removed, 2,000-char
+  cap) and kept in a 5,000-line ring buffer; a bounded channel slows a
+  flooding process. `stop()` kills the tree (`taskkill /T /F`, or the Unix
+  process group via `kill -KILL -PID`); dropping a `RunningCommand` kills it.
+- `RunPanel` is owned by `Root` for the app's lifetime so commands survive
+  navigation and project switches; it kills runs of archived projects (checked
+  on each poll) and everything on app quit. Runs are not persisted across
+  restarts, only the definitions are. `stop()` runs `taskkill`/`kill`
+  synchronously on the UI thread (tens of ms); move it to a background task
+  if that ever shows as jank.
+- `AppState` run-command helpers live in `state/run_commands.rs` (a child
+  module of `state`) with their own tests there.

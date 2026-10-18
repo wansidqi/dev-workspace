@@ -7,6 +7,7 @@ mod commit_browser;
 mod date;
 mod external;
 mod note_editor;
+mod run_panel;
 mod state;
 mod task_detail;
 mod terminal_panel;
@@ -24,6 +25,7 @@ use gpui::{
     WindowBounds, WindowControlArea, WindowOptions,
 };
 use note_editor::NoteEditor;
+use run_panel::RunPanel;
 use state::AppState;
 use task_detail::TaskDetail;
 use terminal_panel::TerminalPanel;
@@ -62,6 +64,10 @@ struct Root {
     /// Project-page filter: show only tasks carrying this tag.
     tag_filter: Option<String>,
     terminal_open: bool,
+    /// Run-commands view (see `run_panel.rs`). The entity lives for the whole
+    /// app so commands keep running while the view is closed.
+    run_panel: Entity<RunPanel>,
+    run_open: bool,
 }
 
 fn status_label(status: TaskStatus) -> &'static str {
@@ -603,6 +609,7 @@ impl Root {
         });
         self.open_note = None;
         self.open_task = None;
+        self.run_open = false;
         self.open_history = Some(browser);
         cx.notify();
     }
@@ -844,6 +851,9 @@ impl Render for Root {
                                 .child("Commit history"),
                         ),
                 )
+            })
+            .when(selected_project.is_some(), |el| {
+                el.child(div().mt(theme.space_1).child(self.run_sidebar_row(cx)))
             })
             .child(
                 div()
@@ -1407,6 +1417,14 @@ impl Render for Root {
                 )
                 .child(editor.clone())
                 .into_any_element()
+        } else if self.run_open {
+            div()
+                .flex()
+                .flex_1()
+                .h_full()
+                .min_w(px(0.0))
+                .child(self.run_panel.clone())
+                .into_any_element()
         } else {
             main_panel.into_any_element()
         };
@@ -1557,6 +1575,19 @@ fn main() -> Result<()> {
                     let terminal_panel = cx.new(|cx| TerminalPanel::new(cx, state.clone(), theme));
                     // Re-render the sidebar's per-project terminal badges.
                     cx.observe(&terminal_panel, |_, _, cx| cx.notify()).detach();
+                    let root: Entity<Root> = cx.entity();
+                    let run_panel = cx.new(|cx| {
+                        let mut panel = RunPanel::new(cx, state.clone(), theme);
+                        panel.on_close = Some(Box::new(move |_window, cx| {
+                            root.update(cx, |root, cx| {
+                                root.run_open = false;
+                                cx.notify();
+                            });
+                        }));
+                        panel
+                    });
+                    // Re-render the sidebar's running-commands badge.
+                    cx.observe(&run_panel, |_, _, cx| cx.notify()).detach();
                     // Global shortcuts (toggle terminal, ...) are actions
                     // dispatched along the focused element's ancestors, so
                     // the root needs focus whenever nothing else has it.
@@ -1580,6 +1611,8 @@ fn main() -> Result<()> {
                         open_task: None,
                         confirm_unlink_repo: None,
                         tag_filter: None,
+                        run_panel,
+                        run_open: false,
                     }
                 })
             },
