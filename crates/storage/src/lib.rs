@@ -1,6 +1,7 @@
 //! SQLite-backed storage: connection setup, migrations and the plain-file
 //! layout under the OS data directory. No GPUI imports here.
 
+mod commit_links;
 mod migrations;
 mod notes;
 mod paths;
@@ -8,6 +9,7 @@ mod projects;
 mod repos;
 mod tasks;
 
+pub use commit_links::CommitLinkRepo;
 pub use migrations::run_migrations;
 pub use notes::NoteRepo;
 pub use paths::WorkspacePaths;
@@ -25,6 +27,10 @@ pub enum StorageError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Domain(#[from] anyhow::Error),
+    /// A commit-link rule was violated (cross-project, duplicate, ...).
+    /// Callers match on this to show a specific message.
+    #[error(transparent)]
+    CommitLink(#[from] devspace_core::CommitLinkError),
 }
 
 /// Opens a connection and applies pragmas required by CLAUDE.md: WAL mode

@@ -4,9 +4,10 @@ use crate::StorageError;
 
 /// Each migration is a numbered, immutable step. Never edit an applied
 /// migration in place (CLAUDE.md storage rules) — append a new one instead.
-const MIGRATIONS: &[(i64, &str)] = &[(
-    1,
-    r#"
+const MIGRATIONS: &[(i64, &str)] = &[
+    (
+        1,
+        r#"
         CREATE TABLE projects (
             id          INTEGER PRIMARY KEY,
             name        TEXT NOT NULL,
@@ -91,7 +92,37 @@ const MIGRATIONS: &[(i64, &str)] = &[(
         CREATE INDEX idx_commit_links_task ON commit_links(task_id);
         CREATE INDEX idx_commit_links_hash ON commit_links(repo_id, hash);
         "#,
-)];
+    ),
+    (
+        2,
+        r#"
+        -- A task links a given commit at most once, but one commit may be
+        -- linked to many tasks (many-to-many). A hash is only unique within
+        -- a repo, so repo_id is part of the key.
+        CREATE UNIQUE INDEX idx_commit_links_unique
+            ON commit_links(task_id, repo_id, hash);
+
+        -- Project scoping lives in the database too, not just the UI or the
+        -- repository code: a link is valid only if the task's project equals
+        -- the repo's project.
+        CREATE TRIGGER commit_links_same_project_insert
+        BEFORE INSERT ON commit_links
+        WHEN (SELECT project_id FROM tasks WHERE id = NEW.task_id)
+             IS NOT (SELECT project_id FROM repos WHERE id = NEW.repo_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'commit link crosses projects');
+        END;
+
+        CREATE TRIGGER commit_links_same_project_update
+        BEFORE UPDATE OF task_id, repo_id ON commit_links
+        WHEN (SELECT project_id FROM tasks WHERE id = NEW.task_id)
+             IS NOT (SELECT project_id FROM repos WHERE id = NEW.repo_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'commit link crosses projects');
+        END;
+        "#,
+    ),
+];
 
 /// Applies every migration not yet recorded in `schema_migrations`, in a
 /// transaction per migration.

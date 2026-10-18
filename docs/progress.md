@@ -16,8 +16,10 @@ remaining gap is visible at a glance.
       light defined but unused)
 - [x] `devspace-core`: Repo domain type (added alongside repo linking)
 - [x] `devspace-terminal`: `PtySession` (portable-pty process + background
-      reader thread) and `TerminalEmulator` (alacritty_terminal VT100 grid),
-      unit-tested; not wired into any GPUI view yet (see Developer tools)
+      reader thread; kills the shell on drop) and `TerminalEmulator`
+      (alacritty_terminal VT100 grid: styled snapshots, selection, scrollback
+      cap, query replies), 12 unit tests; used by the terminal panel (see
+      Developer tools)
 
 ## Projects
 
@@ -26,9 +28,10 @@ remaining gap is visible at a glance.
       (Todo/In Progress/Blocked/Done)
 - [x] Dashboard: recent notes section (top 5 by `updated_at`, click to open
       in the note editor)
-- [x] Link one or more git repos (list/link/unlink; no repo-picker dialog —
-      path is typed in, name defaults to the last path component)
-- [x] Dashboard: recent commits section (first linked repo only, top 5 newest)
+- [x] Link one or more git repos (list/link/unlink; type a path or use
+      "Browse…" for the native folder picker — a subfolder resolves to its
+      repo root; name defaults to the folder name)
+- [x] Dashboard: recent commits section (merged across all linked repos, top 5 newest, repo-labeled)
 
 ## Tasks and subtasks
 
@@ -69,44 +72,74 @@ remaining gap is visible at a glance.
 
 ## Git integration
 
-- [x] `devspace-git`: git2 wrapper — `recent_commits`, `suggest_commits_for_task`
-- [x] Repo linking on projects (list/link/unlink — see Projects section)
-- [ ] Multi-repo history: merge commits from all repos linked to a project,
-      newest first, each row labeled with its repo, paged per repo
-      (dashboard's "recent commits" is first-repo-only today)
-- [ ] Commit history browser UI (search/filter by repo/branch/author/date) —
-      dashboard's "recent commits" (top 5, first repo only) is as far as this
-      has gone
-- [ ] Tag/map commits to tasks (single/multiple/range) at any subtask depth,
-      within the same project only, many-to-many (task <-> commit), identified
-      by (repo_id, hash); task picker from the project's task tree
-- [ ] Project-scope rule: task.project_id == repo.project_id enforced in
-      core/storage with tests
-- [ ] `commit_links` storage + `CommitLinkRepo` (table exists in the
-      schema design; check whether a migration/repo already covers it before
-      adding one — schema changes need approval)
-- [ ] Badges/labels on a task showing its linked commits, and on commits
-      showing which tasks they map to
-- [ ] Repo unlink handling when links exist (warn or remove links)
-- [ ] Per-link note and status
+- [x] `devspace-git`: git2 wrapper — `recent_commits`, `suggest_commits_for_task`,
+      `merged_history`, `search_history`, `repo_root`
+- [x] Repo linking on projects (list/link/unlink/browse — see Projects section)
+- [x] Multi-repo history (`devspace_git::merged_history`): merges commits from
+      all repos linked to a project, newest first, each row labeled with its
+      repo, cursor-paged (cursor = time, repo id, hash, so same-second and
+      same-prefix commits never repeat or vanish), unreadable repos reported
+      rather than fatal. Each repo fetches one extra commit so a page ending
+      exactly at the limit still offers the next page (regression-tested).
+- [x] Commit history browser (`crates/app/src/commit_browser.rs`, opened from
+      "Commit history" in the sidebar, replaces the main content): GitHub
+      Desktop-style list, virtualized (`uniform_list`), pages of 200 loaded
+      on a background task and prefetched near the end; live debounced search
+      by title / author / hash prefix (`search_history`); repo filter chips;
+      "Unassigned only" filter; "Select all". Open items: filter by branch and
+      date range, keyboard navigation (arrows), a full diff/detail view.
+- [x] Tag/map commits to tasks: click / Ctrl-click / Shift-click range
+      selection, then pick any task from the project's tree (indented by
+      depth) in the side panel, with a label (Linked / Needs migration /
+      Cherry-picked / Deployed) and an optional note. Many-to-many, identified
+      by (repo_id, hash), already-linked commits are skipped, errors (e.g. the
+      cross-project rule) shown inline.
+- [x] Per-link status and note: shown on the selected commit's "Mapped to"
+      list; click the status chip to cycle it, ✕ to unlink. (Editing an
+      existing note is not in the UI yet — note is set when mapping.)
+- [x] Badges on commits: each row shows chips for up to 2 mapped tasks,
+      coloured by status, plus "+N".
+- [x] Project-scope rule: `core::check_same_project`, enforced in
+      `CommitLinkRepo::insert` and by DB triggers (migration 2) so raw writes
+      cannot cross projects; tested at 3 task depths and for cross-project
+      rejection both ways
+- [x] `commit_links` storage: `CommitLinkRepo` (insert, bulk
+      `insert_skipping_existing`, get, list by task / commit / project,
+      status+note update, delete, `count_for_repo`). Migration 2 adds
+      UNIQUE(task_id, repo_id, hash) and the project-scope triggers.
+- [x] Unassigned commits view (the "Unassigned only" filter in the browser)
+- [ ] Badges on a *task* listing its linked commits (task rows on the project
+      page do not show them yet)
+- [ ] Repo unlink handling when links exist — `count_for_repo` is ready for
+      the warning; the unlink button still deletes (and cascades) silently
 - [ ] Branch view (commits on task branch not in target)
-- [ ] Unassigned commits view
-- [ ] Cherry-pick export list
-- [ ] Missing-commit detection after rebase/squash
+- [ ] Cherry-pick export list (`ordered_for_cherry_pick` exists in core; no
+      export UI or git CLI shell-out yet)
+- [ ] Suggested commits (task id in message / branch) in the mapping panel —
+      `suggest_commits_for_task` exists but is not wired to the UI
+- [ ] Missing-commit detection after rebase/squash (needs real patch-ids;
+      `CommitInfo::patch_id` is currently the tree id, and links store none)
 
 ## Developer tools
 
-- [x] Terminal: GPUI view (`crates/app/src/terminal_view.rs`) wired to the
-      `devspace-terminal` backend — spawns the platform shell in the
-      selected project's first linked repo (or home dir), polls pty output
-      on a 16ms background timer, forwards keystrokes (printable chars,
-      Enter/Backspace/Tab/Escape, arrows, Home/End/Delete/Page, ctrl-letter)
-      back to the shell. Toggled from a "Show/Hide terminal" row at the
-      bottom of the project sidebar, rendered as a collapsible 260px bottom
-      panel. Fixed 100x28 grid — not resized to the panel's actual pixel
-      size yet.
-- [ ] Terminal: tabs (one shared session today, not per-project)
-- [ ] Terminal: scrollback cap setting (alacritty's default history applies)
+- [x] Terminal: GPUI view (`crates/app/src/terminal_view.rs`) on the
+      `devspace-terminal` backend — polls pty output on a 16ms background
+      timer, answers ConPTY's cursor-position query, renders colours/bold/
+      underline/inverse and a block cursor, resizes the pty to the panel's
+      pixel size, wheel scrollback, mouse + double-click word selection,
+      copy (Ctrl+C with selection, Ctrl+Shift+C, right-click), paste
+      (Ctrl+V, Ctrl+Shift+V, Shift+Insert, bracketed-paste aware, ESC
+      stripped), modifier-aware arrows (Ctrl+Left/Right word jumps),
+      restart-after-exit on Enter.
+- [x] Terminal: right-hand panel with tabs (`terminal_panel.rs`), one tab
+      set per project; switching projects keeps every shell running,
+      sidebar shows a `>_ N` badge per project, closing a tab kills its
+      shell. Ctrl+` toggles the panel, Ctrl+Shift+` opens a new tab
+      (same as VS Code).
+- [x] Terminal: scrollback capped (2000 lines default, configurable in the
+      backend; no settings UI yet)
+- [ ] Terminal: tab rename, drag-to-resize panel width, split panes
+- [ ] Terminal: scrollback setting in a settings UI
 - [ ] IDE launcher (configurable external command)
 - [ ] Per-project run commands + log view
 
@@ -193,14 +226,11 @@ remaining gap is visible at a glance.
   `devspace-storage::repos`, `AppState::link_repo`/`unlink_repo`) stores just
   `path` + `name` — no validation that the path is actually a git repo at
   link time. `AppState::reload_recent_commits` (called from `select_project`,
-  `link_repo`, `unlink_repo`) walks the **first** linked repo only and
-  silently yields an empty list on any git error (not-a-repo, no commits,
-  bad path) — same as the dashboard's "recent notes" section pattern, just
-  without a stored "last refreshed" marker, since a fresh walk is cheap
-  enough to redo on every mutation rather than cache more granularly. A
-  project with several repos only ever sees the first one's history here —
-  revisit (merge + sort by time across repos) if that turns out to matter in
-  practice.
+  `link_repo`, `unlink_repo`) calls `devspace_git::merged_history` over all
+  linked repos (top 5 for the dashboard). Repos that fail to open land in
+  `AppState::unreadable_repos` and show as a warning line instead of failing
+  the whole refresh. It still runs on the UI thread — fine for 5 commits,
+  but the full commit browser must page on a background task.
 - `devspace-terminal` (`crates/terminal/src/lib.rs`) splits into two pieces
   that can be tested independently: `PtySession` (owns the `portable-pty`
   master/child, writes synchronously, reads via a background thread into an
@@ -221,16 +251,14 @@ remaining gap is visible at a glance.
   same way, or input will appear to hang on Windows.
 - Requirement (from user): commit history must be taggable/mappable to the
   project's tasks and subtasks at any nesting depth, strictly within the
-  project, and a project can have multiple git repos. So the commit browser
-  merges all repos' history, and links key on (repo_id, hash) with the
-  project-scope check. This is now the top priority git slice.
-- Next most valuable slice: the command palette (unblocked by `TextInput`),
-  linking commits to tasks (the next git-integration step, now that repos
-  are linkable — needs a commit-picker UI reading
-  `recent_commits`/`suggest_commits_for_task` and writing `CommitLink`
-  rows), or a credentials vault (nothing started yet, needs the keyring +
-  AEAD decisions CLAUDE.md calls out). Due dates/tags/branch field on tasks
-  are the other near-term item.
+  project, and a project can have multiple git repos. Delivered: the commit
+  browser merges all repos' history; links key on (repo_id, hash) with the
+  project-scope check in core, storage and DB triggers.
+- Next most valuable slices: showing linked commits on task rows + the
+  repo-unlink warning (both small, storage is ready), suggested commits and
+  cherry-pick export, the command palette (unblocked by `TextInput`), a
+  credentials vault (needs the keyring + AEAD decisions CLAUDE.md calls
+  out), and due dates/tags/branch field on tasks.
 - GPUI flexbox gotcha hit wiring the terminal panel: a flex child with
   `.flex_1()` but no `.min_h(px(0.0))` won't shrink below its content's
   natural height, so a fixed-size sibling (the terminal panel) after it
@@ -252,3 +280,37 @@ remaining gap is visible at a glance.
   `appears_transparent: true` and no native titlebar content, silently
   eating anything GPUI draws underneath. Interactive controls belong
   elsewhere in the chrome (this one lives in the sidebar).
+- Migration 2 (`crates/storage/src/migrations.rs`) added
+  `UNIQUE(task_id, repo_id, hash)` plus two triggers
+  (`commit_links_same_project_insert/update`) so the project-scope rule holds
+  even for writes that bypass `CommitLinkRepo`. Constraint failures are
+  mapped back to `CommitLinkError::{AlreadyLinked, ProjectMismatch}` in
+  `commit_links.rs`. Migration 1 was not touched.
+- `CommitBrowser` patterns worth reusing: (1) the list is a `uniform_list`
+  fed by `cx.processor(...)`, which gives the row builder `&mut Self` so rows
+  are built only for the visible range without cloning the data set; the same
+  callback triggers `load_more` near the end. (2) Live search observes the
+  `TextInput` entity (it notifies on every edit; `TextInput` has no change
+  callback), compares the text, and debounces 250 ms with an epoch counter.
+  (3) Every reload bumps `generation` so a slow background page for an old
+  query is dropped. (4) Selection is a set of `(RepoId, hash)` keys, not row
+  indices, so it survives re-filtering.
+- Bug found while building it: `delete_task` only removed direct children
+  from the in-memory task list although the database cascades to every
+  descendant, so deeper subtasks lingered in the UI (and in the mapping
+  picker). It now reloads the task list and the commit links.
+- Bug found while building it: `merged_history` reported "last page" when a
+  page ended exactly at the limit. Each repo now fetches `limit + 1`.
+- Folder picker: `Root::browse_repo` uses `cx.prompt_for_paths` (directories
+  only) and resolves the chosen folder through `devspace_git::repo_root`
+  (`Repository::discover`), so picking a subfolder links the repo root.
+  A folder outside any repo is still linked; the dashboard and history views
+  then warn "Couldn't read history for: <name>".
+- Global shortcuts (Ctrl+`, Ctrl+Shift+`) are GPUI actions bound with no key
+  context. Actions only reach elements on the focused element's ancestor
+  path, so `Root` owns a `FocusHandle`, is focused at startup, and takes
+  focus back when the terminal panel closes. Without that the shortcut
+  silently did nothing until some input was clicked.
+- Not unit-tested: the GPUI views (terminal panel/view, commit browser) —
+  per CLAUDE.md they are tested manually, with the logic kept in
+  `devspace-terminal`, `devspace-git`, `devspace-core` and `devspace-storage`.

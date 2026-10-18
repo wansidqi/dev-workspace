@@ -3,9 +3,10 @@
 //! themselves (CLAUDE.md GPUI guidelines).
 
 use devspace_core::{
-    Note, NoteId, NoteKind, Project, ProjectId, Repo, RepoId, Task, TaskId, TaskStatus,
+    CommitLink, CommitLinkId, CommitLinkStatus, Note, NoteId, NoteKind, Project, ProjectId, Repo,
+    RepoId, Task, TaskId, TaskStatus,
 };
-use devspace_storage::{NoteRepo, ProjectRepo, RepoRepo, TaskRepo, WorkspacePaths};
+use devspace_storage::{CommitLinkRepo, NoteRepo, ProjectRepo, RepoRepo, TaskRepo, WorkspacePaths};
 use rusqlite::Connection;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -24,7 +25,15 @@ pub struct AppState {
     /// Recent commits across the selected project's linked repos, newest
     /// first. Recomputed on `select_project`/repo link/unlink rather than
     /// per-render, since each refresh opens the repo and walks its history.
-    pub recent_commits: Vec<devspace_git::CommitInfo>,
+    pub recent_commits: Vec<devspace_git::RepoCommit>,
+    /// Names of linked repos that could not be read on the last refresh
+    /// (moved, deleted, not a git repo), so the dashboard can say so rather
+    /// than silently showing a partial history.
+    pub unreadable_repos: Vec<String>,
+    /// Commit links of the selected project (every task, any depth), for
+    /// the commit browser's badges and the unassigned filter.
+    pub commit_links: Vec<CommitLink>,
+    next_commit_link_id: i64,
     next_project_id: i64,
     next_task_id: i64,
     next_note_id: i64,
@@ -49,6 +58,9 @@ impl AppState {
             notes: Vec::new(),
             repos: Vec::new(),
             recent_commits: Vec::new(),
+            unreadable_repos: Vec::new(),
+            commit_links: Vec::new(),
+            next_commit_link_id: 1,
             next_project_id: 1,
             next_task_id: 1,
             next_note_id: 1,
@@ -106,21 +118,92 @@ impl AppState {
             self.next_repo_id = self.next_repo_id.max(max + 1);
         }
         self.reload_recent_commits();
+        self.reload_commit_links();
     }
 
-    /// Re-walks the first linked repo's history for the dashboard's "recent
-    /// commits" section. Only the first repo for now — CLAUDE.md allows a
-    /// project to have several, but merging/sorting histories across repos
-    /// is more than this slice needs; revisit if that becomes a real need.
+    fn reload_commit_links(&mut self) {
+        let Some(project) = self.selected_project else {
+            self.commit_links.clear();
+            return;
+        };
+        self.commit_links =
+            CommitLinkRepo::list_for_project(&self.conn, project).unwrap_or_default();
+        if let Some(max) = self.commit_links.iter().map(|l| l.id.0).max() {
+            self.next_commit_link_id = self.next_commit_link_id.max(max + 1);
+        }
+    }
+
+    /// Maps commits (identified by `(repo, hash)`) to a task at any depth of
+    /// the selected project's tree. Commits already linked to that task are
+    /// skipped. Returns how many new links were made, or a message fit for
+    /// the UI (e.g. the cross-project rule firing).
+    pub fn link_commits(
+        &mut self,
+        task_id: TaskId,
+        commits: &[(RepoId, String)],
+        status: CommitLinkStatus,
+        note: Option<String>,
+    ) -> Result<usize, String> {
+        let created_at = now();
+        let note = note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+        let mut links = Vec::with_capacity(commits.len());
+        for (repo_id, hash) in commits {
+            let id = CommitLinkId(Self::next_id(
+                &mut self.next_commit_link_id,
+                self.commit_links.iter().map(|l| l.id.0).max().unwrap_or(0),
+            ));
+            let mut link = CommitLink::new(id, task_id, *repo_id, hash.clone(), created_at)
+                .map_err(|e| e.to_string())?;
+            link.status = status;
+            link.note = note.clone();
+            links.push(link);
+        }
+        let created =
+            CommitLinkRepo::insert_skipping_existing(&self.conn, &links).map_err(|e| e.to_string());
+        self.reload_commit_links();
+        created
+    }
+
+    pub fn unlink_commit(&mut self, id: CommitLinkId) {
+        if CommitLinkRepo::delete(&self.conn, id).is_ok() {
+            self.commit_links.retain(|l| l.id != id);
+        }
+    }
+
+    /// Advances a link's label: Linked -> Needs migration -> Cherry-picked
+    /// -> Deployed -> Linked. (Missing is set by rebase detection, and
+    /// cycles back to Linked if the user clears it.)
+    pub fn cycle_link_status(&mut self, id: CommitLinkId) {
+        let Some(link) = self.commit_links.iter_mut().find(|l| l.id == id) else {
+            return;
+        };
+        link.status = match link.status {
+            CommitLinkStatus::Linked => CommitLinkStatus::NeedsMigration,
+            CommitLinkStatus::NeedsMigration => CommitLinkStatus::CherryPicked,
+            CommitLinkStatus::CherryPicked => CommitLinkStatus::Deployed,
+            CommitLinkStatus::Deployed | CommitLinkStatus::Missing => CommitLinkStatus::Linked,
+        };
+        let _ = CommitLinkRepo::update_status_and_note(
+            &self.conn,
+            link.id,
+            link.status,
+            link.note.as_deref(),
+        );
+    }
+
+    /// Re-walks every linked repo's history, merged newest-first, for the
+    /// dashboard's "recent commits" section. Runs on the calling thread;
+    /// with a small page size that's cheap, but the full commit browser
+    /// must page this on a background task (CLAUDE.md GPUI guidelines).
     fn reload_recent_commits(&mut self) {
-        self.recent_commits = self
-            .repos
-            .first()
-            .and_then(|repo| {
-                devspace_git::recent_commits(std::path::Path::new(&repo.path), RECENT_COMMITS_LIMIT)
-                    .ok()
-            })
-            .unwrap_or_default();
+        let page = devspace_git::merged_history(&self.repos, RECENT_COMMITS_LIMIT, None);
+        self.unreadable_repos = page
+            .unreadable
+            .iter()
+            .filter_map(|id| self.repos.iter().find(|r| r.id == *id))
+            .map(|r| r.name.clone())
+            .collect();
+        self.recent_commits = page.commits;
     }
 
     /// Links a git repo to the currently selected project. `name` is
@@ -148,6 +231,7 @@ impl AppState {
         if RepoRepo::delete(&self.conn, id).is_ok() {
             self.repos.retain(|r| r.id != id);
             self.reload_recent_commits();
+            self.reload_commit_links();
         }
     }
 
@@ -290,7 +374,12 @@ impl AppState {
 
     pub fn delete_task(&mut self, id: TaskId) {
         if TaskRepo::delete(&self.conn, id).is_ok() {
-            self.tasks.retain(|t| t.id != id && t.parent_id != Some(id));
+            // The database cascades to every descendant (and their commit
+            // links); reload rather than patching only direct children.
+            if let Some(project) = self.selected_project {
+                self.tasks = TaskRepo::list_for_project(&self.conn, project).unwrap_or_default();
+            }
+            self.reload_commit_links();
         }
     }
 

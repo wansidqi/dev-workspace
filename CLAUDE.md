@@ -207,7 +207,8 @@ Translucency and shadows cost GPU time and memory, which conflicts with this pro
 - Custom title bar blended into the window (draggable, with window controls styled to match).
 - Left glass sidebar: projects, then tasks tree.
 - Center: the selected task or project with notes, attachments and linked commits in tabs.
-- Right or bottom: collapsible panels for terminal, commit browser and credentials.
+- Terminal: a collapsible right-hand panel with tabs, one tab set per project (Ctrl+` toggles, Ctrl+Shift+` new tab).
+- Commit history browser: a full-content view opened from the sidebar, with a mapping side panel. Credentials: collapsible panel (not built yet).
 - Command palette as a centered floating glass popover with a soft shadow.
 - Empty states have a short message and one primary action.
 

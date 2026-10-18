@@ -3,25 +3,31 @@
 //! (see CLAUDE.md "GPUI guidelines" — pin an exact revision, don't guess
 //! the pre-1.0 API).
 
+mod commit_browser;
 mod date;
 mod note_editor;
 mod state;
+mod terminal_panel;
 mod terminal_view;
 mod text_input;
 mod theme;
 
 use anyhow::Result;
+use commit_browser::CommitBrowser;
 use devspace_core::{Note, NoteId, Project, ProjectId, Repo, Task, TaskId, TaskStatus};
 use devspace_storage::{run_migrations, WorkspacePaths};
 use gpui::{
-    div, prelude::*, px, size, App, Bounds, Context, Entity, SharedString, TitlebarOptions, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowOptions,
+    actions, div, prelude::*, px, size, App, Bounds, Context, Entity, KeyBinding,
+    PathPromptOptions, SharedString, TitlebarOptions, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowControlArea, WindowOptions,
 };
 use note_editor::NoteEditor;
 use state::AppState;
-use terminal_view::TerminalView;
+use terminal_panel::TerminalPanel;
 use text_input::TextInput;
 use theme::GlassTheme;
+
+actions!(devspace, [ToggleTerminal, NewTerminal]);
 
 struct Root {
     state: Entity<AppState>,
@@ -36,11 +42,14 @@ struct Root {
     /// The note currently open in the full-content editor, if any — replaces
     /// the task/notes list in `main_panel` while set.
     open_note: Option<(NoteId, SharedString, Entity<NoteEditor>)>,
-    /// Bottom terminal panel (CLAUDE.md layout concept: "collapsible panels
-    /// for terminal, commit browser and credentials"). Lazily spawned on
-    /// first toggle and kept alive across project switches — one shared
-    /// session, not per-project tabs yet (see docs/progress.md).
-    terminal: Option<Entity<TerminalView>>,
+    /// Right-hand terminal panel (CLAUDE.md layout concept: "collapsible
+    /// panels for terminal, commit browser and credentials"). Owns a tab set
+    /// per project; hiding it or switching projects keeps shells running.
+    terminal_panel: Entity<TerminalPanel>,
+    focus_handle: gpui::FocusHandle,
+    /// The commit history browser, replacing the main content while open
+    /// (like `open_note`).
+    open_history: Option<Entity<CommitBrowser>>,
     terminal_open: bool,
 }
 
@@ -181,12 +190,13 @@ fn stat_tile(
 /// Project dashboard (CLAUDE.md: "dashboard with open tasks, recent notes,
 /// recent commits"). Recent notes render separately in `Root::render` (it
 /// needs `cx` for the open-note click handler); recent commits don't need
-/// one, so they render here from the project's first linked repo.
+/// one, so they render here, merged across all of the project's repos.
 fn dashboard(
     theme: &GlassTheme,
     project: &Project,
     tasks: &[Task],
-    recent_commits: &[devspace_git::CommitInfo],
+    recent_commits: &[devspace_git::RepoCommit],
+    unreadable_repos: &[String],
 ) -> impl IntoElement {
     let theme = *theme;
     let todo = tasks
@@ -240,53 +250,83 @@ fn dashboard(
                 .child(stat_tile(&theme, "Blocked", blocked, theme.warning))
                 .child(stat_tile(&theme, "Done", done, theme.success)),
         )
-        .when(!recent_commits.is_empty(), |el| {
-            el.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(theme.space_1)
-                    .mt(theme.space_2)
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme.text_secondary)
-                            .child("RECENT COMMITS"),
-                    )
-                    .children(recent_commits.iter().map(|commit| {
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap(theme.space_2)
-                            .px(theme.space_2)
-                            .py(theme.space_1)
-                            .rounded(theme.radius_sm)
-                            .bg(theme.surface_raised)
-                            .child(
-                                div()
-                                    .text_color(theme.text_primary)
-                                    .text_sm()
-                                    .child(commit.summary.clone()),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(theme.space_2)
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme.text_secondary)
-                                            .child(commit.author.clone()),
-                                    )
-                                    .child(div().text_xs().text_color(theme.text_secondary).child(
-                                        commit.hash[..7.min(commit.hash.len())].to_string(),
-                                    )),
-                            )
-                    })),
-            )
-        })
+        .when(
+            !recent_commits.is_empty() || !unreadable_repos.is_empty(),
+            |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(theme.space_1)
+                        .mt(theme.space_2)
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(theme.text_secondary)
+                                .child("RECENT COMMITS"),
+                        )
+                        .children(recent_commits.iter().map(|entry| {
+                            let commit = &entry.commit;
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap(theme.space_2)
+                                .px(theme.space_2)
+                                .py(theme.space_1)
+                                .rounded(theme.radius_sm)
+                                .bg(theme.surface_raised)
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(theme.space_2)
+                                        .child(
+                                            // Every row names its repo: a hash is
+                                            // only unique within one repo.
+                                            div()
+                                                .px(theme.space_1)
+                                                .rounded(theme.radius_sm)
+                                                .border_1()
+                                                .border_color(theme.border_light)
+                                                .text_xs()
+                                                .text_color(theme.text_secondary)
+                                                .child(entry.repo_name.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_color(theme.text_primary)
+                                                .text_sm()
+                                                .child(commit.summary.clone()),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(theme.space_2)
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.text_secondary)
+                                                .child(commit.author.clone()),
+                                        )
+                                        .child(
+                                            div().text_xs().text_color(theme.text_secondary).child(
+                                                commit.hash[..7.min(commit.hash.len())].to_string(),
+                                            ),
+                                        ),
+                                )
+                        }))
+                        .when(!unreadable_repos.is_empty(), |el| {
+                            el.child(div().text_xs().text_color(theme.warning).child(format!(
+                                "Couldn't read history for: {}",
+                                unreadable_repos.join(", ")
+                            )))
+                        }),
+                )
+            },
+        )
 }
 
 impl Root {
@@ -431,12 +471,74 @@ impl Root {
         cx.notify();
     }
 
-    fn toggle_terminal(&mut self, cx: &mut Context<Self>) {
+    /// Opens the OS folder picker and links the chosen folder as a repo of
+    /// the selected project. A subfolder resolves to its repo root so git
+    /// history works; a folder outside any repo is still linked and shows
+    /// up in the dashboard's "couldn't read history" warning.
+    fn browse_repo(&mut self, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Link repository".into()),
+        });
+        let state = self.state.clone();
+        cx.spawn(async move |_this, cx| {
+            // Err = picker unavailable, Ok(None) = cancelled.
+            let Ok(Ok(Some(paths))) = picked.await else {
+                return;
+            };
+            let Some(chosen) = paths.into_iter().next() else {
+                return;
+            };
+            let root = devspace_git::repo_root(&chosen).unwrap_or(chosen);
+            let path = root.to_string_lossy().to_string();
+            let name = root
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.clone());
+            state.update(cx, |state, cx| {
+                state.link_repo(&path, &name);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Opens the commit history browser in place of the main content, or
+    /// closes it if already open.
+    fn toggle_history(&mut self, cx: &mut Context<Self>) {
+        if self.open_history.take().is_some() {
+            cx.notify();
+            return;
+        }
+        let theme = self.theme;
+        let state = self.state.clone();
+        let root = cx.entity();
+        let browser = cx.new(|cx| {
+            let mut browser = CommitBrowser::new(cx, state, theme);
+            browser.on_close = Some(Box::new(move |_window, cx| {
+                root.update(cx, |root, cx| {
+                    root.open_history = None;
+                    cx.notify();
+                });
+            }));
+            browser
+        });
+        self.open_note = None;
+        self.open_history = Some(browser);
+        cx.notify();
+    }
+
+    fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.terminal_open = !self.terminal_open;
-        if self.terminal_open && self.terminal.is_none() {
-            let theme = self.theme;
-            let cwd = self.state.read(cx).terminal_cwd();
-            self.terminal = Some(cx.new(|cx| TerminalView::new(cx, cwd, theme)));
+        if self.terminal_open {
+            self.terminal_panel
+                .update(cx, |panel, cx| panel.ensure_tab(window, cx));
+        } else {
+            // The focused terminal is about to leave the tree; hand focus
+            // back so shortcuts (including this toggle) keep working.
+            window.focus(&self.focus_handle, cx);
         }
         cx.notify();
     }
@@ -456,6 +558,7 @@ impl Render for Root {
         let notes = state.notes.clone();
         let repos = state.repos.clone();
         let recent_commits = state.recent_commits.clone();
+        let unreadable_repos = state.unreadable_repos.clone();
         let editing_project_id = self.editing_project.as_ref().map(|(id, _)| *id);
         let editing_task_id = self.editing_task.as_ref().map(|(id, _)| *id);
         let editing_note_id = self.editing_note.as_ref().map(|(id, _)| *id);
@@ -492,6 +595,7 @@ impl Render for Root {
                 }
 
                 let name = project.name.clone();
+                let terminal_count = self.terminal_panel.read(cx).tab_count(id.0);
                 let row = div()
                     .id(("project", id.0 as u64))
                     .flex()
@@ -520,7 +624,19 @@ impl Render for Root {
                                         theme.text_secondary
                                     })
                                     .child(project.name.clone()),
-                            ),
+                            )
+                            .when(terminal_count > 0, |el| {
+                                el.child(
+                                    div()
+                                        .px(theme.space_1)
+                                        .rounded(theme.radius_sm)
+                                        .border_1()
+                                        .border_color(theme.border_light)
+                                        .text_xs()
+                                        .text_color(theme.text_secondary)
+                                        .child(format!(">_ {terminal_count}")),
+                                )
+                            }),
                     )
                     .child(
                         div()
@@ -565,6 +681,8 @@ impl Render for Root {
                 };
 
                 row.on_click(cx.listener(move |this, _, _, cx| {
+                    // The history view belongs to one project: leave it.
+                    this.open_history = None;
                     this.state.update(cx, |state, _| {
                         state.select_project(id);
                     });
@@ -573,6 +691,41 @@ impl Render for Root {
                 .into_any_element()
             }))
             .child(create_row(&theme, &self.new_project_input))
+            .when(selected_project.is_some(), |el| {
+                let open = self.open_history.is_some();
+                el.child(
+                    div()
+                        .id("open-history")
+                        .mt(theme.space_3)
+                        .flex()
+                        .items_center()
+                        .gap(theme.space_2)
+                        .px(theme.space_3)
+                        .py(theme.space_2)
+                        .rounded(theme.radius_md)
+                        .cursor_pointer()
+                        .border_1()
+                        .border_color(if open {
+                            theme.border_light
+                        } else {
+                            gpui::transparent_black()
+                        })
+                        .hover(move |s| {
+                            s.bg(theme.surface_raised).border_color(theme.border_subtle)
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_history(cx)))
+                        .child(div().size(px(6.0)).rounded_full().bg(if open {
+                            theme.accent
+                        } else {
+                            gpui::transparent_black()
+                        }))
+                        .child(
+                            div()
+                                .text_color(theme.text_secondary)
+                                .child("Commit history"),
+                        ),
+                )
+            })
             .child(
                 div()
                     .id("toggle-terminal")
@@ -591,8 +744,8 @@ impl Render for Root {
                         gpui::transparent_black()
                     })
                     .hover(move |s| s.bg(theme.surface_raised).border_color(theme.border_subtle))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.toggle_terminal(cx);
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.toggle_terminal(window, cx);
                     }))
                     .child(
                         div()
@@ -624,7 +777,13 @@ impl Render for Root {
             .p(theme.space_4)
             .gap(theme.space_3)
             .when_some(selected_project_data.as_ref(), |el, project| {
-                el.child(dashboard(&theme, project, &raw_tasks, &recent_commits))
+                el.child(dashboard(
+                    &theme,
+                    project,
+                    &raw_tasks,
+                    &recent_commits,
+                    &unreadable_repos,
+                ))
             })
             .when(selected_project.is_some() && !notes.is_empty(), |el| {
                 el.child(
@@ -919,10 +1078,45 @@ impl Render for Root {
                         )
                         .into_any_element()
                 }))
-                .child(create_row(&theme, &self.new_repo_input))
+                .child(
+                    div()
+                        .flex()
+                        .items_start()
+                        .gap(theme.space_2)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .child(create_row(&theme, &self.new_repo_input)),
+                        )
+                        .child(
+                            div()
+                                .id("browse-repo")
+                                .mt(theme.space_2)
+                                .flex_none()
+                                .px(theme.space_4)
+                                .py(theme.space_2)
+                                .rounded(theme.radius_md)
+                                .border_1()
+                                .border_color(theme.accent)
+                                .text_color(theme.accent)
+                                .cursor_pointer()
+                                .hover(move |s| s.bg(theme.surface_raised))
+                                .on_click(cx.listener(|this, _, _, cx| this.browse_repo(cx)))
+                                .child("Browse…"),
+                        ),
+                )
             });
 
-        let main_panel = if let Some((_, title, editor)) = &self.open_note {
+        let main_panel = if let Some(history) = &self.open_history {
+            div()
+                .flex()
+                .flex_1()
+                .h_full()
+                .min_w(px(0.0))
+                .child(history.clone())
+                .into_any_element()
+        } else if let Some((_, title, editor)) = &self.open_note {
             div()
                 .flex()
                 .flex_col()
@@ -960,35 +1154,29 @@ impl Render for Root {
             .flex_col()
             .size_full()
             .bg(theme.window_tint)
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
+                this.toggle_terminal(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NewTerminal, window, cx| {
+                this.terminal_open = true;
+                this.terminal_panel
+                    .update(cx, |panel, cx| panel.new_tab(window, cx));
+                cx.notify();
+            }))
             .child(titlebar(&theme))
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_1()
-                            .min_h(px(0.0))
-                            .child(sidebar)
-                            .child(main_panel),
-                    )
-                    .when_some(
-                        self.terminal_open.then(|| self.terminal.clone()).flatten(),
-                        |el, terminal| {
-                            el.child(
-                                div()
-                                    .h(px(260.0))
-                                    .w_full()
-                                    .p(theme.space_2)
-                                    .bg(theme.surface)
-                                    .border_t_1()
-                                    .border_color(theme.border_subtle)
-                                    .child(terminal),
-                            )
-                        },
-                    ),
+                div().flex().flex_col().flex_1().child(
+                    div()
+                        .flex()
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .child(sidebar)
+                        .child(main_panel)
+                        .when(self.terminal_open, |el| {
+                            el.child(self.terminal_panel.clone())
+                        }),
+                ),
             )
     }
 }
@@ -1010,6 +1198,15 @@ fn main() -> Result<()> {
     gpui_platform::application().run(move |cx: &mut App| {
         text_input::init_key_bindings(cx);
         note_editor::init_key_bindings(cx);
+        // Bound globally (no key context) so it also fires while a terminal
+        // has focus; GPUI matches bindings before the terminal's raw
+        // key-down handler sees the keystroke.
+        // Same as VS Code: Ctrl+` toggles the panel, Ctrl+Shift+` opens a
+        // new terminal.
+        cx.bind_keys([
+            KeyBinding::new("ctrl-`", ToggleTerminal, None),
+            KeyBinding::new("ctrl-shift-`", NewTerminal, None),
+        ]);
 
         let bounds = Bounds::centered(None, size(px(1000.0), px(640.0)), cx);
         let state = cx.new(|_| AppState::new(conn, paths.clone()));
@@ -1026,7 +1223,7 @@ fn main() -> Result<()> {
                 window_background: WindowBackgroundAppearance::MicaBackdrop,
                 ..Default::default()
             },
-            |_, cx| {
+            |window, cx| {
                 let new_project_input = cx.new(|cx| TextInput::new(cx, "New project name…", theme));
                 let new_task_input = cx.new(|cx| TextInput::new(cx, "New task title…", theme));
                 let new_note_input = cx.new(|cx| TextInput::new(cx, "New note title…", theme));
@@ -1095,6 +1292,14 @@ fn main() -> Result<()> {
 
                 cx.new(|cx| {
                     cx.observe(&state, |_, _, cx| cx.notify()).detach();
+                    let terminal_panel = cx.new(|cx| TerminalPanel::new(cx, state.clone(), theme));
+                    // Re-render the sidebar's per-project terminal badges.
+                    cx.observe(&terminal_panel, |_, _, cx| cx.notify()).detach();
+                    // Global shortcuts (toggle terminal, ...) are actions
+                    // dispatched along the focused element's ancestors, so
+                    // the root needs focus whenever nothing else has it.
+                    let focus_handle = cx.focus_handle();
+                    window.focus(&focus_handle, cx);
                     Root {
                         state,
                         theme,
@@ -1106,8 +1311,10 @@ fn main() -> Result<()> {
                         editing_task: None,
                         editing_note: None,
                         open_note: None,
-                        terminal: None,
+                        terminal_panel,
                         terminal_open: false,
+                        focus_handle,
+                        open_history: None,
                     }
                 })
             },
