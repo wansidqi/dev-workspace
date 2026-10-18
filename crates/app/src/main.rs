@@ -7,6 +7,8 @@ mod commit_browser;
 mod date;
 mod external;
 mod note_editor;
+mod palette;
+mod palette_rank;
 mod state;
 mod task_detail;
 mod terminal_panel;
@@ -30,7 +32,7 @@ use terminal_panel::TerminalPanel;
 use text_input::TextInput;
 use theme::GlassTheme;
 
-actions!(devspace, [ToggleTerminal, NewTerminal]);
+actions!(devspace, [ToggleTerminal, NewTerminal, OpenPalette]);
 
 struct Root {
     state: Entity<AppState>,
@@ -62,6 +64,9 @@ struct Root {
     /// Project-page filter: show only tasks carrying this tag.
     tag_filter: Option<String>,
     terminal_open: bool,
+    // Command palette overlay (see palette.rs) and the focus to restore on close.
+    palette: Option<Entity<palette::CommandPalette>>,
+    palette_prev_focus: Option<gpui::FocusHandle>,
 }
 
 fn status_label(status: TaskStatus) -> &'static str {
@@ -1426,6 +1431,9 @@ impl Render for Root {
                     .update(cx, |panel, cx| panel.new_tab(window, cx));
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
+                this.toggle_palette(window, cx);
+            }))
             .child(titlebar(&theme))
             .child(
                 div().flex().flex_col().flex_1().child(
@@ -1440,6 +1448,7 @@ impl Render for Root {
                         }),
                 ),
             )
+            .children(self.palette.clone())
     }
 }
 
@@ -1468,6 +1477,8 @@ fn main() -> Result<()> {
         cx.bind_keys([
             KeyBinding::new("ctrl-`", ToggleTerminal, None),
             KeyBinding::new("ctrl-shift-`", NewTerminal, None),
+            KeyBinding::new("ctrl-k", OpenPalette, None),
+            KeyBinding::new("ctrl-shift-p", OpenPalette, None),
         ]);
 
         let bounds = Bounds::centered(None, size(px(1000.0), px(640.0)), cx);
@@ -1580,6 +1591,8 @@ fn main() -> Result<()> {
                         open_task: None,
                         confirm_unlink_repo: None,
                         tag_filter: None,
+                        palette: None,
+                        palette_prev_focus: None,
                     }
                 })
             },

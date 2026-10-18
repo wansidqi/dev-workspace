@@ -200,8 +200,17 @@ remaining gap is visible at a glance.
 
 ## Search and navigation
 
-- [ ] Global search
-- [ ] Command palette (unblocked — `TextInput` exists to build it on)
+- [x] Command palette (Ctrl+K / Ctrl+Shift+P): centered glass popover with a
+      live-search `TextInput`; groups COMMANDS, PROJECTS, TASKS, NOTES, COMMITS
+      (max ~50 rows); Up/Down/Tab, Enter, click, Esc, click-outside; restores
+      the previous focus. Ranking is pure and tested (`palette_rank.rs`:
+      exact > prefix > word-prefix > substring > fuzzy, stable, Unicode-safe)
+- [x] Global search: task and note titles across all non-archived projects
+      (`TaskRepo/NoteRepo::search_titles`, LIKE-escaped, bound params, no
+      schema change; switches project first) and commits of the selected
+      project via `search_history`; DB/git work is debounced on a background
+      task
+- [ ] Global search of note content (titles only for now)
 - [ ] Keyboard shortcuts / keybindings beyond the text-input ones
 - [ ] Restore last project/task/layout on startup
 
