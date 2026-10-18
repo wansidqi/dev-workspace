@@ -724,12 +724,6 @@ impl AppState {
 
     // --- hooks for settings.rs / ide.rs / workspace_tools.rs -------------
 
-    /// The workspace layout, cloned for background jobs (backup/export/
-    /// import) that open their own database connection.
-    pub fn workspace_paths(&self) -> WorkspacePaths {
-        self.paths.clone()
-    }
-
     /// The folder "Open in IDE" should open: the first linked repo, or the
     /// project's own data folder when none is linked yet.
     pub fn project_folder(&self) -> Option<std::path::PathBuf> {

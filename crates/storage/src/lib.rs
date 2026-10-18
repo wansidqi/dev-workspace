@@ -9,8 +9,8 @@ mod notes;
 mod paths;
 mod projects;
 mod repos;
-mod search;
 mod run_commands;
+mod search;
 mod tasks;
 mod transfer;
 
@@ -22,8 +22,8 @@ pub use notes::NoteRepo;
 pub use paths::WorkspacePaths;
 pub use projects::ProjectRepo;
 pub use repos::RepoRepo;
-pub use search::{escape_like, NoteHit, TaskHit};
 pub use run_commands::RunCommandRepo;
+pub use search::{escape_like, NoteHit, TaskHit};
 pub use tasks::TaskRepo;
 pub use transfer::{
     backup_workspace, export_project, BackupReport, ExportReport, EXPORT_DB_NAME, EXPORT_DIR_SUFFIX,

@@ -161,7 +161,7 @@ impl WorkspaceTools {
     }
 
     fn backup(&mut self, cx: &mut Context<Self>) {
-        let paths = self.state.read(cx).workspace_paths();
+        let paths = self.state.read(cx).workspace_paths().clone();
         self.run_job(cx, "Backing up the workspace…", move || {
             let conn = job_connection(&paths)?;
             let report = devspace_storage::backup_workspace(&conn, &paths, now_secs())
@@ -207,7 +207,7 @@ impl WorkspaceTools {
         let Some(project) = self.state.read(cx).selected_project else {
             return;
         };
-        let paths = self.state.read(cx).workspace_paths();
+        let paths = self.state.read(cx).workspace_paths().clone();
         self.pick_folder("Export here", cx, move |this, parent, cx| {
             this.run_job(cx, "Exporting the project…", move || {
                 let conn = job_connection(&paths)?;
@@ -231,7 +231,7 @@ impl WorkspaceTools {
     }
 
     fn import(&mut self, cx: &mut Context<Self>) {
-        let paths = self.state.read(cx).workspace_paths();
+        let paths = self.state.read(cx).workspace_paths().clone();
         self.pick_folder("Import this export folder", cx, move |this, folder, cx| {
             this.run_job(cx, "Importing the project…", move || {
                 let mut conn = job_connection(&paths)?;
