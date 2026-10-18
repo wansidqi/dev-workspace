@@ -9,6 +9,7 @@ mod paths;
 mod projects;
 mod repos;
 mod search;
+mod run_commands;
 mod tasks;
 
 pub use attachments::AttachmentRepo;
@@ -19,6 +20,7 @@ pub use paths::WorkspacePaths;
 pub use projects::ProjectRepo;
 pub use repos::RepoRepo;
 pub use search::{escape_like, NoteHit, TaskHit};
+pub use run_commands::RunCommandRepo;
 pub use tasks::TaskRepo;
 
 use rusqlite::Connection;

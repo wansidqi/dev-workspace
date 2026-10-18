@@ -1,0 +1,7 @@
+[package]
+name = "devspace-runner"
+version.workspace = true
+edition.workspace = true
+
+# Deliberately dependency-free: std::process + threads are all this needs.
+[dependencies]
