@@ -7,7 +7,11 @@ mod commit_browser;
 mod date;
 mod external;
 mod ide;
+mod markdown;
+mod markdown_view;
 mod note_editor;
+mod note_format;
+mod note_page;
 mod palette;
 mod palette_rank;
 mod run_panel;
@@ -54,6 +58,10 @@ struct Root {
     /// The note currently open in the full-content editor, if any — replaces
     /// the task/notes list in `main_panel` while set.
     open_note: Option<(NoteId, SharedString, Entity<NoteEditor>)>,
+    /// Edit / Split / Preview for the open note, and its parsed preview
+    /// (re-parsed only when the text changes). See `note_page.rs`.
+    note_mode: note_page::NoteMode,
+    note_preview: Option<(SharedString, Vec<markdown::Block>)>,
     /// Right-hand terminal panel (CLAUDE.md layout concept: "collapsible
     /// panels for terminal, commit browser and credentials"). Owns a tab set
     /// per project; hiding it or switching projects keeps shells running.
@@ -251,14 +259,13 @@ fn stat_tile(
 }
 
 /// Project dashboard (CLAUDE.md: "dashboard with open tasks, recent notes,
-/// recent commits"). Recent notes render separately in `Root::render` (it
-/// needs `cx` for the open-note click handler); recent commits don't need
-/// one, so they render here, merged across all of the project's repos.
+/// recent commits"; the commit list lives in the history browser instead).
+/// Recent notes render separately in `Root::render` (it
+/// needs `cx` for the open-note click handler).
 fn dashboard(
     theme: &GlassTheme,
     project: &Project,
     tasks: &[Task],
-    recent_commits: &[devspace_git::RepoCommit],
     unreadable_repos: &[String],
 ) -> impl IntoElement {
     let theme = *theme;
@@ -313,83 +320,12 @@ fn dashboard(
                 .child(stat_tile(&theme, "Blocked", blocked, theme.warning))
                 .child(stat_tile(&theme, "Done", done, theme.success)),
         )
-        .when(
-            !recent_commits.is_empty() || !unreadable_repos.is_empty(),
-            |el| {
-                el.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(theme.space_1)
-                        .mt(theme.space_2)
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(theme.text_secondary)
-                                .child("RECENT COMMITS"),
-                        )
-                        .children(recent_commits.iter().map(|entry| {
-                            let commit = &entry.commit;
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap(theme.space_2)
-                                .px(theme.space_2)
-                                .py(theme.space_1)
-                                .rounded(theme.radius_sm)
-                                .bg(theme.surface_raised)
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(theme.space_2)
-                                        .child(
-                                            // Every row names its repo: a hash is
-                                            // only unique within one repo.
-                                            div()
-                                                .px(theme.space_1)
-                                                .rounded(theme.radius_sm)
-                                                .border_1()
-                                                .border_color(theme.border_light)
-                                                .text_xs()
-                                                .text_color(theme.text_secondary)
-                                                .child(entry.repo_name.clone()),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_color(theme.text_primary)
-                                                .text_sm()
-                                                .child(commit.summary.clone()),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(theme.space_2)
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(theme.text_secondary)
-                                                .child(commit.author.clone()),
-                                        )
-                                        .child(
-                                            div().text_xs().text_color(theme.text_secondary).child(
-                                                commit.hash[..7.min(commit.hash.len())].to_string(),
-                                            ),
-                                        ),
-                                )
-                        }))
-                        .when(!unreadable_repos.is_empty(), |el| {
-                            el.child(div().text_xs().text_color(theme.warning).child(format!(
-                                "Couldn't read history for: {}",
-                                unreadable_repos.join(", ")
-                            )))
-                        }),
-                )
-            },
-        )
+        .when(!unreadable_repos.is_empty(), |el| {
+            el.child(div().text_xs().text_color(theme.warning).child(format!(
+                "Couldn't read history for: {}",
+                unreadable_repos.join(", ")
+            )))
+        })
 }
 
 impl Root {
@@ -510,6 +446,7 @@ impl Root {
             .read(cx)
             .read_note_content(id)
             .unwrap_or_default();
+        let mode = note_page::NoteMode::initial(&content);
         let theme = self.theme;
         let state = self.state.clone();
         let root = cx.entity();
@@ -528,9 +465,17 @@ impl Root {
                     cx.notify();
                 });
             }));
+            let save_root = root.clone();
+            editor.on_save = Some(Box::new(move |window, cx| {
+                save_root.update(cx, |root, cx| {
+                    root.set_note_mode(note_page::NoteMode::Preview, window, cx);
+                });
+            }));
             editor
         });
         self.open_note = Some((id, title, editor));
+        self.note_mode = mode;
+        self.note_preview = None;
         cx.notify();
     }
 
@@ -713,7 +658,6 @@ impl Render for Root {
         }
         let notes = state.project_notes();
         let repos = state.repos.clone();
-        let recent_commits = state.recent_commits.clone();
         let unreadable_repos = state.unreadable_repos.clone();
         let editing_project_id = self.editing_project.as_ref().map(|(id, _)| *id);
         let editing_task_id = self.editing_task.as_ref().map(|(id, _)| *id);
@@ -938,13 +882,7 @@ impl Render for Root {
             .p(theme.space_4)
             .gap(theme.space_3)
             .when_some(selected_project_data.as_ref(), |el, project| {
-                el.child(dashboard(
-                    &theme,
-                    project,
-                    &raw_tasks,
-                    &recent_commits,
-                    &unreadable_repos,
-                ))
+                el.child(dashboard(&theme, project, &raw_tasks, &unreadable_repos))
             })
             .when(selected_project.is_some(), |el| {
                 el.child(self.workspace_tools.clone())
@@ -1108,9 +1046,9 @@ impl Render for Root {
                                 div()
                                     .px(theme.space_2)
                                     .rounded(theme.radius_sm)
-                                    .bg(theme.accent.opacity(0.12))
+                                    .bg(crate::theme::label_color(tag).opacity(0.16))
                                     .text_xs()
-                                    .text_color(theme.accent)
+                                    .text_color(crate::theme::label_color(tag))
                                     .child(tag.clone())
                             }))
                             .when(task.tags.len() > 3, |d| {
@@ -1407,6 +1345,8 @@ impl Render for Root {
                 )
             });
 
+        let mut note_page =
+            (self.open_note.is_some() && self.open_history.is_none()).then(|| self.note_page(cx));
         let main_panel = if let Some(history) = &self.open_history {
             div()
                 .flex()
@@ -1423,35 +1363,8 @@ impl Render for Root {
                 .min_w(px(0.0))
                 .child(detail.clone())
                 .into_any_element()
-        } else if let Some((_, title, editor)) = &self.open_note {
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .h_full()
-                .bg(theme.surface_solid)
-                .p(theme.space_4)
-                .gap(theme.space_3)
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(theme.space_2)
-                        .child(icon_button(&theme, "←", "note-back").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                this.open_note = None;
-                                cx.notify();
-                            },
-                        )))
-                        .child(
-                            div()
-                                .text_xl()
-                                .text_color(theme.text_primary)
-                                .child(title.clone()),
-                        ),
-                )
-                .child(editor.clone())
-                .into_any_element()
+        } else if let Some(page) = note_page.take() {
+            page
         } else if self.run_open {
             div()
                 .flex()
@@ -1469,6 +1382,7 @@ impl Render for Root {
             .flex_col()
             .size_full()
             .bg(theme.window_tint)
+            .font_family(theme::UI_FONT)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
                 this.toggle_terminal(window, cx);
@@ -1654,6 +1568,8 @@ fn main() -> Result<()> {
                         editing_task: None,
                         editing_note: None,
                         open_note: None,
+                        note_mode: note_page::NoteMode::Edit,
+                        note_preview: None,
                         terminal_panel,
                         terminal_open: saved.terminal_open,
                         focus_handle,

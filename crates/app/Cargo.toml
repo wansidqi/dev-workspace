@@ -15,6 +15,7 @@ devspace-terminal = { path = "../terminal" }
 devspace-runner = { path = "../runner" }
 rusqlite = { version = "0.31", features = ["bundled"] }
 unicode-segmentation = "1"
+pulldown-cmark = { version = "0.12", default-features = false }
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

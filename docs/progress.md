@@ -12,9 +12,10 @@ remaining gap is visible at a glance.
       CommitLink, RunCommand domain types + validation + unit tests
 - [x] `devspace-storage`: SQLite migrations (WAL, foreign keys),
       `WorkspacePaths` for the on-disk layout
-- [x] GPUI wired up and pinned to a Zed commit, glass theme tokens (dark;
+- [x] GPUI wired up and pinned to a Zed commit, glass theme tokens (dark = neutral black/gray surfaces with a blue accent; tag and repo chips get a stable per-name colour via `theme::label_color`; whole UI in the monospace family, Cascadia Mono on Windows, set per-OS in `theme.rs`;
       light defined but unused)
 - [x] `devspace-core`: Repo domain type (added alongside repo linking)
+- [x] `devspace-runner`: std-only process runner (no dependencies) behind run commands
 - [x] `devspace-terminal`: `PtySession` (portable-pty process + background
       reader thread; kills the shell on drop) and `TerminalEmulator`
       (alacritty_terminal VT100 grid: styled snapshots, selection, scrollback
@@ -31,7 +32,7 @@ remaining gap is visible at a glance.
 - [x] Link one or more git repos (list/link/unlink; type a path or use
       "Browse…" for the native folder picker — a subfolder resolves to its
       repo root; name defaults to the folder name)
-- [x] Dashboard: recent commits section (merged across all linked repos, top 5 newest, repo-labeled)
+- [x] Dashboard: recent commits section removed at the user's request (the history browser covers it); a warning still lists repos whose history could not be read
 
 ## Tasks and subtasks
 
@@ -75,7 +76,7 @@ remaining gap is visible at a glance.
 - [ ] Kind selector — everything is created as `NoteKind::Note`; Script/SQL
       kinds exist in the domain type but aren't reachable from the UI
 - [ ] Syntax highlighting
-- [ ] Live markdown preview
+- [x] Markdown preview: Edit / Split / Preview toggle, formatting toolbar (bold, italic, heading, code, table, lists, tasks, quote, link, rule), Ctrl+S saves and switches to Preview; notes with content open in Preview, empty ones in Edit. `pulldown-cmark` (approved) parsed in `markdown.rs`, rendered by `markdown_view.rs`, page in `note_page.rs`, toolbar logic in `note_format.rs`; raw HTML shown as text, input capped at 512 KB. Notes are always `.md` files. Verified by tests and compilation only.
 - [ ] Search
 
 ## Attachments
@@ -133,7 +134,7 @@ remaining gap is visible at a glance.
       case-insensitive name substring; since/until are inclusive and the walk
       stops early once commits are older than `since`. `list_branches(repo)`
       (current, locals, remote-only) and `project_branches(repos)` feed the
-      browser's filter bar: branch chips (first 12 + "More…"), author box,
+      browser's filter bar: branch dropdown (searchable list, like GitHub Desktop), author box,
       Any time / Today / Last 7 / Last 30 days chips, From/To `YYYY-MM-DD`
       boxes with inline errors, "Clear filters". Day boundaries are UTC.
       UI verified by compilation only (not run); git side by unit tests.
@@ -233,7 +234,7 @@ remaining gap is visible at a glance.
       project via `search_history`; DB/git work is debounced on a background
       task
 - [ ] Global search of note content (titles only for now)
-- [ ] Keyboard shortcuts / keybindings beyond the text-input ones
+- [ ] Keyboard shortcuts beyond: Ctrl+K / Ctrl+Shift+P (palette), Ctrl+` (terminal), Ctrl+Shift+` (new terminal)
 - [x] Restore last project, task page and terminal visibility on startup
       (`settings.rs`; stale ids fall back silently; a hidden terminal panel
       spawns nothing)
@@ -484,3 +485,14 @@ remaining gap is visible at a glance.
   exporter's machine).
 - Backup/export/import use a second SQLite connection on a background thread
   (WAL, 10 s busy timeout), not the UI's connection.
+
+## Pending decisions
+
+- Dependencies awaiting approval: `keyring`, `chacha20poly1305`, `zeroize`
+  (credentials vault); `pdfium-render` (PDF viewer); a syntax highlighter
+  crate for code blocks (`pulldown-cmark` is approved and in use).
+- History date filters use UTC day boundaries; a local-offset helper (or
+  `chrono`, a new dependency) would make "Today" follow local time.
+- Everything merged from the parallel agents (palette, run commands,
+  settings/backup, history filters) was verified by compilation and unit
+  tests; the screens have not been exercised by hand yet.

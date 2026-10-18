@@ -44,6 +44,7 @@ actions!(
         NeCut,
         NeCopy,
         NeClose,
+        NeSave,
     ]
 );
 
@@ -69,6 +70,8 @@ pub fn init_key_bindings(cx: &mut App) {
         KeyBinding::new("end", NeEnd, Some("NoteEditor")),
         KeyBinding::new("enter", NeNewline, Some("NoteEditor")),
         KeyBinding::new("escape", NeClose, Some("NoteEditor")),
+        KeyBinding::new("ctrl-s", NeSave, Some("NoteEditor")),
+        KeyBinding::new("cmd-s", NeSave, Some("NoteEditor")),
     ]);
 }
 
@@ -87,6 +90,8 @@ pub struct NoteEditor {
     pub on_change: Option<ChangeHandler>,
     /// Called on Escape.
     pub on_close: Option<CloseHandler>,
+    /// Called on Ctrl+S (the caller switches to the preview).
+    pub on_save: Option<CloseHandler>,
     pub theme: GlassTheme,
 }
 
@@ -109,6 +114,7 @@ impl NoteEditor {
             is_selecting: false,
             on_change: None,
             on_close: None,
+            on_save: None,
             theme,
         }
     }
@@ -245,6 +251,36 @@ impl NoteEditor {
             handler(window, cx);
             self.on_close = Some(handler);
         }
+    }
+
+    fn save(&mut self, _: &NeSave, window: &mut Window, cx: &mut Context<Self>) {
+        // Content is already persisted on every edit; save re-writes it so the
+        // file is current even if an earlier write failed, then lets the
+        // caller react (switch to preview).
+        self.notify_change(window, cx);
+        if let Some(handler) = self.on_save.take() {
+            handler(window, cx);
+            self.on_save = Some(handler);
+        }
+    }
+
+    /// Applies a toolbar formatting command to the current selection.
+    pub fn apply_format(
+        &mut self,
+        format: crate::note_format::Format,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let edit = crate::note_format::apply(&self.content, self.selected_range.clone(), format);
+        let mut text = self.content.to_string();
+        text.replace_range(edit.range, &edit.text);
+        self.content = text.into();
+        self.selected_range = edit.select;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        window.notify_text_input_changed(&self.focus_handle);
+        self.notify_change(window, cx);
+        cx.notify();
     }
 
     fn on_mouse_down(
@@ -782,6 +818,7 @@ impl Render for NoteEditor {
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::close))
+            .on_action(cx.listener(Self::save))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))

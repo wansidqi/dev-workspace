@@ -33,7 +33,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(120);
 const LOG_LINE_HEIGHT: f32 = 18.0;
 /// Monospace UI font for the log, same family the commit browser uses for
 /// hashes.
-const MONO_FONT: &str = "Consolas";
+use crate::theme::MONO_FONT;
 
 pub type CloseHandler = Box<dyn Fn(&mut Window, &mut App)>;
 

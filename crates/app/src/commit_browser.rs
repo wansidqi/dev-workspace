@@ -31,8 +31,6 @@ const PREFETCH_ROWS: usize = 40;
 const ROW_HEIGHT: f32 = 56.0;
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
 const SIDE_PANEL_WIDTH: f32 = 360.0;
-/// Branch chips shown inline; the rest sit behind "More…".
-const INLINE_BRANCHES: usize = 12;
 const DAY_SECONDS: i64 = 86_400;
 
 /// Quick date ranges. Day boundaries are UTC, like the From/To inputs, since
@@ -149,6 +147,8 @@ pub struct CommitBrowser {
     branches: Vec<String>,
     branches_for: Vec<RepoId>,
     branches_open: bool,
+    /// Filter box inside the branch dropdown.
+    branch_search: Entity<TextInput>,
     /// Repos that lack the chosen branch, from the latest pages.
     missing_branch: Vec<String>,
 
@@ -216,6 +216,8 @@ impl CommitBrowser {
         .detach();
 
         let author_input = cx.new(|cx| TextInput::new(cx, "Author…", theme));
+        let branch_search = cx.new(|cx| TextInput::new(cx, "Filter branches…", theme));
+        cx.observe(&branch_search, |_, _, cx| cx.notify()).detach();
         let from_input = cx.new(|cx| TextInput::new(cx, "From YYYY-MM-DD", theme));
         let to_input = cx.new(|cx| TextInput::new(cx, "To YYYY-MM-DD", theme));
 
@@ -309,6 +311,7 @@ impl CommitBrowser {
             branches: Vec::new(),
             branches_for: Vec::new(),
             branches_open: false,
+            branch_search,
             missing_branch: Vec::new(),
             selected: HashSet::new(),
             anchor: None,
@@ -739,7 +742,10 @@ impl CommitBrowser {
                                     .px(theme.space_1)
                                     .rounded(theme.radius_sm)
                                     .border_1()
-                                    .border_color(theme.border_light)
+                                    .border_color(
+                                        crate::theme::label_color(&entry.repo_name).opacity(0.5),
+                                    )
+                                    .text_color(crate::theme::label_color(&entry.repo_name))
                                     .child(entry.repo_name.clone()),
                             )
                             .child(
@@ -751,7 +757,12 @@ impl CommitBrowser {
                             .child("·")
                             .child(div().flex_none().child(format_date(commit.time)))
                             .child("·")
-                            .child(div().flex_none().font_family("Consolas").child(short_hash)),
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .font_family(crate::theme::MONO_FONT)
+                                    .child(short_hash),
+                            ),
                     ),
             )
             .child(
@@ -791,18 +802,37 @@ impl CommitBrowser {
             .into_any_element()
     }
 
-    /// One branch chip; selecting the active branch again clears it.
-    fn branch_chip(&self, name: &str, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+    /// One row of the branch dropdown; choosing the active branch again
+    /// clears the filter.
+    fn branch_option(&self, name: &str, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let theme = self.theme;
         let target = name.to_owned();
         let active = self.branch_filter.as_deref() == Some(name);
-        self.chip(name.to_owned(), active, ("branch-filter", ix as u64))
+        div()
+            .id(("branch-filter", ix as u64))
+            .w_full()
+            .flex_none()
+            .px(theme.space_3)
+            .py(theme.space_1)
+            .rounded(theme.radius_sm)
+            .text_sm()
+            .cursor_pointer()
+            .truncate()
+            .text_color(if active {
+                theme.accent
+            } else {
+                theme.text_primary
+            })
+            .when(active, |d| d.bg(theme.accent.opacity(0.12)))
+            .hover(move |s| s.bg(theme.surface))
+            .child(name.to_owned())
             .on_click(cx.listener(move |this, _, _, cx| {
-                let next = if this.branch_filter.as_deref() == Some(target.as_str()) {
+                this.branch_filter = if this.branch_filter.as_deref() == Some(target.as_str()) {
                     None
                 } else {
                     Some(target.clone())
                 };
-                this.branch_filter = next;
+                this.branches_open = false;
                 this.reload(cx);
             }))
             .into_any_element()
@@ -811,78 +841,137 @@ impl CommitBrowser {
     /// Branch, author and date filters, under the search box.
     fn render_filter_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = self.theme;
-        let overflow = self.branches.len().saturating_sub(INLINE_BRANCHES);
-        // The selected branch is always visible, even when it is past the cut.
-        let selected_far = self
-            .branch_filter
-            .as_deref()
-            .and_then(|b| self.branches.iter().position(|n| n == b))
-            .filter(|&ix| ix >= INLINE_BRANCHES);
-
-        let mut branch_row = div()
+        let label = match &self.branch_filter {
+            Some(name) => name.clone(),
+            None => "All branches".to_string(),
+        };
+        let button = div()
+            .id("branch-dropdown")
             .flex()
-            .flex_wrap()
             .items_center()
-            .gap(theme.space_1)
+            .gap(theme.space_2)
+            .max_w(px(320.0))
+            .px(theme.space_3)
+            .py(theme.space_1)
+            .rounded(theme.radius_sm)
+            .border_1()
+            .text_xs()
+            .cursor_pointer()
+            .border_color(if self.branch_filter.is_some() || self.branches_open {
+                theme.accent
+            } else {
+                theme.border_subtle
+            })
+            .text_color(theme.text_primary)
+            .hover(move |s| s.bg(theme.surface_raised))
+            .child(div().text_color(theme.text_secondary).child("Branch:"))
+            .child(div().truncate().child(label))
             .child(
                 div()
-                    .text_xs()
                     .text_color(theme.text_secondary)
-                    .child("Branch"),
+                    .child(if self.branches_open { "▴" } else { "▾" }),
             )
-            .child(
-                self.chip("All branches", self.branch_filter.is_none(), "branch-all")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if this.branch_filter.take().is_some() {
-                            this.reload(cx);
-                        }
-                    })),
-            );
-        for (ix, name) in self.branches.iter().enumerate().take(INLINE_BRANCHES) {
-            branch_row = branch_row.child(self.branch_chip(name, ix, cx));
-        }
-        if let Some(ix) = selected_far {
-            branch_row = branch_row.child(self.branch_chip(&self.branches[ix], ix, cx));
-        }
-        if overflow > 0 {
-            branch_row = branch_row.child(
-                self.chip(
-                    if self.branches_open {
-                        "Fewer".to_string()
-                    } else {
-                        format!("More… ({overflow})")
-                    },
-                    self.branches_open,
-                    "branch-more",
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.branches_open = !this.branches_open;
-                    cx.notify();
-                })),
-            );
-        }
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.branches_open = !this.branches_open;
+                if this.branches_open {
+                    this.branch_search.update(cx, |i, cx| i.reset(window, cx));
+                    let focus = this.branch_search.read(cx).focus_handle.clone();
+                    window.focus(&focus, cx);
+                }
+                cx.notify();
+            }));
 
-        let more_list = (self.branches_open && overflow > 0).then(|| {
-            div()
-                .id("branch-overflow")
+        let dropdown = self.branches_open.then(|| {
+            let query = self
+                .branch_search
+                .read(cx)
+                .content
+                .to_string()
+                .to_lowercase();
+            let shown: Vec<(usize, &String)> = self
+                .branches
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| query.is_empty() || n.to_lowercase().contains(&query))
+                .collect();
+            let empty = shown.is_empty();
+            let list = div()
+                .id("branch-list")
                 .flex()
-                .flex_wrap()
-                .gap(theme.space_1)
-                .p(theme.space_2)
-                .max_h(px(120.0))
+                .flex_col()
+                .gap(px(2.0))
+                .max_h(px(280.0))
                 .overflow_y_scroll()
-                .rounded(theme.radius_sm)
-                .border_1()
-                .border_color(theme.border_subtle)
-                .bg(theme.surface_raised)
-                .children(
-                    self.branches
-                        .iter()
-                        .enumerate()
-                        .skip(INLINE_BRANCHES)
-                        .map(|(ix, name)| self.branch_chip(name, ix, cx)),
+                .child(
+                    div()
+                        .id("branch-all")
+                        .w_full()
+                        .flex_none()
+                        .px(theme.space_3)
+                        .py(theme.space_1)
+                        .rounded(theme.radius_sm)
+                        .text_sm()
+                        .cursor_pointer()
+                        .text_color(if self.branch_filter.is_none() {
+                            theme.accent
+                        } else {
+                            theme.text_primary
+                        })
+                        .hover(move |s| s.bg(theme.surface))
+                        .child("All branches")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.branches_open = false;
+                            if this.branch_filter.take().is_some() {
+                                this.reload(cx);
+                            } else {
+                                cx.notify();
+                            }
+                        })),
                 )
+                .children(
+                    shown
+                        .into_iter()
+                        .map(|(ix, n)| self.branch_option(n, ix, cx)),
+                )
+                .when(empty, |d| {
+                    d.child(
+                        div()
+                            .px(theme.space_3)
+                            .py(theme.space_1)
+                            .text_xs()
+                            .text_color(theme.text_secondary)
+                            .child("No matching branches"),
+                    )
+                });
+            gpui::deferred(
+                div()
+                    .absolute()
+                    .top(px(30.0))
+                    .left_0()
+                    .w(px(360.0))
+                    .flex()
+                    .flex_col()
+                    .gap(theme.space_1)
+                    .p(theme.space_2)
+                    .rounded(theme.radius_md)
+                    .border_1()
+                    .border_color(theme.border_light)
+                    .bg(theme.surface_solid)
+                    .shadow_lg()
+                    .occlude()
+                    .child(self.branch_search.clone())
+                    .child(list),
+            )
+            .with_priority(10)
         });
+
+        let branch_row = div()
+            .relative()
+            .flex()
+            .items_center()
+            .gap(theme.space_2)
+            .child(button)
+            .children(dropdown);
 
         let date_row = div()
             .flex()
@@ -936,7 +1025,6 @@ impl CommitBrowser {
             .flex_col()
             .gap(theme.space_1)
             .child(branch_row)
-            .children(more_list)
             .child(date_row)
             .when_some(self.date_error.clone(), |d, error| {
                 d.child(div().text_xs().text_color(theme.danger).child(error))

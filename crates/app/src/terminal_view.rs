@@ -21,7 +21,7 @@ use crate::theme::GlassTheme;
 const INITIAL_COLS: usize = 100;
 const INITIAL_ROWS: usize = 28;
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
-const FONT_FAMILY: &str = "Consolas";
+const FONT_FAMILY: &str = crate::theme::MONO_FONT;
 const FONT_SIZE: f32 = 13.0;
 const LINE_HEIGHT: f32 = 18.0;
 
