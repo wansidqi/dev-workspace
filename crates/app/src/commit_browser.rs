@@ -28,7 +28,7 @@ use crate::theme::GlassTheme;
 const PAGE_SIZE: usize = 200;
 /// Fetch the next page when the viewport gets this close to the end.
 const PREFETCH_ROWS: usize = 40;
-const ROW_HEIGHT: f32 = 40.0;
+const ROW_HEIGHT: f32 = 56.0;
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
 const SIDE_PANEL_WIDTH: f32 = 360.0;
 
@@ -384,18 +384,24 @@ impl CommitBrowser {
         let badges = links.get(&key).cloned().unwrap_or_default();
         let extra = badges.len().saturating_sub(2);
 
+        let short_hash = commit.hash[..7.min(commit.hash.len())].to_string();
+
+        // Two lines like GitHub Desktop: the title on top (ellipsis when it
+        // is long), the details underneath, task badges pinned right. The row
+        // fills the list width so dividers and badges line up.
         div()
             .id(("commit-row", visible_ix as u64))
             .flex()
             .items_center()
-            .justify_between()
             .gap(theme.space_3)
+            .w_full()
             .h(px(ROW_HEIGHT))
-            .px(theme.space_3)
+            .pl(theme.space_2)
+            .pr(theme.space_4)
             .border_b_1()
             .border_color(theme.border_subtle)
             .cursor_pointer()
-            .when(selected, |d| d.bg(theme.accent.opacity(0.16)))
+            .when(selected, |d| d.bg(theme.accent.opacity(0.14)))
             .when(!selected, |d| d.hover(move |s| s.bg(theme.surface_raised)))
             .on_click(
                 cx.listener(move |this, event: &gpui::ClickEvent, _window, cx| {
@@ -403,33 +409,69 @@ impl CommitBrowser {
                 }),
             )
             .child(
+                // Selection bar: the accent shows which rows are selected
+                // even when the tint is hard to see.
+                div()
+                    .flex_none()
+                    .w(px(3.0))
+                    .h(px(ROW_HEIGHT - 20.0))
+                    .rounded_full()
+                    .bg(if selected {
+                        theme.accent
+                    } else {
+                        gpui::transparent_black()
+                    }),
+            )
+            .child(
                 div()
                     .flex()
+                    .flex_col()
                     .flex_1()
                     .min_w(px(0.0))
-                    .items_center()
-                    .gap(theme.space_2)
+                    .gap(theme.space_1)
                     .child(
                         div()
-                            .flex_none()
-                            .px(theme.space_1)
-                            .rounded(theme.radius_sm)
-                            .border_1()
-                            .border_color(theme.border_light)
-                            .text_xs()
-                            .text_color(theme.text_secondary)
-                            .child(entry.repo_name.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
+                            .truncate()
                             .text_sm()
                             .text_color(theme.text_primary)
                             .child(commit.summary.clone()),
                     )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(theme.space_2)
+                            .text_xs()
+                            .text_color(theme.text_secondary)
+                            .child(
+                                // Every row names its repo: a hash is only
+                                // unique within one repo.
+                                div()
+                                    .flex_none()
+                                    .px(theme.space_1)
+                                    .rounded(theme.radius_sm)
+                                    .border_1()
+                                    .border_color(theme.border_light)
+                                    .child(entry.repo_name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .max_w(px(180.0))
+                                    .child(commit.author.clone()),
+                            )
+                            .child("·")
+                            .child(div().flex_none().child(format_date(commit.time)))
+                            .child("·")
+                            .child(div().flex_none().font_family("Consolas").child(short_hash)),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(theme.space_1)
                     .children(badges.iter().take(2).map(|link| {
                         let title = task_titles
                             .get(&link.task_id)
@@ -437,11 +479,14 @@ impl CommitBrowser {
                             .unwrap_or_else(|| "task".to_string());
                         let color = status_color(&theme, link.status);
                         div()
-                            .flex_none()
-                            .px(theme.space_1)
+                            .max_w(px(160.0))
+                            .truncate()
+                            .px(theme.space_2)
+                            .py(px(1.0))
                             .rounded(theme.radius_sm)
                             .border_1()
                             .border_color(color.opacity(0.5))
+                            .bg(color.opacity(0.10))
                             .text_xs()
                             .text_color(color)
                             .child(title)
@@ -449,24 +494,11 @@ impl CommitBrowser {
                     .when(extra > 0, |d| {
                         d.child(
                             div()
-                                .flex_none()
                                 .text_xs()
                                 .text_color(theme.text_secondary)
                                 .child(format!("+{extra}")),
                         )
                     }),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(theme.space_3)
-                    .text_xs()
-                    .text_color(theme.text_secondary)
-                    .child(commit.author.clone())
-                    .child(format_date(commit.time))
-                    .child(commit.hash[..7.min(commit.hash.len())].to_string()),
             )
             .into_any_element()
     }
@@ -942,6 +974,7 @@ impl Render for CommitBrowser {
                                     }),
                                 )
                                 .track_scroll(&self.scroll)
+                                .w_full()
                                 .flex_1()
                                 .min_h(px(0.0)),
                             ),
