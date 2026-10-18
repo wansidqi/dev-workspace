@@ -71,10 +71,24 @@ remaining gap is visible at a glance.
 
 - [x] `devspace-git`: git2 wrapper — `recent_commits`, `suggest_commits_for_task`
 - [x] Repo linking on projects (list/link/unlink — see Projects section)
-- [ ] Commit history browser UI (search/filter by branch/author/date) —
+- [ ] Multi-repo history: merge commits from all repos linked to a project,
+      newest first, each row labeled with its repo, paged per repo
+      (dashboard's "recent commits" is first-repo-only today)
+- [ ] Commit history browser UI (search/filter by repo/branch/author/date) —
       dashboard's "recent commits" (top 5, first repo only) is as far as this
       has gone
-- [ ] Link commits to tasks (single/multiple/range), per-link note and status
+- [ ] Tag/map commits to tasks (single/multiple/range) at any subtask depth,
+      within the same project only, many-to-many (task <-> commit), identified
+      by (repo_id, hash); task picker from the project's task tree
+- [ ] Project-scope rule: task.project_id == repo.project_id enforced in
+      core/storage with tests
+- [ ] `commit_links` storage + `CommitLinkRepo` (table exists in the
+      schema design; check whether a migration/repo already covers it before
+      adding one — schema changes need approval)
+- [ ] Badges/labels on a task showing its linked commits, and on commits
+      showing which tasks they map to
+- [ ] Repo unlink handling when links exist (warn or remove links)
+- [ ] Per-link note and status
 - [ ] Branch view (commits on task branch not in target)
 - [ ] Unassigned commits view
 - [ ] Cherry-pick export list
@@ -205,6 +219,11 @@ remaining gap is visible at a glance.
   this manually (see `pty_session_runs_a_command_and_produces_output`) —
   the eventual GPUI terminal view should handle `TerminalEvent`/CPR the
   same way, or input will appear to hang on Windows.
+- Requirement (from user): commit history must be taggable/mappable to the
+  project's tasks and subtasks at any nesting depth, strictly within the
+  project, and a project can have multiple git repos. So the commit browser
+  merges all repos' history, and links key on (repo_id, hash) with the
+  project-scope check. This is now the top priority git slice.
 - Next most valuable slice: the command palette (unblocked by `TextInput`),
   linking commits to tasks (the next git-integration step, now that repos
   are linkable — needs a commit-picker UI reading

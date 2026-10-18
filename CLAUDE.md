@@ -43,7 +43,7 @@ Non-goals:
 3. **Notes**: markdown at project, task and subtask level; types: note, script, SQL; syntax highlighting; live preview; search. Stored as plain files.
 4. **Attachments**: PDFs, images, other files on a project, task or subtask; built-in PDF viewer; copy into workspace or link by path.
 5. **Credentials vault**: per project; encrypted; reveal/copy with auto-hide and clipboard auto-clear; optional injection into terminal sessions as environment variables.
-6. **Git integration**: commit history browser (search, filter by branch/author/date); select single, multiple or range and attach to a task; per-link note and status (needs migration, cherry-picked, deployed); badges on linked commits; unassigned commits view; branch view (commits on task branch not in target); suggested commits (task ID in message or branch); export ordered cherry-pick list; warn when a linked commit is missing after rebase or squash.
+6. **Git integration**: commit history browser (search, filter by repo/branch/author/date) that merges history across all repos linked to the project, newest first, each row labeled with its repo; select single, multiple or range and tag/map/label them to any task or subtask at any nesting depth in the same project (a task can have many commits; a commit can be mapped to more than one task; tasks are picked from the project's task tree); per-link note and status (needs migration, cherry-picked, deployed); badges on linked commits; unassigned commits view; branch view (commits on task branch not in target); suggested commits (task ID in message or branch); export ordered cherry-pick list; warn when a linked commit is missing after rebase or squash.
 7. **Developer tools**: integrated terminal with tabs starting in the project folder; launch external IDE on the project folder; per-project run commands with log view.
 8. **Search and navigation**: global search; command palette; keyboard shortcuts; restore last project, task and layout on startup.
 9. **Data and safety**: backup and export/import of a project; local-first.
@@ -104,6 +104,10 @@ run_commands(id, project_id, name, command, cwd)
 Rules:
 - Commit links store only repo and hash (plus patch_id). Message, author and date are read from git at display time.
 - Store the repo reference on every commit link from the start; projects can have several repos.
+- A commit hash is only unique within a repo: identify a commit by (repo_id, hash), never by hash alone. Different repos in one project can share short hashes.
+- Project scoping: a commit link is valid only if the task's project_id equals the repo's project_id. Enforce this in core/storage (not just the UI) and test it. A task may be at any depth of the subtask tree.
+- Commit links are many-to-many between tasks and commits: unique on (task_id, repo_id, hash), but the same commit may link to several tasks. Deleting a task deletes its links (cascade); unlinking a repo from a project must handle or warn about its existing links rather than orphaning them silently.
+- The commit browser and dashboard must cover every linked repo, not just the first. Page each repo's history and merge by commit time.
 - Every schema change is a numbered migration. Never edit an applied migration.
 - Use transactions for multi-step writes. Enable WAL mode and foreign keys.
 
