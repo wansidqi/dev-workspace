@@ -332,7 +332,11 @@ in SQLite (`app.db`) instead.
   `on_confirm`/`on_cancel` callbacks. Reusable — embed via `cx.new(|cx|
   TextInput::new(cx, placeholder, theme))`, set `on_confirm`, then
   `.child(entity.clone())` anywhere. Needs `text_input::init_key_bindings(cx)`
-  called once at startup (already done in `main.rs`).
+  called once at startup (already done in `main.rs`). Two options for forms:
+  `masked` draws one `*` per character (byte offsets are converted to display
+  offsets; copy, cut and the IME position hooks are disabled) and
+  `keep_on_confirm` leaves the text in place after Enter (the default clears
+  it), so a failed save does not wipe a typed secret.
 - `NoteEditor` (`crates/app/src/note_editor.rs`) is the multiline counterpart
   to `TextInput` — duplicated rather than generalized from it, because the
   single-line `TextInput` assumes one `ShapedLine` throughout (layout,

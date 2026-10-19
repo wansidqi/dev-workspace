@@ -30,7 +30,7 @@ Non-goals:
 | Terminal | alacritty_terminal (emulation) + portable-pty (shell process) |
 | Markdown | pulldown-cmark for parsing and preview |
 | PDF viewing | pdfium-render (or mupdf); render pages to images |
-| Secrets | keyring crate for the master key; AEAD encryption (chacha20poly1305 or aes-gcm) for stored credentials |
+| Secrets | keyring crate for the master key; XChaCha20-Poly1305 (chacha20poly1305 crate) for stored credentials, with zeroize for plaintext |
 | Async | smol or GPUI's own executor; avoid pulling in tokio unless a dependency requires it |
 | Errors | thiserror in library code, anyhow at app boundaries |
 | Logging | tracing + tracing-subscriber |
