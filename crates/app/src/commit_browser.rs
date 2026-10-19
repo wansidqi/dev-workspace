@@ -22,11 +22,12 @@ use gpui::{
 
 use crate::date::{format_date, parse_date};
 use crate::state::AppState;
+use crate::task_tree::{filter_tree, tree_guide_lines, tree_guides, TreeGeometry};
 use crate::text_input::TextInput;
 use crate::theme::GlassTheme;
 use crate::ui::{
     back_button, button, chip, empty_state, filter_chip, icon, icon_button, notice, page_header,
-    section_label, status_style, ButtonKind, Icon,
+    section_label, ButtonKind, Icon,
 };
 
 /// Commits fetched per background page.
@@ -36,6 +37,12 @@ const PREFETCH_ROWS: usize = 40;
 const ROW_HEIGHT: f32 = 56.0;
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
 const SIDE_PANEL_WIDTH: f32 = 360.0;
+/// Task picker rows: the "icon" is an empty slot the tree lines hang from.
+const PICKER_TREE: TreeGeometry = TreeGeometry {
+    indent: 16.0,
+    icon: 8.0,
+    row_height: 32.0,
+};
 const DAY_SECONDS: i64 = 86_400;
 
 /// Quick date ranges. Day boundaries are UTC, like the From/To inputs, since
@@ -109,6 +116,8 @@ pub struct CommitBrowser {
     theme: GlassTheme,
     search_input: Entity<TextInput>,
     note_input: Entity<TextInput>,
+    /// Filters the task picker by title.
+    task_search: Entity<TextInput>,
     scroll: UniformListScrollHandle,
     pub on_close: Option<CloseHandler>,
 
@@ -197,6 +206,8 @@ impl CommitBrowser {
         let search_input =
             cx.new(|cx| TextInput::new(cx, "Search commits by title, author or hash…", theme));
         let note_input = cx.new(|cx| TextInput::new(cx, "Note (optional)…", theme));
+        let task_search = cx.new(|cx| TextInput::new(cx, "Search tasks…", theme));
+        cx.observe(&task_search, |_, _, cx| cx.notify()).detach();
 
         // Live search: the input notifies on every edit; compare and debounce.
         cx.observe(&search_input, |this, input, cx| {
@@ -285,6 +296,7 @@ impl CommitBrowser {
             theme,
             search_input,
             note_input,
+            task_search,
             scroll: UniformListScrollHandle::new(),
             on_close: None,
             commits: Vec::new(),
@@ -1252,57 +1264,85 @@ impl CommitBrowser {
                     .child("This project has no tasks yet. Create one on the project page first."),
             );
         } else {
-            panel = panel.child(
-                div()
-                    .id("task-picker")
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .overflow_y_scroll()
-                    .border_t_1()
-                    .border_color(theme.border_subtle)
-                    .children(tasks.into_iter().map(|(task, depth)| {
-                        let id = task.id;
-                        let title = task.title.clone();
-                        let (status_glyph, status_tint) = status_style(&theme, task.status);
-                        div()
-                            .id(("map-task", id.0 as u64))
-                            .group("map-row")
-                            .flex()
-                            .items_center()
-                            .gap(theme.space_2)
-                            .min_h(px(36.0))
-                            .pl(theme.space_2 + px(16.0) * depth as f32)
-                            .pr(theme.space_2)
-                            .border_b_1()
-                            .border_color(theme.border_subtle)
-                            .cursor_pointer()
-                            .hover(move |s| s.bg(theme.surface_hover))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.map_selection_to(id, title.clone(), window, cx);
-                            }))
-                            .child(icon(status_glyph, 14.0, status_tint))
-                            .child(
+            let query = self.task_search.read(cx).content.to_string();
+            let rows = filter_tree(tasks, &query);
+            let depths: Vec<usize> = rows.iter().map(|(_, depth, _)| *depth).collect();
+            panel = panel.child(self.task_search.clone());
+            if rows.is_empty() {
+                panel = panel.child(
+                    div()
+                        .t_small()
+                        .text_color(theme.text_secondary)
+                        .child("No tasks match."),
+                );
+            }
+            panel =
+                panel.child(
+                    div()
+                        .id("task-picker")
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .overflow_y_scroll()
+                        .children(rows.into_iter().enumerate().map(
+                            |(ix, (task, depth, matched))| {
+                                let id = task.id;
+                                let title = task.title.clone();
+                                let guides = tree_guides(&depths, ix);
                                 div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .truncate()
-                                    .t_body()
-                                    .text_color(theme.text_primary)
-                                    .child(task.title.clone()),
-                            )
-                            .child(
-                                div()
-                                    .t_small()
-                                    .t_strong()
-                                    .text_color(theme.accent)
-                                    .invisible()
-                                    .group_hover("map-row", |s| s.visible())
-                                    .child("Map here"),
-                            )
-                    })),
-            );
+                                    .id(("map-task", id.0 as u64))
+                                    .group("map-row")
+                                    .relative()
+                                    .flex()
+                                    .flex_none()
+                                    .items_center()
+                                    .gap(theme.space_1)
+                                    .h(px(PICKER_TREE.row_height))
+                                    .pl(theme.space_2 + px(PICKER_TREE.indent * depth as f32))
+                                    .pr(theme.space_2)
+                                    .rounded(theme.radius_sm)
+                                    .cursor_pointer()
+                                    .hover(move |s| s.bg(theme.surface_hover))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.map_selection_to(id, title.clone(), window, cx);
+                                    }))
+                                    .children(tree_guide_lines(
+                                        &theme,
+                                        &guides,
+                                        PICKER_TREE,
+                                        theme.space_2,
+                                    ))
+                                    // Empty slot the tree lines hang from, in place of a
+                                    // status icon, to keep the picker quiet.
+                                    .child(div().flex_none().w(px(PICKER_TREE.icon)))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(0.0))
+                                            .truncate()
+                                            .t_body()
+                                            .when(depth == 0, |d| d.t_strong())
+                                            .text_color(if matched {
+                                                theme.text_primary
+                                            } else {
+                                                // Shown only as the parent of a match.
+                                                theme.text_muted
+                                            })
+                                            .child(task.title.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .t_small()
+                                            .t_strong()
+                                            .text_color(theme.accent)
+                                            .invisible()
+                                            .group_hover("map-row", |s| s.visible())
+                                            .child("Map here"),
+                                    )
+                            },
+                        )),
+                );
         }
         panel.into_any_element()
     }

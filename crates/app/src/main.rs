@@ -27,6 +27,7 @@ mod settings;
 mod shell;
 mod state;
 mod task_detail;
+mod task_tree;
 mod terminal_panel;
 mod terminal_view;
 mod text_input;
