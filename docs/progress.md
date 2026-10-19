@@ -107,10 +107,11 @@ remaining gap is visible at a glance.
 
 ## Credentials vault
 
-- [ ] Not started: per-project encrypted storage
-- [ ] AEAD encryption, OS keychain master key
-- [ ] Reveal/copy with auto-hide and clipboard auto-clear
-- [ ] Terminal env-var injection
+- [x] Per-project encrypted storage: `credentials` table (migration 1, no schema change), `devspace-storage::CredentialRepo`, `AppState` helpers (`state/credentials.rs`). Metadata queries never read the ciphertext.
+- [x] AEAD + OS keychain (approved crates `chacha20poly1305`, `keyring`, `zeroize`): XChaCha20-Poly1305 with a fresh random 24-byte nonce per secret; the credential and project ids are bound in as authenticated data so a ciphertext copied to another row will not open. The 32-byte master key is created on first use and kept in the OS keychain (Windows Credential Manager, macOS Keychain, Secret Service), never on disk; a damaged keychain entry is reported, never replaced. Secrets come back in `Zeroizing` and are wiped on drop. Limits: label 100 chars, secret 32 KiB. Tested: round trip, wrong key, tampering, moved ciphertext, nonce uniqueness over 2000 seals, no plaintext in the database, per-project scoping (plus an opt-in `--ignored keychain` test that passed on Windows).
+- [x] Credentials view (sidebar "Credentials", `credentials_panel.rs`): add (label, kind chip, masked value), Reveal/Hide (auto-hides after 15 s, on project switch and on leaving the view), Copy (clipboard cleared after 30 s if it still holds the secret), Replace (rotate using the value box), delete with a second click. Opaque surface. The value box is a masked `TextInput` (one `*` per character, copy/cut disabled). Not part of project export/import; a workspace backup copies the database, and its ciphertext is useless without the keychain key. Compiles and launches; the screen has not been clicked by hand.
+- [ ] Terminal env-var injection (optional, per CLAUDE.md)
+- Known limits: GPUI text and the clipboard hold copies of a secret as ordinary strings that are not zeroized; a revealed value is drawn from such a copy.
 
 ## Git integration
 
@@ -392,12 +393,14 @@ in SQLite (`app.db`) instead.
   browser merges all repos' history; links key on (repo_id, hash) with the
   project-scope check in core, storage and DB triggers.
 - Next slices (palette, global search, startup restore, backup/export,
-  IDE launcher, run commands, markdown preview and Timesheet are done):
+  IDE launcher, run commands, markdown preview, Timesheet, note kinds,
+  project files and the credentials vault are done):
   1. Hand-test the screens that only compile-checked so far (Timesheet,
-     palette, run commands, backup/import, history filters, note page).
-  2. Credentials vault (needs the keyring + AEAD crate approvals below).
-  3. Syntax highlighting for Script/SQL notes (kind selector is done).
-  4. Built-in PDF viewer, project-level attachments.
+     palette, run commands, backup/import, history filters, note page,
+     credentials view).
+  2. Terminal env-var injection from the vault (optional).
+  3. Syntax highlighting for Script/SQL notes (needs a crate approval).
+  4. Built-in PDF viewer (needs `pdfium-render` approval).
   5. Patch-id re-matching of missing commits; light theme and reduced
      transparency; hover transitions.
 - GPUI flexbox gotcha hit wiring the terminal panel: a flex child with
@@ -533,8 +536,8 @@ in SQLite (`app.db`) instead.
 
 ## Pending decisions
 
-- Dependencies awaiting approval: `keyring`, `chacha20poly1305`, `zeroize`
-  (credentials vault); `pdfium-render` (PDF viewer); a syntax highlighter
+- Dependencies awaiting approval:
+  `pdfium-render` (PDF viewer); a syntax highlighter
   crate for code blocks (`pulldown-cmark` is approved and in use).
 - History date filters use UTC day boundaries; a local-offset helper (or
   `chrono`, a new dependency) would make "Today" follow local time.

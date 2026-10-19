@@ -12,6 +12,7 @@ use devspace_storage::{
 };
 use rusqlite::Connection;
 
+mod credentials; // credentials vault helpers (state/credentials.rs)
 mod run_commands; // run-command helpers (state/run_commands.rs)
 mod timesheet; // timesheet helpers (state/timesheet.rs)
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -83,6 +84,12 @@ pub struct AppState {
     /// Saved run commands of the selected project (`state/run_commands.rs`).
     pub run_commands: Vec<devspace_core::RunCommand>,
     next_run_command_id: i64,
+    /// Credential metadata of the selected project (no secret data); see
+    /// `state/credentials.rs`.
+    pub credentials: Vec<devspace_core::CredentialMeta>,
+    next_credential_id: i64,
+    /// Opened on first use so starting the app never touches the keychain.
+    vault: Option<devspace_storage::Vault>,
     next_project_id: i64,
     next_task_id: i64,
     next_note_id: i64,
@@ -117,6 +124,9 @@ impl AppState {
             next_attachment_id: 1,
             run_commands: Vec::new(),
             next_run_command_id: 1,
+            credentials: Vec::new(),
+            next_credential_id: 1,
+            vault: None,
             next_project_id: 1,
             next_task_id: 1,
             next_note_id: 1,
@@ -185,6 +195,7 @@ impl AppState {
         self.reload_commit_links();
         self.reload_attachments();
         self.reload_run_commands();
+        self.reload_credentials();
     }
 
     fn reload_commit_links(&mut self) {
@@ -775,12 +786,14 @@ impl AppState {
         let repos = max("repos") + 1;
         let attachments = max("attachments") + 1;
         let links = max("commit_links") + 1;
+        let credentials = max("credentials") + 1;
         self.next_project_id = self.next_project_id.max(projects);
         self.next_task_id = self.next_task_id.max(tasks);
         self.next_note_id = self.next_note_id.max(notes);
         self.next_repo_id = self.next_repo_id.max(repos);
         self.next_attachment_id = self.next_attachment_id.max(attachments);
         self.next_commit_link_id = self.next_commit_link_id.max(links);
+        self.next_credential_id = self.next_credential_id.max(credentials);
     }
 
     /// Picks up a project that was added to the database behind this

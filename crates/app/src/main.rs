@@ -5,6 +5,7 @@
 
 mod attach_flow;
 mod commit_browser;
+mod credentials_panel;
 mod date;
 mod external;
 mod ide;
@@ -29,6 +30,7 @@ mod workspace_tools;
 
 use anyhow::Result;
 use commit_browser::CommitBrowser;
+use credentials_panel::CredentialsPanel;
 use devspace_core::{Note, NoteId, NoteKind, Project, ProjectId, Repo, Task, TaskId, TaskStatus};
 use devspace_storage::{run_migrations, WorkspacePaths};
 use gpui::{
@@ -95,6 +97,10 @@ struct Root {
     /// content like the run-commands view.
     timesheet_panel: Entity<TimesheetPanel>,
     timesheet_open: bool,
+    /// Credentials vault view (see `credentials_panel.rs`), shown in place of
+    /// the main content.
+    credentials_panel: Entity<CredentialsPanel>,
+    credentials_open: bool,
     // --- settings / IDE / backup hooks (settings.rs, workspace_tools.rs) ---
     /// Persisted per-user settings (last project/task, terminal panel, IDE).
     settings: Entity<SettingsStore>,
@@ -582,6 +588,7 @@ impl Root {
         self.open_task = None;
         self.run_open = false;
         self.timesheet_open = false;
+        self.credentials_open = false;
         self.open_history = Some(browser);
         cx.notify();
     }
@@ -848,7 +855,14 @@ impl Render for Root {
                 div()
                     .mt(theme.space_1)
                     .child(self.timesheet_sidebar_row(cx)),
-            );
+            )
+            .when(selected_project.is_some(), |el| {
+                el.child(
+                    div()
+                        .mt(theme.space_1)
+                        .child(self.credentials_sidebar_row(cx)),
+                )
+            });
 
         let main_panel = div()
             .flex()
@@ -1410,6 +1424,14 @@ impl Render for Root {
                 .min_w(px(0.0))
                 .child(self.timesheet_panel.clone())
                 .into_any_element()
+        } else if self.credentials_open {
+            div()
+                .flex()
+                .flex_1()
+                .h_full()
+                .min_w(px(0.0))
+                .child(self.credentials_panel.clone())
+                .into_any_element()
         } else {
             main_panel.into_any_element()
         };
@@ -1596,6 +1618,17 @@ fn main() -> Result<()> {
                         }));
                         panel
                     });
+                    let root_for_credentials: Entity<Root> = cx.entity();
+                    let credentials_panel = cx.new(|cx| {
+                        let mut panel = CredentialsPanel::new(cx, state.clone(), theme);
+                        panel.on_close = Some(Box::new(move |_window, cx| {
+                            root_for_credentials.update(cx, |root, cx| {
+                                root.credentials_open = false;
+                                cx.notify();
+                            });
+                        }));
+                        panel
+                    });
                     // Global shortcuts (toggle terminal, ...) are actions
                     // dispatched along the focused element's ancestors, so
                     // the root needs focus whenever nothing else has it.
@@ -1633,6 +1666,8 @@ fn main() -> Result<()> {
                         run_open: false,
                         timesheet_panel,
                         timesheet_open: false,
+                        credentials_panel,
+                        credentials_open: false,
                     };
                     // A visible terminal panel needs its first tab, exactly
                     // as when the user opens it; a hidden one spawns nothing.

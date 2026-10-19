@@ -3,6 +3,7 @@
 
 mod attachments;
 mod commit_links;
+mod credentials;
 mod import;
 mod migrations;
 mod notes;
@@ -14,9 +15,11 @@ mod search;
 mod tasks;
 mod timesheet;
 mod transfer;
+mod vault;
 
 pub use attachments::AttachmentRepo;
 pub use commit_links::CommitLinkRepo;
+pub use credentials::CredentialRepo;
 pub use import::{import_project, import_project_with_limits, ImportLimits, ImportReport};
 pub use migrations::run_migrations;
 pub use notes::NoteRepo;
@@ -30,6 +33,7 @@ pub use timesheet::TimesheetRepo;
 pub use transfer::{
     backup_workspace, export_project, BackupReport, ExportReport, EXPORT_DB_NAME, EXPORT_DIR_SUFFIX,
 };
+pub use vault::{KeyStore, KeyringStore, MemoryKeyStore, Secret, Vault, VaultError};
 
 use rusqlite::Connection;
 

@@ -213,7 +213,7 @@ Translucency and shadows cost GPU time and memory, which conflicts with this pro
 - Left glass sidebar: projects, then tasks tree.
 - Center: the selected task or project with notes, attachments and linked commits in tabs.
 - Terminal: a collapsible right-hand panel with tabs, one tab set per project (Ctrl+` toggles, Ctrl+Shift+` new tab).
-- Commit history browser: a full-content view opened from the sidebar, with a mapping side panel. Credentials: collapsible panel (not built yet).
+- Commit history browser: a full-content view opened from the sidebar, with a mapping side panel. Credentials: a full-content view from the sidebar (add, reveal with auto-hide, copy with clipboard auto-clear, replace, delete).
 - Command palette (Ctrl+K or Ctrl+Shift+P) as a centered floating glass popover with a soft shadow; searches commands, projects, tasks, note titles and commits.
 - Run commands: a sidebar row opens a full-content view with saved commands and a live log. Project page carries a "Workspace tools" card (Open in IDE, backup, export, import).
 - Timesheet: a sidebar view with a per-month table per project, built from the author's git commits (stored in SQLite, migration 4); copies as tab-separated text.

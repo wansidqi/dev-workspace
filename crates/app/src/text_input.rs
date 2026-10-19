@@ -78,6 +78,12 @@ pub struct TextInput {
     pub on_confirm: Option<ConfirmHandler>,
     /// Called when the user presses Escape.
     pub on_cancel: Option<CancelHandler>,
+    /// Draw one `*` per character instead of the text (secret entry). Copy and
+    /// cut are disabled so a secret cannot leave through the clipboard.
+    pub masked: bool,
+    /// Keep the text after Enter instead of clearing it, so a form can leave a
+    /// typed secret in place when saving fails.
+    pub keep_on_confirm: bool,
     pub theme: GlassTheme,
 }
 
@@ -99,6 +105,8 @@ impl TextInput {
             is_selecting: false,
             on_confirm: None,
             on_cancel: None,
+            masked: false,
+            keep_on_confirm: false,
             theme,
         }
     }
@@ -167,7 +175,9 @@ impl TextInput {
             handler(&self.content.clone(), window, cx);
             self.on_confirm = Some(handler);
         }
-        self.reset(window, cx);
+        if !self.keep_on_confirm {
+            self.reset(window, cx);
+        }
     }
 
     fn cancel(&mut self, _: &TiCancel, window: &mut Window, cx: &mut Context<Self>) {
@@ -214,7 +224,7 @@ impl TextInput {
     }
 
     fn copy(&mut self, _: &TiCopy, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
+        if !self.masked && !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
             ));
@@ -222,7 +232,7 @@ impl TextInput {
     }
 
     fn cut(&mut self, _: &TiCut, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
+        if !self.masked && !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
             ));
@@ -245,6 +255,24 @@ impl TextInput {
         }
     }
 
+    /// Byte offset in `content` -> offset in the drawn text (`*` per char when masked).
+    fn byte_to_display(&self, byte: usize) -> usize {
+        if self.masked {
+            masked_offset(&self.content, byte)
+        } else {
+            byte
+        }
+    }
+
+    /// Inverse of [`Self::byte_to_display`].
+    fn display_to_byte(&self, display: usize) -> usize {
+        if self.masked {
+            byte_offset(&self.content, display)
+        } else {
+            display
+        }
+    }
+
     fn index_for_mouse_position(&self, position: Point<Pixels>) -> usize {
         if self.content.is_empty() {
             return 0;
@@ -259,7 +287,7 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        line.closest_index_for_x(position.x - bounds.left())
+        self.display_to_byte(line.closest_index_for_x(position.x - bounds.left()))
     }
 
     fn select_to(&mut self, offset: usize, window: &Window, cx: &mut Context<Self>) {
@@ -467,6 +495,9 @@ impl EntityInputHandler for TextInput {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
+        if self.masked {
+            return None;
+        }
         let last_layout = self.last_layout.as_ref()?;
         if last_layout.text != self.content {
             return None;
@@ -503,6 +534,9 @@ impl EntityInputHandler for TextInput {
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
         let line_point = self.last_bounds?.localize(&point)?;
+        if self.masked {
+            return None;
+        }
         let last_layout = self.last_layout.as_ref()?;
         if last_layout.text != self.content {
             return None;
@@ -567,12 +601,29 @@ impl Element for TextElement {
     ) -> Self::PrepaintState {
         let input = self.input.read(cx);
         let content = input.content.clone();
-        let selected_range = input.selected_range.clone();
+        let masked = input.masked;
+        let selected_range = input.selected_range.start..input.selected_range.end;
         let cursor = input.cursor_offset();
+        // Masked inputs draw one `*` per character, so every byte offset into
+        // the content is converted to an offset into what is drawn.
+        let (selected_range, cursor) = if masked {
+            (
+                input.byte_to_display(selected_range.start)
+                    ..input.byte_to_display(selected_range.end),
+                input.byte_to_display(cursor),
+            )
+        } else {
+            (selected_range, cursor)
+        };
         let style = window.text_style();
 
         let (display_text, text_color) = if content.is_empty() {
             (input.placeholder.clone(), self.theme.text_secondary)
+        } else if masked {
+            (
+                SharedString::from("*".repeat(content.chars().count())),
+                self.theme.text_primary,
+            )
         } else {
             (content, self.theme.text_primary)
         };
@@ -585,7 +636,7 @@ impl Element for TextElement {
             underline: None,
             strikethrough: None,
         };
-        let runs = if let Some(marked_range) = input.marked_range.as_ref() {
+        let runs = if let Some(marked_range) = input.marked_range.as_ref().filter(|_| !masked) {
             vec![
                 TextRun {
                     len: marked_range.start,
@@ -744,5 +795,38 @@ impl Render for TextInput {
 impl Focusable for TextInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+/// Offset in a masked line (one `*` per character) for a byte offset into
+/// `content`. `byte` must be a char boundary.
+fn masked_offset(content: &str, byte: usize) -> usize {
+    content[..byte].chars().count()
+}
+
+/// Byte offset into `content` for an offset in the masked line; past the end
+/// it is the content's length.
+fn byte_offset(content: &str, masked: usize) -> usize {
+    content
+        .char_indices()
+        .nth(masked)
+        .map_or(content.len(), |(i, _)| i)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn masked_offsets_count_characters_not_bytes() {
+        let text = "aé€😀z";
+        for (chars, (byte, _)) in text.char_indices().enumerate() {
+            assert_eq!(masked_offset(text, byte), chars);
+            assert_eq!(byte_offset(text, chars), byte);
+        }
+        assert_eq!(masked_offset(text, text.len()), 5);
+        assert_eq!(byte_offset(text, 5), text.len());
+        assert_eq!(byte_offset(text, 99), text.len());
+        assert_eq!(byte_offset("", 0), 0);
     }
 }

@@ -10,5 +10,20 @@ thiserror.workspace = true
 anyhow.workspace = true
 dirs.workspace = true
 tracing.workspace = true
+# Credentials vault: AEAD for stored secrets, OS keychain for the master key,
+# zeroize to wipe plaintext after use.
+chacha20poly1305 = "0.10"
+keyring = "3"
+zeroize = "1"
+
+# keyring 3 has no default backends; pick the native keychain per OS.
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service"] }
 
 [dev-dependencies]
