@@ -517,12 +517,15 @@ pub fn clipboard_html(
     projects: &[(String, Vec<TimesheetRow>)],
 ) -> String {
     const BORDER: &str = "border:1px solid #000000;";
+    // Everything outside the tables is set borderless explicitly, so pasting over a
+    // sheet that already has borders clears them instead of leaving them behind.
+    const NONE: &str = "border:none;";
     let mut out = String::from(
         "<table style=\"border-collapse:collapse;font-family:Arial;font-size:10pt\">",
     );
     let blank = |out: &mut String, n: usize| {
         for _ in 0..n {
-            out.push_str("<tr><td colspan=\"5\">&nbsp;</td></tr>");
+            out.push_str(&format!("<tr><td colspan=\"5\" style=\"{NONE}\">&nbsp;</td></tr>"));
         }
     };
     let cell = |out: &mut String, style: &str, text: &str| {
@@ -530,7 +533,7 @@ pub fn clipboard_html(
     };
 
     out.push_str(&format!(
-        "<tr><td colspan=\"5\" style=\"font-weight:bold;text-align:center\">{}</td></tr>",
+        "<tr><td colspan=\"5\" style=\"{NONE}font-weight:bold;text-align:center\">{}</td></tr>",
         html_escape(&settings.title)
     ));
     blank(&mut out, 1);
@@ -541,9 +544,10 @@ pub fn clipboard_html(
         ("REMARKS:", remarks.to_string(), "left"),
     ] {
         out.push_str("<tr>");
-        cell(&mut out, "font-weight:bold", label);
-        cell(&mut out, &format!("text-align:{align}"), &value);
-        out.push_str("<td></td><td></td><td></td></tr>");
+        cell(&mut out, &format!("{NONE}font-weight:bold"), label);
+        cell(&mut out, &format!("{NONE}text-align:{align}"), &value);
+        out.push_str(&format!("<td style=\"{NONE}\"></td>").repeat(3));
+        out.push_str("</tr>");
     }
     blank(&mut out, 2);
 
@@ -554,7 +558,7 @@ pub fn clipboard_html(
         let header_row = out.matches("<tr>").count() + 2;
         let (first, last) = (header_row + 1, header_row + n);
         out.push_str(&format!(
-            "<tr><td colspan=\"5\" style=\"font-weight:bold\">{}</td></tr>",
+            "<tr><td colspan=\"5\" style=\"{NONE}font-weight:bold\">{}</td></tr>",
             html_escape(name)
         ));
         out.push_str("<tr>");
@@ -568,27 +572,36 @@ pub fn clipboard_html(
         out.push_str("</tr>");
         for i in 0..n {
             let row = rows.get(i);
+            // Data rows: lines between columns and around the table, none between rows.
+            let edge = format!(
+                "border-left:1px solid #000000;border-right:1px solid #000000;border-top:none;{}",
+                if i + 1 == n {
+                    "border-bottom:1px solid #000000;"
+                } else {
+                    "border-bottom:none;"
+                }
+            );
             out.push_str("<tr>");
-            cell(&mut out, &format!("{BORDER}text-align:center"), &(i + 1).to_string());
+            cell(&mut out, &format!("{edge}text-align:center"), &(i + 1).to_string());
             cell(
                 &mut out,
-                &format!("{BORDER}font-weight:bold"),
+                &format!("{edge}font-weight:bold"),
                 &row.map(|r| r.title.clone()).unwrap_or_default(),
             );
             cell(
                 &mut out,
-                &format!("{BORDER}text-align:center"),
+                &format!("{edge}text-align:center"),
                 &row.map(|r| fmt_range(&r.date_from, &r.date_to))
                     .unwrap_or_default(),
             );
             cell(
                 &mut out,
-                &format!("{BORDER}text-align:center"),
+                &format!("{edge}text-align:center"),
                 &row.and_then(|r| r.hours.map(fmt_hours)).unwrap_or_default(),
             );
             cell(
                 &mut out,
-                &format!("{BORDER}text-align:right"),
+                &format!("{edge}text-align:right"),
                 &if i == 0 {
                     format!("=SUM(D{first}:D{last})")
                 } else {
