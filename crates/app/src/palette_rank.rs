@@ -147,6 +147,8 @@ pub enum Group {
     Projects,
     Tasks,
     Notes,
+    /// Notes whose text (not title) matched; filtered by the file search.
+    NoteText,
     Commits,
 }
 
@@ -158,6 +160,7 @@ impl Group {
             Group::Projects => "PROJECTS",
             Group::Tasks => "TASKS",
             Group::Notes => "NOTES",
+            Group::NoteText => "IN NOTES",
             Group::Commits => "COMMITS",
         }
     }
@@ -166,11 +169,12 @@ impl Group {
     /// others.
     fn cap(self, query_blank: bool) -> usize {
         match (self, query_blank) {
-            (Group::Commands, _) => 8,
+            (Group::Commands, _) => 12,
             (Group::Projects, true) => 5,
             (Group::Projects, false) => 6,
             (Group::Tasks, true) | (Group::Notes, true) => 5,
             (Group::Tasks, false) | (Group::Notes, false) => 12,
+            (Group::NoteText, _) => 8,
             (Group::Commits, _) => 10,
         }
     }
@@ -182,15 +186,21 @@ pub enum Command {
     ToggleTerminal,
     NewTerminal,
     OpenHistory,
+    OpenRunCommands,
+    OpenTimesheet,
+    OpenCredentials,
     NewProject,
 }
 
 impl Command {
     /// All commands, in the order shown for an empty query.
-    pub const ALL: [Command; 4] = [
+    pub const ALL: [Command; 7] = [
         Command::ToggleTerminal,
         Command::NewTerminal,
         Command::OpenHistory,
+        Command::OpenRunCommands,
+        Command::OpenTimesheet,
+        Command::OpenCredentials,
         Command::NewProject,
     ];
 
@@ -200,6 +210,9 @@ impl Command {
             Command::ToggleTerminal => "Show/Hide terminal",
             Command::NewTerminal => "New terminal",
             Command::OpenHistory => "Open commit history",
+            Command::OpenRunCommands => "Open run commands",
+            Command::OpenTimesheet => "Open timesheet",
+            Command::OpenCredentials => "Open credentials",
             Command::NewProject => "New project",
         }
     }
@@ -209,7 +222,11 @@ impl Command {
         match self {
             Command::ToggleTerminal => "Ctrl+`",
             Command::NewTerminal => "Ctrl+Shift+`",
-            Command::OpenHistory | Command::NewProject => "",
+            Command::OpenHistory => "Ctrl+Shift+H",
+            Command::OpenRunCommands => "Ctrl+Shift+R",
+            Command::OpenTimesheet => "Ctrl+Shift+M",
+            Command::OpenCredentials => "Ctrl+Shift+L",
+            Command::NewProject => "Ctrl+Shift+N",
         }
     }
 }
@@ -253,6 +270,8 @@ pub struct Sources {
     pub projects: Vec<Item>,
     pub tasks: Vec<Item>,
     pub notes: Vec<Item>,
+    /// Notes found by their text; already filtered, kept in the given order.
+    pub note_text: Vec<Item>,
     pub commits: Vec<Item>,
 }
 
@@ -278,24 +297,23 @@ pub fn assemble(query: &str, sources: Sources) -> Vec<Item> {
     let blank = query.trim().is_empty();
     let mut out: Vec<Item> = Vec::new();
     let groups = [
-        sources.commands,
-        sources.projects,
-        sources.tasks,
-        sources.notes,
-        if blank { Vec::new() } else { sources.commits },
-    ];
-    for (idx, items) in groups.into_iter().enumerate() {
-        let is_commits = idx == 4;
-        let group = [
-            Group::Commands,
-            Group::Projects,
-            Group::Tasks,
-            Group::Notes,
+        (Group::Commands, sources.commands),
+        (Group::Projects, sources.projects),
+        (Group::Tasks, sources.tasks),
+        (Group::Notes, sources.notes),
+        (
+            Group::NoteText,
+            if blank { Vec::new() } else { sources.note_text },
+        ),
+        (
             Group::Commits,
-        ][idx];
+            if blank { Vec::new() } else { sources.commits },
+        ),
+    ];
+    for (group, items) in groups {
         let cap = group.cap(blank);
-        let order = if is_commits {
-            // Git already filtered and ordered these.
+        let order = if matches!(group, Group::NoteText | Group::Commits) {
+            // The file search and git already filtered and ordered these.
             (0..items.len()).take(cap).collect()
         } else {
             rank(query, &items, |i| i.title.as_str(), cap)
@@ -481,6 +499,16 @@ mod tests {
                     title: "terminal notes".into(),
                 },
             )],
+            note_text: vec![item(
+                Group::NoteText,
+                "meeting notes",
+                Target::Note {
+                    project: p,
+                    note: NoteId(2),
+                    task: None,
+                    title: "meeting notes".into(),
+                },
+            )],
             commits: vec![item(Group::Commits, "unrelated title", Target::Commit)],
         }
     }
@@ -488,7 +516,10 @@ mod tests {
     #[test]
     fn blank_query_shows_commands_and_recent_but_no_commits() {
         let out = assemble("  ", sample());
-        assert_eq!(out.iter().filter(|i| i.group == Group::Commands).count(), 4);
+        assert_eq!(
+            out.iter().filter(|i| i.group == Group::Commands).count(),
+            Command::ALL.len()
+        );
         assert!(out.iter().any(|i| i.group == Group::Projects));
         assert!(out.iter().any(|i| i.group == Group::Tasks));
         assert!(!out.iter().any(|i| i.group == Group::Commits));
@@ -511,6 +542,35 @@ mod tests {
     }
 
     #[test]
+    fn note_text_hits_skip_title_ranking_and_sit_between_notes_and_commits() {
+        // "meeting notes" does not contain "terminal", yet its text matched.
+        let out = assemble("terminal", sample());
+        let groups: Vec<Group> = out.iter().map(|i| i.group).collect();
+        let text_at = groups.iter().position(|g| *g == Group::NoteText).unwrap();
+        let notes_at = groups.iter().position(|g| *g == Group::Notes).unwrap();
+        let commits_at = groups.iter().position(|g| *g == Group::Commits).unwrap();
+        assert!(notes_at < text_at && text_at < commits_at);
+        assert_eq!(Group::NoteText.label(), "IN NOTES");
+        // A blank query shows recents only, never text hits.
+        assert!(!assemble("  ", sample())
+            .iter()
+            .any(|i| i.group == Group::NoteText));
+    }
+
+    #[test]
+    fn every_command_has_a_unique_title_and_shortcut_hint() {
+        let mut titles = std::collections::HashSet::new();
+        let mut hints = std::collections::HashSet::new();
+        for command in Command::ALL {
+            assert!(titles.insert(command.title()), "duplicate title");
+            assert!(!command.hint().is_empty(), "{:?} has no hint", command);
+            assert!(hints.insert(command.hint()), "duplicate shortcut hint");
+        }
+        // All of them fit in the commands group on a blank query.
+        assert!(Command::ALL.len() <= Group::Commands.cap(true));
+    }
+
+    #[test]
     fn total_is_capped() {
         let many = |g: Group| -> Vec<Item> {
             (0..200)
@@ -522,6 +582,7 @@ mod tests {
             projects: many(Group::Projects),
             tasks: many(Group::Tasks),
             notes: many(Group::Notes),
+            note_text: Vec::new(),
             commits: many(Group::Commits),
         };
         let out = assemble("item", src);

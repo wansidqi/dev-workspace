@@ -239,8 +239,8 @@ remaining gap is visible at a glance.
       schema change; switches project first) and commits of the selected
       project via `search_history`; DB/git work is debounced on a background
       task
-- [ ] Global search of note content (titles only for now)
-- [ ] Keyboard shortcuts beyond: Ctrl+K / Ctrl+Shift+P (palette), Ctrl+` (terminal), Ctrl+Shift+` (new terminal)
+- [x] Global search of note content: the palette adds an "IN NOTES" group for notes whose file text contains every word (case-insensitive, at least 2 characters), with a one-line excerpt; notes already shown by title are skipped. `NoteRepo::search_contents` (`search_content.rs`) reads the files on the background search task, newest notes first, bounded: 400 notes, 512 KB per note, 32 MB per search, 12 results. Files are untrusted: only plain relative paths, regular files only (symlinks skipped). Unit-tested; not tried by hand.
+- [x] Keyboard shortcuts: Ctrl+K / Ctrl+Shift+P (palette), Ctrl+` (terminal), Ctrl+Shift+` (new terminal), and Ctrl+Shift+H (commit history), Ctrl+Shift+R (run commands), Ctrl+Shift+M (timesheet), Ctrl+Shift+L (credentials) which open and again close the view, Ctrl+Shift+N (focus "New project"). Every shortcut is also a palette command that shows its hint; palette commands open a view and never close it. A test keeps the hints unique.
 - [x] Restore last project, task page and terminal visibility on startup
       (`settings.rs`; stale ids fall back silently; a hidden terminal panel
       spawns nothing)

@@ -12,6 +12,7 @@ mod projects;
 mod repos;
 mod run_commands;
 mod search;
+mod search_content;
 mod tasks;
 mod timesheet;
 mod transfer;
@@ -28,6 +29,7 @@ pub use projects::ProjectRepo;
 pub use repos::RepoRepo;
 pub use run_commands::RunCommandRepo;
 pub use search::{escape_like, NoteHit, TaskHit};
+pub use search_content::NoteTextHit;
 pub use tasks::TaskRepo;
 pub use timesheet::TimesheetRepo;
 pub use transfer::{

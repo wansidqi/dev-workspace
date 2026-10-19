@@ -12,9 +12,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use devspace_core::{ProjectId, Repo};
+use devspace_core::{NoteId, ProjectId, Repo};
 use devspace_git::RepoCommit;
-use devspace_storage::{NoteHit, NoteRepo, TaskHit, TaskRepo};
+use devspace_storage::{NoteHit, NoteRepo, NoteTextHit, TaskHit, TaskRepo, WorkspacePaths};
 use gpui::{
     div, prelude::*, px, App, Context, Entity, FocusHandle, Focusable, KeyDownEvent, MouseButton,
     ScrollHandle, SharedString, Window,
@@ -46,20 +46,38 @@ pub type CloseHandler = Box<dyn Fn(&mut Window, &mut Context<CommandPalette>)>;
 struct SearchResults {
     tasks: Vec<TaskHit>,
     notes: Vec<NoteHit>,
+    /// Notes whose text matched (title matches are left out of this list).
+    note_text: Vec<NoteTextHit>,
     commits: Vec<RepoCommit>,
 }
 
+/// Most note-text rows fetched per search; the group shows fewer.
+const NOTE_TEXT_LIMIT: usize = 12;
+
 /// Runs the I/O half of a search. Opens its own SQLite connection because
 /// the app's connection belongs to `AppState` on the UI thread.
-fn run_search(db: PathBuf, repos: Vec<Repo>, query: String) -> SearchResults {
+fn run_search(
+    db: PathBuf,
+    paths: WorkspacePaths,
+    repos: Vec<Repo>,
+    query: String,
+) -> SearchResults {
     let blank = query.trim().is_empty();
     let limit = if blank { 5 } else { CANDIDATES };
-    let (tasks, notes) = match devspace_storage::open_connection(&db) {
-        Ok(conn) => (
-            TaskRepo::search_titles(&conn, &query, limit).unwrap_or_default(),
-            NoteRepo::search_titles(&conn, &query, limit).unwrap_or_default(),
-        ),
-        Err(_) => (Vec::new(), Vec::new()),
+    let (tasks, notes, note_text) = match devspace_storage::open_connection(&db) {
+        Ok(conn) => {
+            let notes = NoteRepo::search_titles(&conn, &query, limit).unwrap_or_default();
+            let skip: Vec<NoteId> = notes.iter().map(|n| n.note_id).collect();
+            let note_text =
+                NoteRepo::search_contents(&conn, &paths, &query, &skip, NOTE_TEXT_LIMIT)
+                    .unwrap_or_default();
+            (
+                TaskRepo::search_titles(&conn, &query, limit).unwrap_or_default(),
+                notes,
+                note_text,
+            )
+        }
+        Err(_) => (Vec::new(), Vec::new(), Vec::new()),
     };
     let commits = if blank || repos.is_empty() {
         Vec::new()
@@ -69,6 +87,7 @@ fn run_search(db: PathBuf, repos: Vec<Repo>, query: String) -> SearchResults {
     SearchResults {
         tasks,
         notes,
+        note_text,
         commits,
     }
 }
@@ -88,6 +107,7 @@ pub struct CommandPalette {
     // keystrokes; they are re-ranked against the current query each time.
     task_items: Vec<Item>,
     note_items: Vec<Item>,
+    note_text_items: Vec<Item>,
     commit_items: Vec<Item>,
     /// Runs the chosen target (set by the owner).
     pub on_run: Option<RunHandler>,
@@ -110,6 +130,7 @@ impl CommandPalette {
             // Commits are never re-ranked locally, so stale ones would
             // mislead; tasks/notes get re-ranked against the new text.
             this.commit_items.clear();
+            this.note_text_items.clear();
             this.highlight = 0;
             this.scroll_pending = true;
             this.recompute(cx);
@@ -129,6 +150,7 @@ impl CommandPalette {
             scroll_pending: false,
             task_items: Vec::new(),
             note_items: Vec::new(),
+            note_text_items: Vec::new(),
             commit_items: Vec::new(),
             on_run: None,
             on_close: None,
@@ -147,9 +169,9 @@ impl CommandPalette {
         self.epoch += 1;
         let epoch = self.epoch;
         let query = self.typed.clone();
-        let (db, repos) = {
+        let (paths, repos) = {
             let state = self.state.read(cx);
-            (state.workspace_paths().database_file(), state.repos.clone())
+            (state.workspace_paths().clone(), state.repos.clone())
         };
         let debounce = if query.trim().is_empty() {
             Duration::ZERO
@@ -167,7 +189,7 @@ impl CommandPalette {
             }
             let results = cx
                 .background_executor()
-                .spawn(async move { run_search(db, repos, query) })
+                .spawn(async move { run_search(paths.database_file(), paths, repos, query) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.epoch != epoch {
@@ -209,6 +231,21 @@ impl CommandPalette {
                 title: h.title,
             })
             .collect();
+        self.note_text_items = results
+            .note_text
+            .into_iter()
+            .map(|h| Item {
+                group: Group::NoteText,
+                detail: format!("{} · {}", h.hit.project_name, h.snippet),
+                target: Target::Note {
+                    project: h.hit.project_id,
+                    note: h.hit.note_id,
+                    task: h.hit.task_id,
+                    title: h.hit.title.clone(),
+                },
+                title: h.hit.title,
+            })
+            .collect();
         self.commit_items = results
             .commits
             .into_iter()
@@ -245,6 +282,7 @@ impl CommandPalette {
             projects,
             tasks: self.task_items.clone(),
             notes: self.note_items.clone(),
+            note_text: self.note_text_items.clone(),
             commits: self.commit_items.clone(),
         };
         self.items = assemble(&self.typed, sources);
@@ -522,23 +560,51 @@ impl Root {
         }
     }
 
-    fn run_palette_target(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
-        match target {
-            Target::Command(Command::ToggleTerminal) => self.toggle_terminal(window, cx),
-            Target::Command(Command::NewTerminal) => {
+    /// Runs a built-in command. Views are opened (never toggled closed) so
+    /// picking one from the palette always lands on it.
+    pub(crate) fn run_command(
+        &mut self,
+        command: Command,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match command {
+            Command::ToggleTerminal => self.toggle_terminal(window, cx),
+            Command::NewTerminal => {
                 self.terminal_open = true;
                 self.terminal_panel
                     .update(cx, |panel, cx| panel.new_tab(window, cx));
             }
-            Target::Command(Command::OpenHistory) => {
+            Command::OpenHistory => {
                 if self.open_history.is_none() {
                     self.toggle_history(cx);
                 }
             }
-            Target::Command(Command::NewProject) => {
+            Command::OpenRunCommands => {
+                if !self.run_open {
+                    self.toggle_run_view(cx);
+                }
+            }
+            Command::OpenTimesheet => {
+                if !self.timesheet_open {
+                    self.toggle_timesheet_view(cx);
+                }
+            }
+            Command::OpenCredentials => {
+                if !self.credentials_open {
+                    self.toggle_credentials_view(cx);
+                }
+            }
+            Command::NewProject => {
                 let focus = self.new_project_input.read(cx).focus_handle.clone();
                 window.focus(&focus, cx);
             }
+        }
+    }
+
+    fn run_palette_target(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
+        match target {
+            Target::Command(command) => self.run_command(command, window, cx),
             Target::Project(project) => self.palette_switch_project(project, cx),
             Target::Task { project, task } => {
                 self.palette_switch_project(project, cx);

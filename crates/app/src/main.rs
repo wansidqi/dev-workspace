@@ -50,7 +50,19 @@ use theme::GlassTheme;
 use timesheet_panel::TimesheetPanel;
 use workspace_tools::WorkspaceTools;
 
-actions!(devspace, [ToggleTerminal, NewTerminal, OpenPalette]);
+actions!(
+    devspace,
+    [
+        ToggleTerminal,
+        NewTerminal,
+        OpenPalette,
+        ToggleHistoryView,
+        ToggleRunView,
+        ToggleTimesheetView,
+        ToggleCredentialsView,
+        FocusNewProject
+    ]
+);
 
 struct Root {
     state: Entity<AppState>,
@@ -1455,6 +1467,17 @@ impl Render for Root {
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
                 this.toggle_palette(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &ToggleHistoryView, _, cx| this.toggle_history(cx)))
+            .on_action(cx.listener(|this, _: &ToggleRunView, _, cx| this.toggle_run_view(cx)))
+            .on_action(
+                cx.listener(|this, _: &ToggleTimesheetView, _, cx| this.toggle_timesheet_view(cx)),
+            )
+            .on_action(cx.listener(|this, _: &ToggleCredentialsView, _, cx| {
+                this.toggle_credentials_view(cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusNewProject, window, cx| {
+                this.run_command(palette_rank::Command::NewProject, window, cx)
+            }))
             .child(titlebar(&theme))
             .child(
                 div().flex().flex_col().flex_1().child(
@@ -1494,12 +1517,17 @@ fn main() -> Result<()> {
         // has focus; GPUI matches bindings before the terminal's raw
         // key-down handler sees the keystroke.
         // Same as VS Code: Ctrl+` toggles the panel, Ctrl+Shift+` opens a
-        // new terminal.
+        // new terminal. The Ctrl+Shift letters open (and again close) the main views.
         cx.bind_keys([
             KeyBinding::new("ctrl-`", ToggleTerminal, None),
             KeyBinding::new("ctrl-shift-`", NewTerminal, None),
             KeyBinding::new("ctrl-k", OpenPalette, None),
             KeyBinding::new("ctrl-shift-p", OpenPalette, None),
+            KeyBinding::new("ctrl-shift-h", ToggleHistoryView, None),
+            KeyBinding::new("ctrl-shift-r", ToggleRunView, None),
+            KeyBinding::new("ctrl-shift-m", ToggleTimesheetView, None),
+            KeyBinding::new("ctrl-shift-l", ToggleCredentialsView, None),
+            KeyBinding::new("ctrl-shift-n", FocusNewProject, None),
         ]);
 
         let bounds = Bounds::centered(None, size(px(1000.0), px(640.0)), cx);
