@@ -101,6 +101,12 @@ impl WorkspaceTools {
         self.notice.as_ref()
     }
 
+    /// Shows `message` as a toast (an error when `is_error`).
+    pub(crate) fn set_notice(&mut self, message: String, is_error: bool, cx: &mut Context<Self>) {
+        self.notice = Some((message, is_error));
+        cx.notify();
+    }
+
     /// Dismisses the toast.
     pub(crate) fn clear_notice(&mut self, cx: &mut Context<Self>) {
         if self.notice.take().is_some() {

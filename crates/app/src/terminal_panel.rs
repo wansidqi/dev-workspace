@@ -187,8 +187,13 @@ impl TerminalPanel {
         self.active_tab().and_then(|t| t.panes.get(index).cloned())
     }
 
-    fn spawn_view(&self, window: &mut Window, cx: &mut Context<Self>) -> Entity<TerminalView> {
-        let cwd = self.state.read(cx).terminal_cwd();
+    fn spawn_view(
+        &self,
+        cwd: Option<std::path::PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<TerminalView> {
+        let cwd = cwd.unwrap_or_else(|| self.state.read(cx).terminal_cwd());
         let theme = self.theme;
         let scrollback = self.settings.read(cx).get().terminal_scrollback as usize;
         let view = cx.new(|cx| TerminalView::new(cx, cwd, scrollback, theme));
@@ -197,17 +202,31 @@ impl TerminalPanel {
     }
 
     pub fn new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_tab_in(None, None, window, cx);
+    }
+
+    /// Opens a tab starting in `cwd` (the project default when `None`),
+    /// titled `label` (numbered "Terminal N" when `None`).
+    pub fn new_tab_in(
+        &mut self,
+        cwd: Option<std::path::PathBuf>,
+        label: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(project) = self.current else {
             return;
         };
-        let view = self.spawn_view(window, cx);
+        let view = self.spawn_view(cwd, window, cx);
         let id = self.next_tab_id;
         self.next_tab_id += 1;
         let entry = self.by_project.entry(project).or_default();
         entry.created += 1;
         entry.tabs.push(Tab {
             id,
-            label: format!("Terminal {}", entry.created).into(),
+            label: label
+                .unwrap_or_else(|| format!("Terminal {}", entry.created))
+                .into(),
             panes: vec![view],
         });
         entry.active = entry.tabs.len() - 1;
@@ -219,7 +238,7 @@ impl TerminalPanel {
         if self.active_tab().is_none_or(|t| t.panes.len() >= MAX_PANES) {
             return;
         }
-        let view = self.spawn_view(window, cx);
+        let view = self.spawn_view(None, window, cx);
         let Some(entry) = self.current.and_then(|id| self.by_project.get_mut(&id)) else {
             return;
         };

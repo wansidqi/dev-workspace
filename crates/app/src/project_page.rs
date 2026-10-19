@@ -422,6 +422,22 @@ impl Root {
                             .child(
                                 button(
                                     &theme,
+                                    "open-terminal",
+                                    ButtonKind::Secondary,
+                                    Some(Icon::Terminal),
+                                    "Terminal",
+                                )
+                                .on_click({
+                                    let name = project.name.clone();
+                                    cx.listener(move |this, _, window, cx| {
+                                        let dir = this.state.read(cx).terminal_cwd();
+                                        this.open_terminal_in(dir, name.clone(), window, cx);
+                                    })
+                                }),
+                            )
+                            .child(
+                                button(
+                                    &theme,
                                     "open-in-ide",
                                     ButtonKind::Secondary,
                                     Some(Icon::Code),
@@ -942,6 +958,21 @@ impl Root {
                                         ),
                                 )
                             }),
+                    )
+                    .child(
+                        icon_button(
+                            &theme,
+                            Icon::Terminal,
+                            ("repo-terminal", id.0 as u64),
+                            theme.text_primary,
+                        )
+                        .on_click(cx.listener({
+                            let path = std::path::PathBuf::from(&repo.path);
+                            let name = repo.name.clone();
+                            move |this, _, window, cx| {
+                                this.open_terminal_in(path.clone(), name.clone(), window, cx);
+                            }
+                        })),
                     )
                     .child(
                         icon_button(

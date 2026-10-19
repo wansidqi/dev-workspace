@@ -673,6 +673,28 @@ impl Root {
         });
     }
 
+    /// Opens a new terminal tab in `dir`, showing the panel if it is hidden.
+    /// A folder that no longer exists gets a toast, not a shell elsewhere.
+    fn open_terminal_in(
+        &mut self,
+        dir: std::path::PathBuf,
+        label: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !dir.is_dir() {
+            let message = format!("Folder not found: {}", dir.display());
+            self.workspace_tools
+                .update(cx, |tools, cx| tools.set_notice(message, true, cx));
+            return;
+        }
+        self.terminal_open = true;
+        self.terminal_panel.update(cx, |panel, cx| {
+            panel.new_tab_in(Some(dir), Some(label), window, cx)
+        });
+        cx.notify();
+    }
+
     fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.terminal_open = !self.terminal_open;
         if self.terminal_open {
