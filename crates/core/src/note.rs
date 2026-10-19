@@ -7,6 +7,26 @@ pub enum NoteKind {
     Sql,
 }
 
+impl NoteKind {
+    /// Short name shown on chips and badges.
+    pub fn label(self) -> &'static str {
+        match self {
+            NoteKind::Note => "Note",
+            NoteKind::Script => "Script",
+            NoteKind::Sql => "SQL",
+        }
+    }
+
+    /// The kind a click on the kind chip moves to, wrapping around.
+    pub fn cycle(self) -> Self {
+        match self {
+            NoteKind::Note => NoteKind::Script,
+            NoteKind::Script => NoteKind::Sql,
+            NoteKind::Sql => NoteKind::Note,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Note {
     pub id: NoteId,
@@ -76,6 +96,18 @@ pub fn is_safe_relative_path(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kind_cycle_visits_every_kind_and_wraps() {
+        let mut kind = NoteKind::Note;
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            seen.push(kind.label());
+            kind = kind.cycle();
+        }
+        assert_eq!(seen, ["Note", "Script", "SQL"]);
+        assert_eq!(kind, NoteKind::Note);
+    }
 
     #[test]
     fn rejects_parent_dir_traversal() {

@@ -86,6 +86,9 @@ pub struct AppState {
     next_project_id: i64,
     next_task_id: i64,
     next_note_id: i64,
+    /// Kind given to the next note created from the UI; the "new note" rows
+    /// show it as a chip that cycles it.
+    pub new_note_kind: NoteKind,
     next_repo_id: i64,
 }
 
@@ -117,6 +120,7 @@ impl AppState {
             next_project_id: 1,
             next_task_id: 1,
             next_note_id: 1,
+            new_note_kind: NoteKind::Note,
             next_repo_id: 1,
         };
         state.reload_projects();
@@ -458,7 +462,8 @@ impl AppState {
             self.notes.iter().map(|n| n.id.0).max().unwrap_or(0),
         ));
         let file_name = format!("{}.md", id.0);
-        let mut note = Note::new(id, project_id, NoteKind::Note, title, &file_name, now()).ok()?;
+        let kind = self.new_note_kind;
+        let mut note = Note::new(id, project_id, kind, title, &file_name, now()).ok()?;
         note.task_id = task;
         self.paths.ensure_dirs(Some(project_id)).ok()?;
         let full_path = self.paths.notes_dir(project_id).join(&file_name);
@@ -948,6 +953,26 @@ mod tests {
         assert_eq!(state.read_note_content(on_b).as_deref(), Some(""));
         // A task that is not in the selected project is refused.
         assert!(state.create_note_for(Some(TaskId(9999)), "ghost").is_none());
+    }
+
+    #[test]
+    fn new_notes_take_the_selected_kind_and_keep_it_after_a_reload() {
+        let scratch = Scratch::new();
+        let (mut state, a, _b) = setup(&scratch);
+        state.new_note_kind = NoteKind::Sql;
+        let sql = state.create_note_for(Some(a), "report query").unwrap();
+        state.new_note_kind = NoteKind::Script;
+        let script = state.create_note_for(Some(a), "deploy").unwrap();
+
+        let kind_of =
+            |state: &AppState, id: NoteId| state.notes.iter().find(|n| n.id == id).map(|n| n.kind);
+        assert_eq!(kind_of(&state, sql), Some(NoteKind::Sql));
+        assert_eq!(kind_of(&state, script), Some(NoteKind::Script));
+
+        let project = state.selected_project.unwrap();
+        state.select_project(project);
+        assert_eq!(kind_of(&state, sql), Some(NoteKind::Sql));
+        assert_eq!(kind_of(&state, script), Some(NoteKind::Script));
     }
 
     #[test]

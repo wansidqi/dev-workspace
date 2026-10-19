@@ -6,7 +6,8 @@ use std::collections::HashMap;
 
 use devspace_core::{
     cherry_pick_script, Attachment, AttachmentId, CherryPickCommit, CherryPickGroup, CommitLink,
-    CommitLinkId, CommitLinkStatus, Note, NoteId, RepoId, TaskId, TaskPriority, TaskStatus,
+    CommitLinkId, CommitLinkStatus, Note, NoteId, NoteKind, RepoId, TaskId, TaskPriority,
+    TaskStatus,
 };
 use devspace_git::RepoCommit;
 use gpui::{
@@ -830,12 +831,28 @@ impl TaskDetail {
     fn notes_tab(&mut self, notes: Vec<Note>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = self.theme;
         let mut out: Vec<AnyElement> = vec![self.new_note_input.clone().into_any_element()];
+        let kind = self.state.read(cx).new_note_kind;
         out.push(
             div()
+                .flex()
+                .items_center()
+                .gap(theme.space_2)
                 .px(theme.space_1)
-                .text_xs()
-                .text_color(theme.text_secondary)
-                .child("Press Enter to create a markdown note and open it")
+                .child(
+                    self.chip(format!("Kind: {}", kind.label()), true, "task-note-kind")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.state.update(cx, |state, cx| {
+                                state.new_note_kind = state.new_note_kind.cycle();
+                                cx.notify();
+                            });
+                        })),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.text_secondary)
+                        .child("Click the kind to change it. Enter creates the note and opens it"),
+                )
                 .into_any_element(),
         );
         if notes.is_empty() {
@@ -862,12 +879,18 @@ impl TaskDetail {
                                 .text_color(theme.text_primary)
                                 .child(note.title.clone()),
                         )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.text_secondary)
-                                .child(format!("Updated {}", format_date(note.updated_at))),
-                        ),
+                        .child(div().text_xs().text_color(theme.text_secondary).child(
+                            match note.kind {
+                                NoteKind::Note => {
+                                    format!("Updated {}", format_date(note.updated_at))
+                                }
+                                kind => format!(
+                                    "{} · updated {}",
+                                    kind.label(),
+                                    format_date(note.updated_at)
+                                ),
+                            },
+                        )),
                 )
                 .child(
                     self.small_button("✕", ("task-note-delete", id.0 as u64), true)

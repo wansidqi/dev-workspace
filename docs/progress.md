@@ -75,8 +75,11 @@ remaining gap is visible at a glance.
 - [x] Task-level notes: create, open (same editor), delete from the task
       detail page → Notes tab; works at any subtask depth. The project page
       lists only project-level notes.
-- [ ] Kind selector — everything is created as `NoteKind::Note`; Script/SQL
-      kinds exist in the domain type but aren't reachable from the UI
+- [x] Kind selector: a "Kind: Note/Script/SQL" chip beside the new-note input
+      (project page and task Notes tab) cycles the kind of the next note
+      (`AppState::new_note_kind`); Script/SQL notes show their kind in the
+      list. Files are still `.md`; the kind is stored in the db. Tested in
+      core and `AppState`; the chip itself has not been clicked by hand.
 - [ ] Syntax highlighting
 - [x] Markdown preview: Edit / Split / Preview toggle, formatting toolbar (bold, italic, heading, code, table, lists, tasks, quote, link, rule), Ctrl+S saves and switches to Preview; notes with content open in Preview, empty ones in Edit. `pulldown-cmark` (approved) parsed in `markdown.rs`, rendered by `markdown_view.rs`, page in `note_page.rs`, toolbar logic in `note_format.rs`; raw HTML shown as text, input capped at 512 KB. Notes are always `.md` files. Verified by tests and compilation only.
 - [ ] Search
@@ -393,7 +396,7 @@ in SQLite (`app.db`) instead.
   1. Hand-test the screens that only compile-checked so far (Timesheet,
      palette, run commands, backup/import, history filters, note page).
   2. Credentials vault (needs the keyring + AEAD crate approvals below).
-  3. Note kinds (Script/SQL) and syntax highlighting.
+  3. Syntax highlighting for Script/SQL notes (kind selector is done).
   4. Built-in PDF viewer, project-level attachments.
   5. Patch-id re-matching of missing commits; light theme and reduced
      transparency; hover transitions.

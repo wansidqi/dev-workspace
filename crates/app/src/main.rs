@@ -27,7 +27,7 @@ mod workspace_tools;
 
 use anyhow::Result;
 use commit_browser::CommitBrowser;
-use devspace_core::{Note, NoteId, Project, ProjectId, Repo, Task, TaskId, TaskStatus};
+use devspace_core::{Note, NoteId, NoteKind, Project, ProjectId, Repo, Task, TaskId, TaskStatus};
 use devspace_storage::{run_migrations, WorkspacePaths};
 use gpui::{
     actions, div, prelude::*, px, size, App, Bounds, Context, Entity, KeyBinding,
@@ -664,6 +664,7 @@ impl Render for Root {
             *repo_link_counts.entry(link.repo_id).or_default() += 1;
         }
         let notes = state.project_notes();
+        let new_note_kind = state.new_note_kind;
         let repos = state.repos.clone();
         let unreadable_repos = state.unreadable_repos.clone();
         let editing_project_id = self.editing_project.as_ref().map(|(id, _)| *id);
@@ -1197,8 +1198,22 @@ impl Render for Root {
                         }))
                         .child(
                             div()
-                                .text_color(theme.text_primary)
-                                .child(note.title.clone()),
+                                .flex()
+                                .items_center()
+                                .gap(theme.space_2)
+                                .child(
+                                    div()
+                                        .text_color(theme.text_primary)
+                                        .child(note.title.clone()),
+                                )
+                                .when(note.kind != NoteKind::Note, |d| {
+                                    d.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.text_secondary)
+                                            .child(note.kind.label()),
+                                    )
+                                }),
                         )
                         .child(
                             div()
@@ -1231,7 +1246,42 @@ impl Render for Root {
                         )
                         .into_any_element()
                 }))
-                .child(create_row(&theme, &self.new_note_input))
+                .child(
+                    div()
+                        .mt(theme.space_2)
+                        .flex()
+                        .items_center()
+                        .gap(theme.space_2)
+                        .child(
+                            div()
+                                .id("note-kind")
+                                .flex_none()
+                                .px(theme.space_3)
+                                .py(theme.space_1)
+                                .rounded(theme.radius_sm)
+                                .border_1()
+                                .border_color(theme.accent)
+                                .bg(theme.accent.opacity(0.12))
+                                .text_sm()
+                                .text_color(theme.accent)
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.state.update(cx, |state, cx| {
+                                        state.new_note_kind = state.new_note_kind.cycle();
+                                        cx.notify();
+                                    });
+                                }))
+                                .child(format!("Kind: {}", new_note_kind.label())),
+                        )
+                        .child(div().flex_1().child(self.new_note_input.clone())),
+                )
+                .child(
+                    div()
+                        .px(theme.space_1)
+                        .text_color(theme.text_secondary)
+                        .text_xs()
+                        .child("Click the kind to change it. Enter creates, Esc cancels"),
+                )
             })
             .when(selected_project.is_some(), |el| {
                 el.child(
