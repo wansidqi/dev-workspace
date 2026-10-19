@@ -15,6 +15,7 @@ use gpui::{
     SharedString, Window,
 };
 
+use crate::attach_flow::{attach_notice, attach_paths};
 use crate::date::{format_date, format_iso_date, parse_date};
 use crate::external::{open_attachment, reveal, OpenOutcome};
 use crate::state::AppState;
@@ -676,47 +677,9 @@ impl TaskDetail {
             let Ok(Ok(Some(paths))) = picked.await else {
                 return;
             };
-            let mut added = 0usize;
-            let mut failure: Option<String> = None;
-            for path in paths {
-                let prepared = state.update(cx, |state, _| {
-                    state.prepare_attachment(Some(task), &path, copy)
-                });
-                let job = match prepared {
-                    Ok(job) => job,
-                    Err(message) => {
-                        failure = Some(message);
-                        continue;
-                    }
-                };
-                // Copy off the UI thread; large files must not freeze it.
-                let job = cx
-                    .background_executor()
-                    .spawn(async move {
-                        let result = job.run();
-                        (job, result)
-                    })
-                    .await;
-                let (job, result) = job;
-                if let Err(e) = result {
-                    failure = Some(format!("Couldn't copy “{}”: {e}", job.name()));
-                    continue;
-                }
-                match state.update(cx, |state, cx| {
-                    let r = state.finish_attachment(job);
-                    cx.notify();
-                    r
-                }) {
-                    Ok(()) => added += 1,
-                    Err(message) => failure = Some(message),
-                }
-            }
+            let (added, failure) = attach_paths(&state, Some(task), paths, copy, cx).await;
             let _ = this.update(cx, |this, cx| {
-                this.notice = match (added, failure) {
-                    (_, Some(message)) => Some((message, true)),
-                    (1, None) => Some(("Attached 1 file".into(), false)),
-                    (n, None) => Some((format!("Attached {n} files"), false)),
-                };
+                this.notice = Some(attach_notice(added, failure));
                 cx.notify();
             });
         })

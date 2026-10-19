@@ -3,6 +3,7 @@
 //! (see CLAUDE.md "GPUI guidelines" — pin an exact revision, don't guess
 //! the pre-1.0 API).
 
+mod attach_flow;
 mod commit_browser;
 mod date;
 mod external;
@@ -14,6 +15,7 @@ mod note_format;
 mod note_page;
 mod palette;
 mod palette_rank;
+mod project_files;
 mod run_panel;
 mod settings;
 mod state;
@@ -35,6 +37,7 @@ use gpui::{
     WindowBounds, WindowControlArea, WindowOptions,
 };
 use note_editor::NoteEditor;
+use project_files::ProjectFiles;
 use run_panel::RunPanel;
 use settings::SettingsStore;
 use state::AppState;
@@ -97,6 +100,8 @@ struct Root {
     settings: Entity<SettingsStore>,
     /// "Open in IDE" + backup/export/import card on the project page.
     workspace_tools: Entity<WorkspaceTools>,
+    /// Project-level attachments section on the project page.
+    project_files: Entity<ProjectFiles>,
 }
 
 fn status_label(status: TaskStatus) -> &'static str {
@@ -1243,6 +1248,9 @@ impl Render for Root {
                 )
             })
             .when(selected_project.is_some(), |el| {
+                el.child(self.project_files.clone())
+            })
+            .when(selected_project.is_some(), |el| {
                 el.child(
                     div()
                         .text_xl()
@@ -1595,9 +1603,11 @@ fn main() -> Result<()> {
                     window.focus(&focus_handle, cx);
                     let workspace_tools = cx
                         .new(|cx| WorkspaceTools::new(cx, state.clone(), settings.clone(), theme));
+                    let project_files = cx.new(|_| ProjectFiles::new(state.clone(), theme));
                     let mut root = Root {
                         settings: settings.clone(),
                         workspace_tools,
+                        project_files,
                         state,
                         theme,
                         new_project_input,

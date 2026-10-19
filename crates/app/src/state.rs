@@ -242,6 +242,15 @@ impl AppState {
         }
     }
 
+    /// Attachments on the project itself (not on a task), oldest first.
+    pub fn project_attachments(&self) -> Vec<Attachment> {
+        self.attachments
+            .iter()
+            .filter(|a| a.task_id.is_none())
+            .cloned()
+            .collect()
+    }
+
     pub fn attachments_for_task(&self, task: TaskId) -> Vec<Attachment> {
         self.attachments
             .iter()
@@ -556,6 +565,7 @@ impl AppState {
         }
     }
 
+    /// Cycles Todo -> In Progress -> Done -> Blocked -> Todo.
     pub fn cycle_task_status(&mut self, id: TaskId) {
         let Some(task) = self.tasks.iter_mut().find(|t| t.id == id) else {
             return;
@@ -563,7 +573,9 @@ impl AppState {
         let next = match task.status {
             TaskStatus::Todo => TaskStatus::InProgress,
             TaskStatus::InProgress => TaskStatus::Done,
-            TaskStatus::Done => TaskStatus::Todo,
+            // Blocked sits after Done so the common Todo -> Done path stays
+            // two clicks.
+            TaskStatus::Done => TaskStatus::Blocked,
             TaskStatus::Blocked => TaskStatus::Todo,
         };
         task.set_status(next, now());
@@ -953,6 +965,61 @@ mod tests {
         assert_eq!(state.read_note_content(on_b).as_deref(), Some(""));
         // A task that is not in the selected project is refused.
         assert!(state.create_note_for(Some(TaskId(9999)), "ghost").is_none());
+    }
+
+    #[test]
+    fn project_level_files_are_listed_apart_from_task_files_and_removable() {
+        let scratch = Scratch::new();
+        let (mut state, _a, b) = setup(&scratch);
+        let source = source_file(&scratch, "spec.txt", "hello");
+        let on_task = attach(&mut state, b, &source, true);
+
+        let job = state.prepare_attachment(None, &source, true).unwrap();
+        job.run().unwrap();
+        let project_file = job.attachment.id;
+        state.finish_attachment(job).unwrap();
+
+        let project_files = state.project_attachments();
+        assert_eq!(project_files.len(), 1);
+        assert_eq!(project_files[0].id, project_file);
+        assert_eq!(state.attachments_for_task(b)[0].id, on_task);
+
+        let stored = state.attachment_path(&project_files[0]).unwrap();
+        assert!(stored.is_file());
+        state.remove_attachment(project_file);
+        assert!(state.project_attachments().is_empty());
+        assert!(!stored.exists());
+        // The task's own file is untouched.
+        assert_eq!(state.attachments_for_task(b).len(), 1);
+    }
+
+    #[test]
+    fn status_cycle_reaches_blocked_and_wraps_back_to_todo() {
+        let scratch = Scratch::new();
+        let (mut state, a, _b) = setup(&scratch);
+        let status = |state: &AppState| state.tasks.iter().find(|t| t.id == a).unwrap().status;
+        let mut seen = vec![status(&state)];
+        for _ in 0..4 {
+            state.cycle_task_status(a);
+            seen.push(status(&state));
+        }
+        assert_eq!(
+            seen,
+            [
+                TaskStatus::Todo,
+                TaskStatus::InProgress,
+                TaskStatus::Done,
+                TaskStatus::Blocked,
+                TaskStatus::Todo
+            ]
+        );
+        // The change is stored, not just held in memory.
+        state.cycle_task_status(a);
+        state.cycle_task_status(a);
+        state.cycle_task_status(a);
+        let project = state.selected_project.unwrap();
+        state.select_project(project);
+        assert_eq!(status(&state), TaskStatus::Blocked);
     }
 
     #[test]

@@ -39,8 +39,8 @@ remaining gap is visible at a glance.
 ## Tasks and subtasks
 
 - [x] Unlimited nesting (depth-indented, parent/child via `parent_id`)
-- [x] Status cycling (Todo -> In Progress -> Done; Blocked not reachable
-      from the UI yet, only via direct `status` field)
+- [x] Status cycling: Todo -> In Progress -> Done -> Blocked -> Todo (Blocked
+      sits after Done so the common path stays two clicks)
 - [x] Create, rename, delete (delete cascades to subtasks)
 - [x] Priority: chip on the task detail page, click cycles
       Low -> Medium -> High -> Urgent (colour-coded)
@@ -101,7 +101,7 @@ remaining gap is visible at a glance.
       project's attachments folder (symlinks and tampered db rows are
       rejected for open and delete); deleting a task deletes its (and its
       subtasks') copied files and note files, not just the db rows.
-- [ ] Project-level attachments (storage supports `task_id = NULL`, no UI)
+- [x] Project-level attachments: a "Files" section on the project page (`project_files.rs`) with the same copy-or-link choice, open (programs only revealed) and remove as the task tab; the attach loop is shared in `attach_flow.rs`. Tested in `AppState`; the section itself has not been clicked by hand.
 - [ ] Built-in PDF viewer (PDFs open in the default app for now)
 - [ ] Image preview, rename, drag-and-drop onto the page
 
