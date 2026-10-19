@@ -14,7 +14,8 @@ use crate::ide;
 use crate::settings::{parse_scrollback, SettingsStore};
 use crate::state::AppState;
 use crate::text_input::TextInput;
-use crate::theme::GlassTheme;
+use crate::theme::{GlassTheme, ThemeMode, TypeScale};
+use crate::ui::{button, page_header, section_label, segment, segmented, switch, ButtonKind, Icon};
 
 /// How long a background connection waits for the app's own connection to
 /// release the database before giving up.
@@ -65,8 +66,7 @@ impl WorkspaceTools {
         settings: Entity<SettingsStore>,
         theme: GlassTheme,
     ) -> Self {
-        let ide_input =
-            cx.new(|cx| TextInput::new(cx, "New IDE command, e.g. code --reuse-window", theme));
+        let ide_input = cx.new(|cx| TextInput::new(cx, "e.g. code --reuse-window", theme));
         let this = cx.entity();
         ide_input.update(cx, |input, _| {
             input.on_confirm = Some(Box::new(move |command, _window, cx| {
@@ -77,8 +77,7 @@ impl WorkspaceTools {
                 this.update(cx, |tools, cx| tools.save_ide_command(&command, cx));
             }));
         });
-        let scrollback_input =
-            cx.new(|cx| TextInput::new(cx, "Scrollback lines for new terminals, e.g. 5000", theme));
+        let scrollback_input = cx.new(|cx| TextInput::new(cx, "e.g. 5000", theme));
         let this = cx.entity();
         scrollback_input.update(cx, |input, _| {
             input.on_confirm = Some(Box::new(move |text, _window, cx| {
@@ -94,6 +93,18 @@ impl WorkspaceTools {
             scrollback_input,
             notice: None,
             busy: false,
+        }
+    }
+
+    /// The latest result message and whether it is an error, shown as a toast.
+    pub(crate) fn notice(&self) -> Option<&(String, bool)> {
+        self.notice.as_ref()
+    }
+
+    /// Dismisses the toast.
+    pub(crate) fn clear_notice(&mut self, cx: &mut Context<Self>) {
+        if self.notice.take().is_some() {
+            cx.notify();
         }
     }
 
@@ -129,10 +140,9 @@ impl WorkspaceTools {
         cx.notify();
     }
 
-    fn cycle_theme(&mut self, cx: &mut Context<Self>) {
-        self.settings.update(cx, |store, cx| {
-            store.update(cx, |s| s.theme_mode = s.theme_mode.cycle())
-        });
+    fn set_theme(&mut self, mode: ThemeMode, cx: &mut Context<Self>) {
+        self.settings
+            .update(cx, |store, cx| store.update(cx, |s| s.theme_mode = mode));
         cx.notify();
     }
 
@@ -150,7 +160,7 @@ impl WorkspaceTools {
         cx.notify();
     }
 
-    fn open_in_ide(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_in_ide(&mut self, cx: &mut Context<Self>) {
         let Some(folder) = self.state.read(cx).project_folder() else {
             self.notice = Some(("Select a project first".to_string(), true));
             cx.notify();
@@ -208,6 +218,17 @@ impl WorkspaceTools {
             });
         })
         .detach();
+    }
+
+    /// Shows the SQLite database file in the file manager. Notes and attachments
+    /// live in the folders next to it.
+    fn reveal_database(&mut self, cx: &mut Context<Self>) {
+        let db = self.state.read(cx).workspace_paths().database_file();
+        self.notice = Some(match crate::external::reveal(&db) {
+            Ok(()) => ("Opened the data folder".to_string(), false),
+            Err(message) => (message, true),
+        });
+        cx.notify();
     }
 
     fn backup(&mut self, cx: &mut Context<Self>) {
@@ -304,33 +325,61 @@ impl WorkspaceTools {
     }
 }
 
-/// An outlined text button in the style of the page's other actions.
-fn tool_button(
+/// One settings row: a title and hint on the left, the control on the right.
+fn setting_row(
     theme: &GlassTheme,
-    id: &'static str,
-    label: impl Into<SharedString>,
-    enabled: bool,
-) -> gpui::Stateful<gpui::Div> {
+    title: &str,
+    hint: impl Into<SharedString>,
+    control: impl IntoElement,
+) -> gpui::Div {
     let theme = *theme;
     div()
-        .id(id)
-        .flex_none()
-        .px(theme.space_3)
-        .py(theme.space_1)
-        .rounded(theme.radius_md)
-        .border_1()
-        .text_sm()
-        .when(enabled, |d| {
-            d.border_color(theme.accent)
-                .text_color(theme.accent)
-                .cursor_pointer()
-                .hover(move |s| s.bg(theme.surface_raised))
-        })
-        .when(!enabled, |d| {
-            d.border_color(theme.border_subtle)
-                .text_color(theme.text_secondary)
-        })
-        .child(label.into())
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(theme.space_6)
+        .py(theme.space_4)
+        .border_b_1()
+        .border_color(theme.border_subtle)
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w(px(0.0))
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .t_body()
+                        .t_strong()
+                        .text_color(theme.text_primary)
+                        .child(title.to_string()),
+                )
+                .child(
+                    div()
+                        .t_small()
+                        .text_color(theme.text_secondary)
+                        .child(hint.into()),
+                ),
+        )
+        .child(div().flex_none().child(control))
+}
+
+/// A titled group of setting rows.
+fn setting_group(theme: &GlassTheme, title: &str, rows: Vec<gpui::Div>) -> gpui::Div {
+    let theme = *theme;
+    div()
+        .flex()
+        .flex_col()
+        .child(div().pb(theme.space_1).child(section_label(&theme, title)))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .border_t_1()
+                .border_color(theme.border_subtle)
+                .children(rows),
+        )
 }
 
 impl Render for WorkspaceTools {
@@ -354,135 +403,174 @@ impl Render for WorkspaceTools {
             )
         };
         let busy = self.busy;
+        let has_project = self.state.read(cx).selected_project.is_some();
+        let db_path = self
+            .state
+            .read(cx)
+            .workspace_paths()
+            .database_file()
+            .display()
+            .to_string();
+
+        let appearance = setting_group(
+            &theme,
+            "Appearance",
+            vec![
+                setting_row(
+                    &theme,
+                    "Theme",
+                    "Dark is the default. System follows your operating system.",
+                    segmented(&theme)
+                        .child(
+                            segment(&theme, "theme-system", "System", theme_mode == ThemeMode::System)
+                                .on_click(cx.listener(|this, _, _, cx| this.set_theme(ThemeMode::System, cx))),
+                        )
+                        .child(
+                            segment(&theme, "theme-dark", "Dark", theme_mode == ThemeMode::Dark)
+                                .on_click(cx.listener(|this, _, _, cx| this.set_theme(ThemeMode::Dark, cx))),
+                        )
+                        .child(
+                            segment(&theme, "theme-light", "Light", theme_mode == ThemeMode::Light)
+                                .on_click(cx.listener(|this, _, _, cx| this.set_theme(ThemeMode::Light, cx))),
+                        ),
+                ),
+                setting_row(
+                    &theme,
+                    "Reduce transparency",
+                    "Solid surfaces instead of the translucent window. Easier to read over busy wallpapers.",
+                    switch(&theme, "toggle-transparency", reduce_transparency)
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_reduce_transparency(cx))),
+                ),
+                setting_row(
+                    &theme,
+                    "Reduce motion",
+                    "Turn off hover and selection transitions.",
+                    switch(&theme, "toggle-motion", reduce_motion)
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_reduce_motion(cx))),
+                ),
+            ],
+        );
+
+        let tools = setting_group(
+            &theme,
+            "Terminal and editor",
+            vec![
+                setting_row(
+                    &theme,
+                    "Terminal scrollback",
+                    format!(
+                        "Currently {scrollback} lines. Applies to terminals opened from now on."
+                    ),
+                    div().w(px(240.0)).child(self.scrollback_input.clone()),
+                ),
+                setting_row(
+                    &theme,
+                    "IDE command",
+                    format!("Currently \"{command}\". Press Enter to save."),
+                    div().w(px(240.0)).child(self.ide_input.clone()),
+                ),
+            ],
+        );
+
+        let data = setting_group(
+            &theme,
+            "Data",
+            vec![
+                setting_row(
+                    &theme,
+                    "Data location",
+                    format!("{db_path}. Notes and attachments are in the folders beside it."),
+                    button(
+                        &theme,
+                        "reveal-database",
+                        ButtonKind::Secondary,
+                        Some(Icon::FolderOpen),
+                        "Show in folder",
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.reveal_database(cx))),
+                ),
+                setting_row(
+                    &theme,
+                    "Back up workspace",
+                    "Copies the database and every project's files to a dated folder.",
+                    button(
+                        &theme,
+                        "backup-workspace",
+                        ButtonKind::Secondary,
+                        Some(Icon::Archive),
+                        "Back up",
+                    )
+                    .when(busy, |b| b.opacity(0.5))
+                    .on_click(cx.listener(|this, _, _, cx| this.backup(cx))),
+                ),
+                setting_row(
+                    &theme,
+                    "Export project",
+                    if has_project {
+                        "Writes the selected project, its notes and files to a folder you choose. Credentials are never exported."
+                    } else {
+                        "Select a project first."
+                    },
+                    button(
+                        &theme,
+                        "export-project",
+                        ButtonKind::Secondary,
+                        Some(Icon::Upload),
+                        "Export…",
+                    )
+                    .when(busy || !has_project, |b| b.opacity(0.5))
+                    .on_click(cx.listener(|this, _, _, cx| this.export(cx))),
+                ),
+                setting_row(
+                    &theme,
+                    "Import project",
+                    "Adds an exported project as a new project. Nothing existing is changed.",
+                    button(
+                        &theme,
+                        "import-project",
+                        ButtonKind::Secondary,
+                        Some(Icon::Download),
+                        "Import…",
+                    )
+                    .when(busy, |b| b.opacity(0.5))
+                    .on_click(cx.listener(|this, _, _, cx| this.import(cx))),
+                ),
+            ],
+        );
+
         div()
             .flex()
             .flex_col()
-            .gap(theme.space_2)
-            .p(theme.space_3)
-            .rounded(theme.radius_md)
-            .bg(theme.surface_raised)
-            .border_1()
-            .border_color(theme.border_subtle)
+            .flex_1()
+            .h_full()
+            .min_w(px(0.0))
+            .child(page_header(
+                &theme,
+                "Settings",
+                Some("Appearance, terminal, editor and your data".into()),
+                None,
+                None,
+            ))
             .child(
                 div()
-                    .text_xs()
-                    .text_color(theme.text_secondary)
-                    .child("WORKSPACE TOOLS"),
-            )
-            .child(
-                div()
+                    .id("settings-scroll")
                     .flex()
-                    .items_center()
-                    .gap(theme.space_3)
-                    .child(
-                        tool_button(&theme, "open-in-ide", "Open in IDE", true)
-                            .on_click(cx.listener(|this, _, _, cx| this.open_in_ide(cx))),
-                    )
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .overflow_y_scroll()
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(theme.text_secondary)
-                            .child(format!("IDE command: {command}")),
+                            .flex()
+                            .flex_col()
+                            .w_full()
+                            .px(theme.space_6)
+                            .py(theme.space_6)
+                            .gap(theme.space_8)
+                            .child(appearance)
+                            .child(tools)
+                            .child(data),
                     ),
             )
-            .child(self.ide_input.clone())
-            .child(
-                div()
-                    .mt(theme.space_2)
-                    .text_xs()
-                    .text_color(theme.text_secondary)
-                    .child("APPEARANCE AND TERMINAL"),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(theme.space_2)
-                    .child(
-                        tool_button(
-                            &theme,
-                            "cycle-theme",
-                            format!("Theme: {}", theme_mode.label()),
-                            true,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.cycle_theme(cx))),
-                    )
-                    .child(
-                        tool_button(
-                            &theme,
-                            "toggle-transparency",
-                            if reduce_transparency {
-                                "Transparency: reduced"
-                            } else {
-                                "Transparency: normal"
-                            },
-                            true,
-                        )
-                        .on_click(
-                            cx.listener(|this, _, _, cx| this.toggle_reduce_transparency(cx)),
-                        ),
-                    )
-                    .child(
-                        tool_button(
-                            &theme,
-                            "toggle-motion",
-                            if reduce_motion {
-                                "Motion: reduced"
-                            } else {
-                                "Motion: normal"
-                            },
-                            true,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_reduce_motion(cx))),
-                    ),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.text_secondary)
-                    .child(format!(
-                        "Terminal scrollback: {scrollback} lines (applies to new terminals)"
-                    )),
-            )
-            .child(self.scrollback_input.clone())
-            .child(
-                div()
-                    .mt(theme.space_2)
-                    .text_xs()
-                    .text_color(theme.text_secondary)
-                    .child("BACKUP AND TRANSFER"),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap(theme.space_2)
-                    .child(
-                        tool_button(&theme, "backup-workspace", "Back up workspace", !busy)
-                            .on_click(cx.listener(|this, _, _, cx| this.backup(cx))),
-                    )
-                    .child(
-                        tool_button(&theme, "export-project", "Export project…", !busy)
-                            .on_click(cx.listener(|this, _, _, cx| this.export(cx))),
-                    )
-                    .child(
-                        tool_button(&theme, "import-project", "Import project…", !busy)
-                            .on_click(cx.listener(|this, _, _, cx| this.import(cx))),
-                    ),
-            )
-            .when_some(self.notice.clone(), |d, (message, is_error)| {
-                d.child(
-                    div()
-                        .max_w(px(640.0))
-                        .text_xs()
-                        .text_color(if is_error {
-                            theme.danger
-                        } else {
-                            theme.success
-                        })
-                        .child(message),
-                )
-            })
     }
 }

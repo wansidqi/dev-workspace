@@ -8,6 +8,7 @@ mod commit_browser;
 mod credentials_panel;
 mod date;
 mod external;
+mod highlight;
 mod ide;
 mod markdown;
 mod markdown_view;
@@ -18,26 +19,32 @@ mod note_page;
 mod palette;
 mod palette_rank;
 mod project_files;
+mod project_page;
+mod qa;
 mod run_panel;
 mod settings;
+mod shell;
 mod state;
 mod task_detail;
 mod terminal_panel;
 mod terminal_view;
 mod text_input;
+mod text_nav;
 mod theme;
 mod timesheet_panel;
+mod ui;
 mod workspace_tools;
 
+use crate::theme::TypeScale;
 use anyhow::Result;
 use commit_browser::CommitBrowser;
 use credentials_panel::CredentialsPanel;
-use devspace_core::{Note, NoteId, NoteKind, Project, ProjectId, Repo, Task, TaskId, TaskStatus};
+use devspace_core::{NoteId, ProjectId, Task, TaskId, TaskStatus};
 use devspace_storage::{run_migrations, WorkspacePaths};
 use gpui::{
     actions, div, prelude::*, px, size, App, Bounds, Context, Entity, KeyBinding,
     PathPromptOptions, SharedString, TitlebarOptions, Window, WindowAppearance,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowOptions,
+    WindowBackgroundAppearance, WindowBounds, WindowOptions,
 };
 use note_editor::NoteEditor;
 use project_files::ProjectFiles;
@@ -61,6 +68,7 @@ actions!(
         ToggleRunView,
         ToggleTimesheetView,
         ToggleCredentialsView,
+        ToggleSettingsView,
         FocusNewProject
     ]
 );
@@ -87,6 +95,8 @@ struct Root {
     /// (re-parsed only when the text changes). See `note_page.rs`.
     note_mode: note_page::NoteMode,
     note_preview: Option<(SharedString, Vec<markdown::Block>)>,
+    /// Code block whose copy button was just pressed (shows "Copied" briefly).
+    note_copied: Option<usize>,
     /// Right-hand terminal panel (CLAUDE.md layout concept: "collapsible
     /// panels for terminal, commit browser and credentials"). Owns a tab set
     /// per project; hiding it or switching projects keeps shells running.
@@ -119,6 +129,13 @@ struct Root {
     /// the main content.
     credentials_panel: Entity<CredentialsPanel>,
     credentials_open: bool,
+    /// Settings view (appearance, terminal, IDE, backup), shown in place of the
+    /// main content.
+    settings_open: bool,
+    /// The toast currently on screen (mirrors the workspace tools' notice) and a
+    /// counter so only the newest toast's timer dismisses it.
+    toast_seen: Option<(String, bool)>,
+    toast_epoch: u64,
     // --- settings / IDE / backup hooks (settings.rs, workspace_tools.rs) ---
     /// Persisted per-user settings (last project/task, terminal panel, IDE).
     settings: Entity<SettingsStore>,
@@ -152,66 +169,54 @@ fn flatten_tasks(tasks: &[Task]) -> Vec<(Task, usize)> {
     out
 }
 
-/// Custom-drawn titlebar that blends into the window (CLAUDE.md layout
-/// concept): draggable, no native chrome, matches the glass surfaces below.
-fn titlebar(theme: &GlassTheme) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .h(px(40.0))
-        .w_full()
-        .px(theme.space_4)
-        .gap(theme.space_2)
-        .bg(theme.surface)
-        .border_b_1()
-        .border_color(theme.border_light)
-        .window_control_area(WindowControlArea::Drag)
-        .child(
-            div()
-                .size(px(10.0))
-                .rounded_full()
-                .bg(theme.accent)
-                .shadow_sm(),
-        )
-        .child(
-            div()
-                .text_sm()
-                .text_color(theme.text_secondary)
-                .child("Devspace"),
-        )
-}
-
 /// A fixed sidebar navigation row: its element id, its key for hover tracking
 /// (project rows add their id to [`PROJECT_HOVER_KEY_BASE`], so the ranges
-/// never collide) and its label.
+/// never collide), its icon, label and keyboard shortcut.
 #[derive(Clone, Copy)]
 pub(crate) struct NavItem {
     pub id: &'static str,
     pub hover_key: u64,
+    pub icon: ui::Icon,
     pub label: &'static str,
+    pub shortcut: &'static str,
 }
 
 pub(crate) const NAV_HISTORY: NavItem = NavItem {
     id: "open-history",
     hover_key: 1,
+    icon: ui::Icon::GitCommit,
     label: "Commit history",
+    shortcut: "Ctrl+Shift+H",
 };
 pub(crate) const NAV_RUN: NavItem = NavItem {
     id: "open-run-commands",
     hover_key: 2,
+    icon: ui::Icon::Play,
     label: "Run commands",
+    shortcut: "Ctrl+Shift+R",
 };
 pub(crate) const NAV_TIMESHEET: NavItem = NavItem {
     id: "open-timesheet",
     hover_key: 3,
+    icon: ui::Icon::Clock,
     label: "Timesheet",
+    shortcut: "Ctrl+Shift+M",
 };
 pub(crate) const NAV_CREDENTIALS: NavItem = NavItem {
     id: "open-credentials",
     hover_key: 4,
+    icon: ui::Icon::Key,
     label: "Credentials",
+    shortcut: "Ctrl+Shift+L",
 };
-const PROJECT_HOVER_KEY_BASE: u64 = 1_000_000;
+pub(crate) const NAV_SETTINGS: NavItem = NavItem {
+    id: "open-settings",
+    hover_key: 5,
+    icon: ui::Icon::Settings,
+    label: "Settings",
+    shortcut: "Ctrl+,",
+};
+pub(crate) const PROJECT_HOVER_KEY_BASE: u64 = 1_000_000;
 
 /// Whether the OS is in a dark appearance.
 fn os_is_dark(appearance: WindowAppearance) -> bool {
@@ -231,8 +236,9 @@ fn background_for(reduce_transparency: bool) -> WindowBackgroundAppearance {
     }
 }
 
-/// A small text-glyph icon button (pencil, trash, ...). GPUI has no icon font
-/// wired up yet, so these are plain characters styled like buttons.
+/// Compatibility wrappers: older call sites pass a text glyph (pencil, cross,
+/// arrow); it is mapped onto the line-icon set so no screen mixes glyphs and
+/// icons. New code calls [`ui::icon_button`] with an [`ui::Icon`] directly.
 fn icon_button(
     theme: &GlassTheme,
     glyph: &'static str,
@@ -250,167 +256,12 @@ fn icon_button_tinted(
     id: impl Into<gpui::ElementId>,
     hover_color: gpui::Hsla,
 ) -> gpui::Stateful<gpui::Div> {
-    let theme = *theme;
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .justify_center()
-        .size(px(20.0))
-        .rounded(theme.radius_sm)
-        .text_color(theme.text_secondary)
-        .text_sm()
-        .cursor_pointer()
-        .shadow_sm()
-        .hover(move |s| s.bg(theme.surface_raised).text_color(hover_color))
-        .child(glyph)
-}
-
-/// A labeled "create new ..." row: a text input plus a hint to press Enter.
-fn create_row(theme: &GlassTheme, input: &Entity<TextInput>) -> impl IntoElement {
-    let theme = *theme;
-    div()
-        .mt(theme.space_2)
-        .flex()
-        .flex_col()
-        .gap(theme.space_1)
-        .child(input.clone())
-        .child(
-            div()
-                .px(theme.space_1)
-                .text_color(theme.text_secondary)
-                .text_xs()
-                .child("Press Enter to create, Esc to cancel"),
-        )
-}
-
-/// One chip in the project page's tag filter row.
-fn tag_filter_chip(
-    theme: &GlassTheme,
-    label: String,
-    active: bool,
-    id: gpui::ElementId,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    let theme = *theme;
-    div()
-        .id(id)
-        .px(theme.space_3)
-        .py(theme.space_1)
-        .rounded(theme.radius_sm)
-        .border_1()
-        .text_xs()
-        .cursor_pointer()
-        .when(active, |d| {
-            d.border_color(theme.accent)
-                .text_color(theme.accent)
-                .bg(theme.accent.opacity(0.12))
-        })
-        .when(!active, |d| {
-            d.border_color(theme.border_subtle)
-                .text_color(theme.text_secondary)
-                .hover(move |s| s.bg(theme.surface_raised))
-        })
-        .on_click(on_click)
-        .child(label)
-}
-
-fn stat_tile(
-    theme: &GlassTheme,
-    label: &'static str,
-    count: usize,
-    color: gpui::Hsla,
-) -> impl IntoElement {
-    let theme = *theme;
-    div()
-        .flex()
-        .flex_col()
-        .gap(theme.space_1)
-        .px(theme.space_3)
-        .py(theme.space_2)
-        .rounded(theme.radius_md)
-        .bg(theme.surface_raised)
-        .border_1()
-        .border_color(theme.border_subtle)
-        .shadow_sm()
-        .min_w(px(96.0))
-        .child(div().text_2xl().text_color(color).child(count.to_string()))
-        .child(
-            div()
-                .text_xs()
-                .text_color(theme.text_secondary)
-                .child(label),
-        )
-}
-
-/// Project dashboard (CLAUDE.md: "dashboard with open tasks, recent notes,
-/// recent commits"; the commit list lives in the history browser instead).
-/// Recent notes render separately in `Root::render` (it
-/// needs `cx` for the open-note click handler).
-fn dashboard(
-    theme: &GlassTheme,
-    project: &Project,
-    tasks: &[Task],
-    unreadable_repos: &[String],
-) -> impl IntoElement {
-    let theme = *theme;
-    let todo = tasks
-        .iter()
-        .filter(|t| t.status == TaskStatus::Todo)
-        .count();
-    let in_progress = tasks
-        .iter()
-        .filter(|t| t.status == TaskStatus::InProgress)
-        .count();
-    let blocked = tasks
-        .iter()
-        .filter(|t| t.status == TaskStatus::Blocked)
-        .count();
-    let done = tasks
-        .iter()
-        .filter(|t| t.status == TaskStatus::Done)
-        .count();
-
-    div()
-        .flex()
-        .flex_col()
-        .gap(theme.space_3)
-        .pb(theme.space_3)
-        .border_b_1()
-        .border_color(theme.border_subtle)
-        .child(
-            div()
-                .flex()
-                .items_baseline()
-                .gap(theme.space_2)
-                .child(
-                    div()
-                        .text_xl()
-                        .text_color(theme.text_primary)
-                        .child(project.name.clone()),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.text_secondary)
-                        .child(format!("created {}", date::format_date(project.created_at))),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .gap(theme.space_2)
-                .child(stat_tile(&theme, "Todo", todo, theme.text_secondary))
-                .child(stat_tile(&theme, "In Progress", in_progress, theme.accent))
-                .child(stat_tile(&theme, "Blocked", blocked, theme.warning))
-                .child(stat_tile(&theme, "Done", done, theme.success)),
-        )
-        .when(!unreadable_repos.is_empty(), |el| {
-            el.child(div().text_xs().text_color(theme.warning).child(format!(
-                "Couldn't read history for: {}",
-                unreadable_repos.join(", ")
-            )))
-        })
+    ui::icon_button(
+        theme,
+        ui::Icon::from_glyph(glyph).unwrap_or(ui::Icon::Info),
+        id,
+        hover_color,
+    )
 }
 
 impl Root {
@@ -653,6 +504,7 @@ impl Root {
             browser
         });
         self.open_note = None;
+        self.settings_open = false;
         self.open_task = None;
         self.run_open = false;
         self.timesheet_open = false;
@@ -661,9 +513,10 @@ impl Root {
         cx.notify();
     }
 
-    /// A sidebar navigation row (dot, label, optional badge) whose surface
-    /// fades in while it is open or hovered. `hover_key` identifies it in
-    /// [`Root::set_hover`]; `id` names the element and its transition.
+    /// A sidebar navigation row (icon, label, optional badge, shortcut hint on
+    /// hover) whose surface fades in while it is open or hovered. `hover_key`
+    /// identifies it in [`Root::set_hover`]; `id` names the element and its
+    /// transition.
     pub(crate) fn nav_row(
         &self,
         item: NavItem,
@@ -675,17 +528,20 @@ impl Root {
         let NavItem {
             id,
             hover_key,
+            icon,
             label,
+            shortcut,
         } = item;
         let theme = self.theme;
-        let active = open || self.hovered == Some(hover_key);
+        let hovered = self.hovered == Some(hover_key);
         let row = div()
             .id(id)
             .flex()
             .items_center()
             .gap(theme.space_2)
-            .px(theme.space_3)
-            .py(theme.space_2)
+            .h(px(32.0))
+            .pl(theme.space_3)
+            .pr(theme.space_2)
             .rounded(theme.radius_md)
             .cursor_pointer()
             .border_1()
@@ -693,23 +549,44 @@ impl Root {
                 this.set_hover(hover_key, *hovered, cx);
             }))
             .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
-            .child(div().size(px(6.0)).rounded_full().bg(if open {
-                theme.accent
-            } else {
-                gpui::transparent_black()
-            }))
-            .child(div().text_color(theme.text_secondary).child(label))
-            .children(badge);
+            .child(ui::icon(
+                icon,
+                15.0,
+                if open { theme.accent } else { theme.text_muted },
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .t_body()
+                    .text_color(if open {
+                        theme.text_primary
+                    } else {
+                        theme.text_secondary
+                    })
+                    .when(open, |d| d.t_strong())
+                    .child(label),
+            )
+            .children(badge)
+            .when(hovered && !open && !shortcut.is_empty(), |d| {
+                d.child(
+                    div()
+                        .t_micro()
+                        .t_code()
+                        .text_color(theme.text_muted)
+                        .child(shortcut),
+                )
+            });
+        let (bg, border) = if open {
+            (theme.accent.opacity(0.10), theme.accent.opacity(0.22))
+        } else {
+            (theme.surface_hover, gpui::transparent_black())
+        };
         motion::fade(
             row,
             gpui::ElementId::Name(format!("{id}-fade").into()),
-            active,
-            theme.surface_raised,
-            if open {
-                theme.border_light
-            } else {
-                theme.border_subtle
-            },
+            open || hovered,
+            bg,
+            border,
         )
     }
 
@@ -783,810 +660,50 @@ impl Root {
 }
 
 impl Render for Root {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.theme = crate::theme::current(cx);
         self.sync_settings(cx);
         let theme = self.theme;
-        let state = self.state.read(cx);
-        let projects = state.projects.clone();
-        let selected_project = state.selected_project;
-        let selected_project_data = selected_project
-            .and_then(|id| state.projects.iter().find(|p| p.id == id))
-            .cloned();
-        let raw_tasks = state.tasks.clone();
-        let tasks = flatten_tasks(&state.tasks);
-        // Tag filter: keep only tasks with the tag (any depth), flattened to
-        // one level since their parents may be filtered out. A filter whose
-        // tag no longer exists anywhere is ignored rather than showing nothing.
-        let project_tags = state.project_tags();
-        let active_tag: Option<String> = self.tag_filter.clone().filter(|wanted| {
-            project_tags
-                .iter()
-                .any(|(name, _)| name.to_lowercase() == wanted.to_lowercase())
-        });
-        let tasks: Vec<(Task, usize)> = match &active_tag {
-            Some(tag) => tasks
-                .into_iter()
-                .filter(|(t, _)| t.has_tag(tag))
-                .map(|(t, _)| (t, 0))
-                .collect(),
-            None => tasks,
-        };
-        // Per task: (notes, attachments, mapped commits), for row badges.
-        let mut task_counts: std::collections::HashMap<TaskId, (usize, usize, usize)> =
-            std::collections::HashMap::new();
-        for note in state.notes.iter().filter(|n| n.task_id.is_some()) {
-            if let Some(t) = note.task_id {
-                task_counts.entry(t).or_default().0 += 1;
-            }
-        }
-        for attachment in &state.attachments {
-            if let Some(t) = attachment.task_id {
-                task_counts.entry(t).or_default().1 += 1;
-            }
-        }
-        for link in &state.commit_links {
-            task_counts.entry(link.task_id).or_default().2 += 1;
-        }
-        let confirm_unlink = self.confirm_unlink_repo;
-        // Mapped commits per repo, so unlinking a repo can warn first.
-        let mut repo_link_counts: std::collections::HashMap<devspace_core::RepoId, usize> =
-            std::collections::HashMap::new();
-        for link in &state.commit_links {
-            *repo_link_counts.entry(link.repo_id).or_default() += 1;
-        }
-        let notes = state.project_notes();
-        let new_note_kind = state.new_note_kind;
-        let repos = state.repos.clone();
-        let unreadable_repos = state.unreadable_repos.clone();
-        let editing_project_id = self.editing_project.as_ref().map(|(id, _)| *id);
-        let editing_task_id = self.editing_task.as_ref().map(|(id, _)| *id);
-        let editing_note_id = self.editing_note.as_ref().map(|(id, _)| *id);
+        let titlebar = self.titlebar(cx);
+        let sidebar = self.sidebar(cx);
 
-        let sidebar = div()
-            .flex()
-            .flex_col()
-            .w(px(280.0))
-            .h_full()
-            .bg(theme.surface)
-            .border_r_1()
-            .border_color(theme.border_subtle)
-            .p(theme.space_3)
-            .gap(theme.space_1)
-            .child(
-                div()
-                    .px(theme.space_2)
-                    .pb(theme.space_1)
-                    .text_color(theme.text_secondary)
-                    .text_xs()
-                    .child("PROJECTS"),
-            )
-            .children(projects.into_iter().map(|project| {
-                let id = project.id;
-                let selected = selected_project == Some(id);
-
-                if editing_project_id == Some(id) {
-                    let (_, input) = self.editing_project.as_ref().unwrap();
-                    return div()
-                        .px(theme.space_1)
-                        .py(theme.space_1)
-                        .child(input.clone())
-                        .into_any_element();
-                }
-
-                let name = project.name.clone();
-                let terminal_count = self.terminal_panel.read(cx).tab_count(id.0);
-                let row = div()
-                    .id(("project", id.0 as u64))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(theme.space_2)
-                    .px(theme.space_3)
-                    .py(theme.space_2)
-                    .rounded(theme.radius_md)
-                    .cursor_pointer()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(theme.space_2)
-                            .child(div().size(px(6.0)).rounded_full().bg(if selected {
-                                theme.accent
-                            } else {
-                                gpui::transparent_black()
-                            }))
-                            .child(
-                                div()
-                                    .text_color(if selected {
-                                        theme.text_primary
-                                    } else {
-                                        theme.text_secondary
-                                    })
-                                    .child(project.name.clone()),
-                            )
-                            .when(terminal_count > 0, |el| {
-                                el.child(
-                                    div()
-                                        .px(theme.space_1)
-                                        .rounded(theme.radius_sm)
-                                        .border_1()
-                                        .border_color(theme.border_light)
-                                        .text_xs()
-                                        .text_color(theme.text_secondary)
-                                        .child(format!(">_ {terminal_count}")),
-                                )
-                            }),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap(theme.space_1)
-                            .child(
-                                icon_button(&theme, "✎", ("project-edit", id.0 as u64)).on_click(
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.start_editing_project(id, name.clone().into(), cx);
-                                    }),
-                                ),
-                            )
-                            .child(
-                                icon_button_tinted(
-                                    &theme,
-                                    "✕",
-                                    ("project-archive", id.0 as u64),
-                                    theme.danger,
-                                )
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        this.state.update(cx, |state, cx| {
-                                            state.archive_project(id);
-                                            cx.notify();
-                                        });
-                                    },
-                                )),
-                            ),
-                    );
-
-                // Selected or hovered rows fade their surface in and out.
-                let key = PROJECT_HOVER_KEY_BASE + id.0 as u64;
-                let active = selected || self.hovered == Some(key);
-                let row = row
-                    .border_1()
-                    .when(selected, |r| r.shadow_sm())
-                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        this.set_hover(key, *hovered, cx);
-                    }))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        // The history view belongs to one project: leave it.
-                        this.open_history = None;
-                        this.open_task = None;
-                        this.open_note = None;
-                        this.state.update(cx, |state, _| {
-                            state.select_project(id);
-                        });
-                        cx.notify();
-                    }));
-                motion::fade(
-                    row,
-                    ("project-fade", id.0 as u64),
-                    active,
-                    theme.surface_raised,
-                    if selected {
-                        theme.border_light
-                    } else {
-                        theme.border_subtle
-                    },
-                )
+        /// A full-content view fills the canvas and clips to it, so a narrow
+        /// window cuts it off instead of painting over the terminal panel.
+        fn fill(view: impl IntoElement) -> gpui::AnyElement {
+            div()
+                .flex()
+                .flex_1()
+                .h_full()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .child(view)
                 .into_any_element()
-            }))
-            .child(create_row(&theme, &self.new_project_input))
-            .when(selected_project.is_some(), |el| {
-                let open = self.open_history.is_some();
-                el.child(div().mt(theme.space_3).child(self.nav_row(
-                    NAV_HISTORY,
-                    open,
-                    None,
-                    |this, cx| this.toggle_history(cx),
-                    cx,
-                )))
-            })
-            .when(selected_project.is_some(), |el| {
-                el.child(div().mt(theme.space_1).child(self.run_sidebar_row(cx)))
-            })
-            .child(
-                div()
-                    .mt(theme.space_1)
-                    .child(self.timesheet_sidebar_row(cx)),
-            )
-            .when(selected_project.is_some(), |el| {
-                el.child(
-                    div()
-                        .mt(theme.space_1)
-                        .child(self.credentials_sidebar_row(cx)),
-                )
-            });
-
-        let main_panel = div()
-            .id("main-panel")
-            .flex()
-            .flex_col()
-            .flex_1()
-            // Without min_w(0) a wide child stops this column shrinking and
-            // pushes the terminal panel off the window; it scrolls instead.
-            .min_w(px(0.0))
-            .overflow_y_scroll()
-            .h_full()
-            .bg(theme.surface_solid)
-            .p(theme.space_4)
-            .gap(theme.space_3)
-            .when_some(selected_project_data.as_ref(), |el, project| {
-                el.child(dashboard(&theme, project, &raw_tasks, &unreadable_repos))
-            })
-            .when(selected_project.is_some(), |el| {
-                el.child(self.workspace_tools.clone())
-            })
-            .when(selected_project.is_some() && !notes.is_empty(), |el| {
-                el.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(theme.space_2)
-                        .pb(theme.space_3)
-                        .border_b_1()
-                        .border_color(theme.border_subtle)
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(theme.text_secondary)
-                                .child("RECENT NOTES"),
-                        )
-                        .children(notes.iter().take(5).map(|note: &Note| {
-                            let id = note.id;
-                            let open_title = note.title.clone();
-                            div()
-                                .id(("recent-note", id.0 as u64))
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap(theme.space_2)
-                                .px(theme.space_3)
-                                .py(theme.space_2)
-                                .rounded(theme.radius_md)
-                                .bg(theme.surface_raised)
-                                .border_1()
-                                .border_color(theme.border_subtle)
-                                .cursor_pointer()
-                                .hover(move |s| s.border_color(theme.border_light))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.open_note(id, open_title.clone().into(), cx);
-                                }))
-                                .child(
-                                    div()
-                                        .text_color(theme.text_primary)
-                                        .child(note.title.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.text_secondary)
-                                        .child(date::format_date(note.updated_at)),
-                                )
-                        })),
-                )
-            })
-            .child(div().text_xl().text_color(theme.text_primary).child(
-                if selected_project.is_some() {
-                    "Tasks"
-                } else {
-                    "Select or create a project"
-                },
-            ))
-            .when(!project_tags.is_empty(), |el| {
-                el.child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .items_center()
-                        .gap(theme.space_1)
-                        .child(tag_filter_chip(
-                            &theme,
-                            "All".to_string(),
-                            active_tag.is_none(),
-                            "tag-filter-all".into(),
-                            cx.listener(|this, _, _, cx| {
-                                this.tag_filter = None;
-                                cx.notify();
-                            }),
-                        ))
-                        .children(project_tags.iter().enumerate().map(|(ix, (name, count))| {
-                            let active = active_tag
-                                .as_ref()
-                                .is_some_and(|t| t.to_lowercase() == name.to_lowercase());
-                            let wanted = name.clone();
-                            tag_filter_chip(
-                                &theme,
-                                format!("{name} · {count}"),
-                                active,
-                                ("tag-filter", ix as u64).into(),
-                                cx.listener(move |this, _, _, cx| {
-                                    this.tag_filter = Some(wanted.clone());
-                                    cx.notify();
-                                }),
-                            )
-                        })),
-                )
-            })
-            .children(tasks.into_iter().map(|(task, depth)| {
-                let id = task.id;
-
-                if editing_task_id == Some(id) {
-                    let (_, input) = self.editing_task.as_ref().unwrap();
-                    return div()
-                        .ml(px(depth as f32 * 20.0))
-                        .child(input.clone())
-                        .into_any_element();
-                }
-
-                let status = task.status;
-                let badge_color = match status {
-                    TaskStatus::Done => theme.success,
-                    TaskStatus::Blocked => theme.warning,
-                    TaskStatus::InProgress => theme.accent,
-                    TaskStatus::Todo => theme.text_secondary,
-                };
-                let title = task.title.clone();
-                let (note_count, file_count, commit_count) =
-                    task_counts.get(&id).copied().unwrap_or_default();
-                let counts: Vec<String> = [
-                    (note_count, "note"),
-                    (file_count, "file"),
-                    (commit_count, "commit"),
-                ]
-                .iter()
-                .filter(|(n, _)| *n > 0)
-                .map(|(n, label)| format!("{n} {label}{}", if *n == 1 { "" } else { "s" }))
-                .collect();
-                div()
-                    .ml(px(depth as f32 * 20.0))
-                    .id(("task", id.0 as u64))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px(theme.space_3)
-                    .py(theme.space_3)
-                    .rounded(theme.radius_lg)
-                    .bg(theme.surface_raised)
-                    .border_1()
-                    .border_color(theme.border_subtle)
-                    .border_t_1()
-                    .shadow_sm()
-                    .cursor_pointer()
-                    .hover(move |s| s.border_color(theme.border_light))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(theme.space_3)
-                            .child(
-                                div()
-                                    .text_color(theme.text_primary)
-                                    .child(task.title.clone()),
-                            )
-                            .when(!counts.is_empty(), |d| {
-                                d.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.text_secondary)
-                                        .child(counts.join(" · ")),
-                                )
-                            })
-                            .children(task.tags.iter().take(3).map(|tag| {
-                                div()
-                                    .px(theme.space_2)
-                                    .rounded(theme.radius_sm)
-                                    .bg(crate::theme::label_color(&theme, tag).opacity(0.16))
-                                    .text_xs()
-                                    .text_color(crate::theme::label_color(&theme, tag))
-                                    .child(tag.clone())
-                            }))
-                            .when(task.tags.len() > 3, |d| {
-                                d.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.text_secondary)
-                                        .child(format!("+{}", task.tags.len() - 3)),
-                                )
-                            }),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(theme.space_2)
-                            .child(
-                                div()
-                                    .id(("task-open", id.0 as u64))
-                                    .px(theme.space_2)
-                                    .py(theme.space_1)
-                                    .rounded(theme.radius_sm)
-                                    .border_1()
-                                    .border_color(theme.border_light)
-                                    .text_sm()
-                                    .text_color(theme.text_secondary)
-                                    .cursor_pointer()
-                                    .hover(move |s| {
-                                        s.bg(theme.surface_raised).text_color(theme.text_primary)
-                                    })
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.open_task_detail(id, cx);
-                                        cx.stop_propagation();
-                                    }))
-                                    .child("Open"),
-                            )
-                            .child(
-                                div()
-                                    .px(theme.space_2)
-                                    .py(theme.space_1)
-                                    .rounded(theme.radius_sm)
-                                    .bg(badge_color.opacity(0.15))
-                                    .text_color(badge_color)
-                                    .text_sm()
-                                    .child(status_label(status)),
-                            )
-                            .child(
-                                icon_button(&theme, "+", ("task-subtask", id.0 as u64)).on_click(
-                                    cx.listener(move |this, _, _, cx| {
-                                        let new_id = this.state.update(cx, |state, cx| {
-                                            let new_id = state.create_subtask(id, "New subtask");
-                                            cx.notify();
-                                            new_id
-                                        });
-                                        if let Some(new_id) = new_id {
-                                            this.start_editing_task(
-                                                new_id,
-                                                "New subtask".into(),
-                                                cx,
-                                            );
-                                        }
-                                    }),
-                                ),
-                            )
-                            .child(
-                                icon_button(&theme, "✎", ("task-edit", id.0 as u64)).on_click(
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.start_editing_task(id, title.clone().into(), cx);
-                                    }),
-                                ),
-                            )
-                            .child(
-                                icon_button_tinted(
-                                    &theme,
-                                    "✕",
-                                    ("task-delete", id.0 as u64),
-                                    theme.danger,
-                                )
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        this.state.update(cx, |state, cx| {
-                                            state.delete_task(id);
-                                            cx.notify();
-                                        });
-                                    },
-                                )),
-                            ),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.state.update(cx, |state, _| {
-                            state.cycle_task_status(id);
-                        });
-                        cx.notify();
-                    }))
-                    .into_any_element()
-            }))
-            .when(selected_project.is_some(), |el| {
-                el.child(create_row(&theme, &self.new_task_input))
-            })
-            .when(selected_project.is_some(), |el| {
-                el.child(
-                    div()
-                        .text_xl()
-                        .text_color(theme.text_primary)
-                        .mt(theme.space_4)
-                        .child("Notes"),
-                )
-                .children(notes.into_iter().map(|note: Note| {
-                    let id = note.id;
-
-                    if editing_note_id == Some(id) {
-                        let (_, input) = self.editing_note.as_ref().unwrap();
-                        return div().child(input.clone()).into_any_element();
-                    }
-
-                    let title = note.title.clone();
-                    let open_title = note.title.clone();
-                    div()
-                        .id(("note", id.0 as u64))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .px(theme.space_3)
-                        .py(theme.space_3)
-                        .rounded(theme.radius_lg)
-                        .bg(theme.surface_raised)
-                        .border_1()
-                        .border_color(theme.border_subtle)
-                        .shadow_sm()
-                        .cursor_pointer()
-                        .hover(move |s| s.border_color(theme.border_light))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.open_note(id, open_title.clone().into(), cx);
-                        }))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(theme.space_2)
-                                .child(
-                                    div()
-                                        .text_color(theme.text_primary)
-                                        .child(note.title.clone()),
-                                )
-                                .when(note.kind != NoteKind::Note, |d| {
-                                    d.child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme.text_secondary)
-                                            .child(note.kind.label()),
-                                    )
-                                }),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(theme.space_2)
-                                .child(
-                                    icon_button(&theme, "✎", ("note-edit", id.0 as u64)).on_click(
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.start_editing_note(id, title.clone().into(), cx);
-                                        }),
-                                    ),
-                                )
-                                .child(
-                                    icon_button_tinted(
-                                        &theme,
-                                        "✕",
-                                        ("note-delete", id.0 as u64),
-                                        theme.danger,
-                                    )
-                                    .on_click(cx.listener(
-                                        move |this, _, _, cx| {
-                                            this.state.update(cx, |state, cx| {
-                                                state.delete_note(id);
-                                                cx.notify();
-                                            });
-                                        },
-                                    )),
-                                ),
-                        )
-                        .into_any_element()
-                }))
-                .child(
-                    div()
-                        .mt(theme.space_2)
-                        .flex()
-                        .items_center()
-                        .gap(theme.space_2)
-                        .child(
-                            div()
-                                .id("note-kind")
-                                .flex_none()
-                                .px(theme.space_3)
-                                .py(theme.space_1)
-                                .rounded(theme.radius_sm)
-                                .border_1()
-                                .border_color(theme.accent)
-                                .bg(theme.accent.opacity(0.12))
-                                .text_sm()
-                                .text_color(theme.accent)
-                                .cursor_pointer()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.state.update(cx, |state, cx| {
-                                        state.new_note_kind = state.new_note_kind.cycle();
-                                        cx.notify();
-                                    });
-                                }))
-                                .child(format!("Kind: {}", new_note_kind.label())),
-                        )
-                        .child(div().flex_1().child(self.new_note_input.clone())),
-                )
-                .child(
-                    div()
-                        .px(theme.space_1)
-                        .text_color(theme.text_secondary)
-                        .text_xs()
-                        .child("Click the kind to change it. Enter creates, Esc cancels"),
-                )
-            })
-            .when(selected_project.is_some(), |el| {
-                el.child(self.project_files.clone())
-            })
-            .when(selected_project.is_some(), |el| {
-                el.child(
-                    div()
-                        .text_xl()
-                        .text_color(theme.text_primary)
-                        .mt(theme.space_4)
-                        .child("Linked repos"),
-                )
-                .children(repos.into_iter().map(|repo: Repo| {
-                    let id = repo.id;
-                    let link_count = repo_link_counts.get(&id).copied().unwrap_or(0);
-                    let confirming = confirm_unlink == Some(id);
-                    div()
-                        .id(("repo", id.0 as u64))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .px(theme.space_3)
-                        .py(theme.space_3)
-                        .rounded(theme.radius_lg)
-                        .bg(theme.surface_raised)
-                        .border_1()
-                        .border_color(theme.border_subtle)
-                        .shadow_sm()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .text_color(theme.text_primary)
-                                        .child(repo.name.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.text_secondary)
-                                        .child(repo.path.clone()),
-                                )
-                                .when(confirming, |d| {
-                                    d.child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap(theme.space_2)
-                                            .text_xs()
-                                            .child(div().text_color(theme.warning).child(format!(
-                                                "{link_count} commit mapping{} will be deleted \
-                                                 with this repo. Click ✕ again to confirm.",
-                                                if link_count == 1 { "" } else { "s" }
-                                            )))
-                                            .child(
-                                                div()
-                                                    .id(("repo-unlink-cancel", id.0 as u64))
-                                                    .text_color(theme.text_secondary)
-                                                    .cursor_pointer()
-                                                    .hover(move |s| {
-                                                        s.text_color(theme.text_primary)
-                                                    })
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.confirm_unlink_repo = None;
-                                                        cx.notify();
-                                                    }))
-                                                    .child("Cancel"),
-                                            ),
-                                    )
-                                }),
-                        )
-                        .child(
-                            icon_button_tinted(
-                                &theme,
-                                "✕",
-                                ("repo-unlink", id.0 as u64),
-                                theme.danger,
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    // Mapped commits go with the repo (the
-                                    // database cascades); ask first.
-                                    if link_count > 0 && this.confirm_unlink_repo != Some(id) {
-                                        this.confirm_unlink_repo = Some(id);
-                                        cx.notify();
-                                        return;
-                                    }
-                                    this.confirm_unlink_repo = None;
-                                    this.state.update(cx, |state, cx| {
-                                        state.unlink_repo(id);
-                                        cx.notify();
-                                    });
-                                },
-                            )),
-                        )
-                        .into_any_element()
-                }))
-                .child(
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap(theme.space_2)
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .child(create_row(&theme, &self.new_repo_input)),
-                        )
-                        .child(
-                            div()
-                                .id("browse-repo")
-                                .mt(theme.space_2)
-                                .flex_none()
-                                .px(theme.space_4)
-                                .py(theme.space_2)
-                                .rounded(theme.radius_md)
-                                .border_1()
-                                .border_color(theme.accent)
-                                .text_color(theme.accent)
-                                .cursor_pointer()
-                                .hover(move |s| s.bg(theme.surface_raised))
-                                .on_click(cx.listener(|this, _, _, cx| this.browse_repo(cx)))
-                                .child("Browse…"),
-                        ),
-                )
-            });
+        }
 
         let mut note_page =
             (self.open_note.is_some() && self.open_history.is_none()).then(|| self.note_page(cx));
-        let main_panel = if let Some(history) = &self.open_history {
-            div()
-                .flex()
-                .flex_1()
-                .h_full()
-                .min_w(px(0.0))
-                .overflow_hidden()
-                .child(history.clone())
-                .into_any_element()
+        let view = if let Some(history) = &self.open_history {
+            fill(history.clone())
         } else if let (Some(detail), None) = (&self.open_task, &self.open_note) {
-            div()
-                .flex()
-                .flex_1()
-                .h_full()
-                .min_w(px(0.0))
-                .overflow_hidden()
-                .child(detail.clone())
-                .into_any_element()
+            fill(detail.clone())
         } else if let Some(page) = note_page.take() {
             page
         } else if self.run_open {
-            div()
-                .flex()
-                .flex_1()
-                .h_full()
-                .min_w(px(0.0))
-                .overflow_hidden()
-                .child(self.run_panel.clone())
-                .into_any_element()
+            fill(self.run_panel.clone())
         } else if self.timesheet_open {
-            div()
-                .flex()
-                .flex_1()
-                .h_full()
-                .min_w(px(0.0))
-                .overflow_hidden()
-                .child(self.timesheet_panel.clone())
-                .into_any_element()
+            fill(self.timesheet_panel.clone())
         } else if self.credentials_open {
-            div()
-                .flex()
-                .flex_1()
-                .h_full()
-                .min_w(px(0.0))
-                .overflow_hidden()
-                .child(self.credentials_panel.clone())
-                .into_any_element()
+            fill(self.credentials_panel.clone())
+        } else if self.settings_open {
+            fill(self.workspace_tools.clone())
         } else {
-            main_panel.into_any_element()
+            self.project_page(window, cx)
         };
+        let terminal = self
+            .terminal_open
+            .then(|| self.terminal_panel.clone().into_any_element());
+        let canvas = self.canvas(view, terminal);
+        let toast = self.toast(cx);
 
         div()
             .flex()
@@ -1594,6 +711,9 @@ impl Render for Root {
             .size_full()
             .bg(theme.window_tint)
             .font_family(theme::UI_FONT)
+            .text_size(px(theme::FS_BODY))
+            .line_height(gpui::relative(theme::LINE_HEIGHT))
+            .text_color(theme.text_primary)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
                 this.toggle_terminal(window, cx);
@@ -1630,31 +750,32 @@ impl Render for Root {
             .on_action(cx.listener(|this, _: &ToggleCredentialsView, _, cx| {
                 this.toggle_credentials_view(cx)
             }))
+            .on_action(
+                cx.listener(|this, _: &ToggleSettingsView, _, cx| this.toggle_settings_view(cx)),
+            )
             .on_action(cx.listener(|this, _: &FocusNewProject, window, cx| {
                 this.run_command(palette_rank::Command::NewProject, window, cx)
             }))
-            .child(titlebar(&theme))
+            .child(titlebar)
             .child(
                 // min_h(0): without it this column grows with its tallest
                 // child and pushes the bottom of the window off-screen.
-                div().flex().flex_col().flex_1().min_h(px(0.0)).child(
-                    div()
-                        .flex()
-                        .flex_1()
-                        .min_h(px(0.0))
-                        .child(sidebar)
-                        .child(main_panel)
-                        .when(self.terminal_open, |el| {
-                            el.child(self.terminal_panel.clone())
-                        }),
-                ),
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .child(sidebar)
+                    .child(canvas),
             )
             .children(self.palette.clone())
+            .children(toast)
     }
 }
 
 fn init_data() -> Result<(WorkspacePaths, rusqlite::Connection)> {
-    let paths = WorkspacePaths::from_os_data_dir()
+    let paths = qa::data_dir()
+        .map(WorkspacePaths::new)
+        .or_else(WorkspacePaths::from_os_data_dir)
         .ok_or_else(|| anyhow::anyhow!("could not resolve OS data directory"))?;
     paths.ensure_dirs(None)?;
 
@@ -1668,6 +789,7 @@ fn main() -> Result<()> {
     let (paths, conn) = init_data()?;
 
     gpui_platform::application().run(move |cx: &mut App| {
+        theme::install_fonts(cx);
         text_input::init_key_bindings(cx);
         note_editor::init_key_bindings(cx);
         // Bound globally (no key context) so it also fires while a terminal
@@ -1685,9 +807,11 @@ fn main() -> Result<()> {
             KeyBinding::new("ctrl-shift-m", ToggleTimesheetView, None),
             KeyBinding::new("ctrl-shift-l", ToggleCredentialsView, None),
             KeyBinding::new("ctrl-shift-n", FocusNewProject, None),
+            KeyBinding::new("ctrl-,", ToggleSettingsView, None),
         ]);
 
-        let bounds = Bounds::centered(None, size(px(1000.0), px(640.0)), cx);
+        let (width, height) = qa::window_size().unwrap_or((1000.0, 640.0));
+        let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
         let state = cx.new(|_| AppState::new(conn, paths.clone()));
 
         // Restore last project / task / terminal visibility. Stale ids fall
@@ -1849,6 +973,7 @@ fn main() -> Result<()> {
                         editing_note: None,
                         open_note: None,
                         note_mode: note_page::NoteMode::Edit,
+                        note_copied: None,
                         note_preview: None,
                         terminal_panel,
                         terminal_open: saved.terminal_open,
@@ -1865,6 +990,9 @@ fn main() -> Result<()> {
                         timesheet_open: false,
                         credentials_panel,
                         credentials_open: false,
+                        settings_open: false,
+                        toast_seen: None,
+                        toast_epoch: 0,
                     };
                     // A visible terminal panel needs its first tab, exactly
                     // as when the user opens it; a hidden one spawns nothing.
@@ -1875,6 +1003,7 @@ fn main() -> Result<()> {
                     if let Some(task) = restored_task {
                         root.open_task_detail(task, cx);
                     }
+                    qa::open_view(&mut root, window, cx);
                     // Restyle at runtime when the theme or transparency setting
                     // changes, or the OS switches between light and dark.
                     cx.observe_in(&settings, window, |this, _, window, cx| {

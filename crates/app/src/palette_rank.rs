@@ -189,6 +189,7 @@ pub enum Command {
     OpenRunCommands,
     OpenTimesheet,
     OpenCredentials,
+    OpenSettings,
     NewProject,
     CycleTheme,
     ToggleReduceTransparency,
@@ -197,13 +198,14 @@ pub enum Command {
 
 impl Command {
     /// All commands, in the order shown for an empty query.
-    pub const ALL: [Command; 10] = [
+    pub const ALL: [Command; 11] = [
         Command::ToggleTerminal,
         Command::NewTerminal,
         Command::OpenHistory,
         Command::OpenRunCommands,
         Command::OpenTimesheet,
         Command::OpenCredentials,
+        Command::OpenSettings,
         Command::NewProject,
         Command::CycleTheme,
         Command::ToggleReduceTransparency,
@@ -219,6 +221,7 @@ impl Command {
             Command::OpenRunCommands => "Open run commands",
             Command::OpenTimesheet => "Open timesheet",
             Command::OpenCredentials => "Open credentials",
+            Command::OpenSettings => "Open settings",
             Command::NewProject => "New project",
             Command::CycleTheme => "Switch theme (system, dark, light)",
             Command::ToggleReduceTransparency => "Toggle reduced transparency",
@@ -235,6 +238,7 @@ impl Command {
             Command::OpenRunCommands => "Ctrl+Shift+R",
             Command::OpenTimesheet => "Ctrl+Shift+M",
             Command::OpenCredentials => "Ctrl+Shift+L",
+            Command::OpenSettings => "Ctrl+,",
             Command::NewProject => "Ctrl+Shift+N",
             Command::CycleTheme
             | Command::ToggleReduceTransparency

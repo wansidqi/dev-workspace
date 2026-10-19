@@ -27,7 +27,7 @@ remaining gap is visible at a glance.
 ## Projects
 
 - [x] Create, rename, archive, switch (sidebar list, click to select)
-- [x] Dashboard: name, creation date, task-count stat tiles
+- [x] Project page header: name, creation date, repo count and a segmented status strip with counts
       (Todo/In Progress/Blocked/Done)
 - [x] Dashboard: recent notes section (top 5 by `updated_at`, click to open
       in the note editor)
@@ -40,7 +40,7 @@ remaining gap is visible at a glance.
 
 - [x] Unlimited nesting (depth-indented, parent/child via `parent_id`)
 - [x] Status cycling: Todo -> In Progress -> Done -> Blocked -> Todo (Blocked
-      sits after Done so the common path stays two clicks)
+      sits after Done so the common path stays two clicks). Click the status icon on a task row or the status pill on the task page; clicking the rest of a row opens the task
 - [x] Create, rename, delete (delete cascades to subtasks)
 - [x] Priority: chip on the task detail page, click cycles
       Low -> Medium -> High -> Urgent (colour-coded)
@@ -75,13 +75,9 @@ remaining gap is visible at a glance.
 - [x] Task-level notes: create, open (same editor), delete from the task
       detail page → Notes tab; works at any subtask depth. The project page
       lists only project-level notes.
-- [x] Kind selector: a "Kind: Note/Script/SQL" chip beside the new-note input
-      (project page and task Notes tab) cycles the kind of the next note
-      (`AppState::new_note_kind`); Script/SQL notes show their kind in the
-      list. Files are still `.md`; the kind is stored in the db. Tested in
-      core and `AppState`; the chip itself has not been clicked by hand.
-- [ ] Syntax highlighting
-- [x] Markdown preview: Edit / Split / Preview toggle, formatting toolbar (bold, italic, heading, code, table, lists, tasks, quote, link, rule), Ctrl+S saves and switches to Preview; notes with content open in Preview, empty ones in Edit. `pulldown-cmark` (approved) parsed in `markdown.rs`, rendered by `markdown_view.rs`, page in `note_page.rs`, toolbar logic in `note_format.rs`; raw HTML shown as text, input capped at 512 KB. Notes are always `.md` files. Verified by tests and compilation only.
+- [x] Every note is a markdown note: the "kind" chip was removed from the project page and the task Notes tab, and new notes are always plain notes. The `kind` column, `NoteKind` and `AppState::new_note_kind` remain (schema untouched); older Script/SQL notes keep their label and icon and render as markdown.
+- [x] Syntax highlighting in the preview: fenced code blocks are coloured by a dependency-free tokenizer (`highlight.rs`: comments, strings, numbers, keywords, function calls; SQL gets a full keyword set, other languages a basic one, unknown languages only strings/numbers/comments). Unit-tested; not a parser. The editor itself is not highlighted.
+- [x] Markdown preview: Edit / Split / Preview toggle, formatting toolbar (bold, italic, heading, code, table, lists, tasks, quote, link, rule), Ctrl+S saves and switches to Preview, double-clicking the rendered note switches to Edit; notes with content open in Preview, empty ones in Edit. The toolbar has a SQL button (inserts a fenced `sql` block). Code blocks render as cards with a header (language label) and a copy button that shows "Copied" for 1.6 s; long lines wrap (a mouse wheel cannot scroll sideways). The editor scrolls vertically (the frame scrolls, the padded text box inside grows) but does not yet follow the cursor and does not wrap long lines. `pulldown-cmark` (approved) parsed in `markdown.rs`, rendered by `markdown_view.rs`, page in `note_page.rs`, toolbar logic in `note_format.rs`; raw HTML shown as text, input capped at 512 KB. Notes are always `.md` files. Verified by tests and compilation only.
 - [ ] Search
 
 ## Attachments
@@ -211,13 +207,13 @@ remaining gap is visible at a glance.
       sidebar shows a `>_ N` badge per project, closing a tab kills its
       shell. Ctrl+` toggles the panel, Ctrl+Shift+` opens a new tab
       (same as VS Code).
-- [x] Terminal: scrollback capped (2000 lines default); the length for new terminals is set from the Workspace tools card (100 to 100,000 lines, saved as `terminal_scrollback=`; a running terminal keeps the size it started with)
+- [x] Terminal: scrollback capped (2000 lines default); the length for new terminals is set in the Settings view (100 to 100,000 lines, saved as `terminal_scrollback=`; a running terminal keeps the size it started with)
 - [x] Terminal: double-click a tab to rename it (the old name is selected; empty names are ignored), drag the panel's left edge to resize it (320 to 1200 px, remembered as `terminal_width=`), and "Split" stacks a second shell under the first in the same tab (two panes at most; "Unsplit" closes the focused one). Checked in the running app. Not remembered across restarts: tab names and splits.
 - [x] Per-project run commands + log view (`devspace-runner` crate,
       `run_panel.rs`; sidebar "Run commands"; add/edit/delete, Start/Stop,
       status chip, virtualised auto-scrolling log, Clear, Copy log; verified
       by compilation and unit tests only, not launched)
-- [x] IDE launcher: "Open in IDE" on the project page (Workspace tools card) runs
+- [x] IDE launcher: "Open in IDE" on the project page (Settings view) runs
       the configurable command (default `code`, editable there, saved in
       settings) on the first linked repo or the project data folder. Spawned
       directly with the folder as one argument, never via a shell;
@@ -246,7 +242,7 @@ remaining gap is visible at a glance.
 ## Data and safety
 
 - [x] Backup / export / import (`devspace-storage` `transfer.rs` and
-      `import.rs`; buttons in the Workspace tools card): workspace backup to
+      `import.rs`; buttons in the Settings view): workspace backup to
       `backups/<timestamp>/` (VACUUM INTO + project files), project export
       folder `<name>.devspace-export/` (`project.db` + `files/`, never
       credentials), import as a NEW project with all ids remapped in one
@@ -257,8 +253,25 @@ remaining gap is visible at a glance.
 - [x] Window-level Mica/acrylic blur on Windows, custom draggable titlebar,
       glass surfaces with borders/shadows on sidebar + cards
 - [x] Hover/selection transitions: `motion.rs` fades a surface in and out with a critically damped spring (about 150-200 ms, no overshoot; tested not to overshoot and to settle in 60-300 ms). Applied to the sidebar rows (project rows and the History, Run commands, Timesheet and Credentials rows via `Root::nav_row`), the terminal tabs, and the palette highlight. Other hovers (buttons, chips, task rows) are still instant. A "Motion: normal/reduced" setting (and palette command) turns the transitions off through GPUI's reduce-motion flag; GPUI does not read the OS flag, so this is a manual setting.
-- [x] Light/dark theme: dark by default (the user's choice); "Theme: Dark / Light / Follow system" cycles at runtime from the Workspace tools card or the palette and is saved (`theme=` in settings.txt). The theme lives in a GPUI global (`theme::ActiveTheme`) that every view re-reads in `render`, so a change restyles the whole app without a restart; with "Follow system" an OS switch is picked up too. Tag chips and terminal colours adapt to the light palette. Both palettes are tested for WCAG AA contrast on the solid surfaces. Checked in the running app (default dark, switching to light and back).
+- [x] Light/dark theme: dark by default (the user's choice); "Theme: Dark / Light / Follow system" cycles at runtime in the Settings view or the palette and is saved (`theme=` in settings.txt). The theme lives in a GPUI global (`theme::ActiveTheme`) that every view re-reads in `render`, so a change restyles the whole app without a restart; with "Follow system" an OS switch is picked up too. Tag chips and terminal colours adapt to the light palette. Both palettes are tested for WCAG AA contrast on the solid surfaces. Checked in the running app (default dark, switching to light and back).
 - [x] Reduced transparency: "Transparency: normal/reduced" (and a palette command) makes every surface opaque and switches the window backdrop from Mica to opaque; saved as `reduce_transparency=`. It does not yet follow the OS "transparency effects" setting.
+
+## UI redesign (design system)
+
+The whole interface was redesigned as one product (direction: graphite and phosphor).
+
+- [x] Typography: Geist (UI) and Geist Mono (data, code, note source) bundled in `assets/fonts` and registered at startup (`theme::install_fonts`; a load failure falls back to the platform font). Terminal keeps a system monospace for glyph coverage. Six sizes and three weights via the `TypeScale` helpers; no raw sizes in views. This replaces the earlier all-monospace UI; `UI_FONT` in `theme.rs` is the one switch if that preference should come back.
+- [x] Palette and shape: cool graphite surfaces, one lime accent (deep moss in light), muted status colours, new tokens (`surface_sunken`, `surface_hover`, `text_muted`, `border_strong`, `accent_fg`, `scrim`), radii 6/8/12, spacing to 32. Contrast tests cover every text and status token on both themes.
+- [x] Icons: Lucide set embedded as SVG (`ui::Icon`), replacing text glyphs everywhere (old glyph call sites map through `Icon::from_glyph`).
+- [x] Shared primitives in `ui.rs`: buttons (4 kinds), icon buttons, chips, filter chips, segmented control, switch, tabs, page header, empty state, notice, kbd.
+- [x] Shell: title bar with a search field that opens the palette, 248px sidebar with project list and a Workspace group (Settings added, Ctrl+,), floating canvases for the view and the terminal, toast for action results, responsive width budget (terminal panel yields before the page drops under 520px; project rail stacks under 960px).
+- [x] Project page recomposed (header, status strip, flat task list with floating row actions, side rail for notes/files/repos). Task page, commit history, timesheet, run commands, credentials, notes (editor, preview, toolbar), palette and terminal panel restyled with the same primitives. Workspace tools moved to a Settings view.
+- [x] Window controls drawn as three status-light dots (see Decisions); notes preview redesigned as a page card with heading hairlines and code cards; word navigation in all text inputs.
+- [x] Settings → Data: shows the path of `app.db` and a "Show in folder" button (`external::reveal`); notes and attachments sit in the folders beside it.
+- [x] App icon: `assets/images/logo.png` is embedded as the exe's icon resource #1 by `crates/app/build.rs`, which writes the small binary `.res` itself (no resource-compiler crate); GPUI loads window and taskbar icons from that resource, and Explorer shows it for the .exe. MSVC targets only; one 256px PNG image (Windows scales it down). Replace the PNG and rebuild to change the icon; Explorer/taskbar may cache the old one until restart.
+- [x] Debug-only QA hooks (`qa.rs`: `DEVSPACE_DATA_DIR`, `DEVSPACE_SIZE`, `DEVSPACE_VIEW` incl. `task:<id>:commits`, `note:<id>:edit`) for non-interactive screenshots.
+- Performance: GPUI is very slow unoptimised. Typing in inputs lags in a debug build and is instant in `cargo run --release -p app`; judge responsiveness on release.
+- Verified by screenshots at 900, 1300 and 1900 px wide in dark and light, with the terminal open and closed. Not exercised by hand: hover states, window dragging from the title bar around the search field, the light theme over a bright wallpaper with Mica.
 
 ## Timesheet
 
@@ -350,11 +363,12 @@ in SQLite (`app.db`) instead.
   `note_editor::init_key_bindings(cx)` called once at startup (done in
   `main.rs`, alongside `text_input`'s).
   **Known limitation**: Up/Down move the cursor by column measured in bytes,
-  not on-screen x position, so it drifts on lines whose rendered width
-  differs if a proportional font is ever used (today's UI font is already
-  proportional, but notes tend to be short/simple enough that this hasn't
-  been an issue in manual testing). Revisit with pixel-accurate hit-testing
-  if it becomes one.
+  not on-screen x position. The editor is set in Geist Mono (monospace), so
+  this is exact for ASCII; wide or combining characters can drift. Revisit
+  with pixel-accurate hit-testing if it becomes one. Word movement
+  (Ctrl+Left/Right, Ctrl+Shift+Left/Right, Ctrl+Backspace/Delete; Alt on
+  macOS) lives in `text_nav.rs` and is shared with `TextInput` (masked inputs
+  jump to the start or end of the whole value).
 - `GlassTheme` dropped its `shadow: Hsla` field — gpui's built-in `shadow_sm`/
   `shadow_md`/`shadow_lg` macros (tailwind-style, see `gpui_macros::styles`)
   cover this better than a single custom color token did; kept `warning` and
@@ -400,7 +414,7 @@ in SQLite (`app.db`) instead.
      palette, run commands, backup/import, history filters, note page,
      credentials view).
   2. Terminal env-var injection from the vault (optional).
-  3. Syntax highlighting for Script/SQL notes (needs a crate approval).
+  3. Editor: soft-wrap long lines and scroll to the cursor.
   4. Built-in PDF viewer (needs `pdfium-render` approval).
   5. Patch-id re-matching of missing commits; light theme and reduced
      transparency; hover transitions.
@@ -422,12 +436,7 @@ in SQLite (`app.db`) instead.
   comment in that file) — covers normal shell use, not the full modifier
   matrix zed's `terminal::mappings::keys` implements; expand there if a
   workflow needs e.g. shift-arrow or alt-modified keys.
-- A terminal toggle button almost went in the custom titlebar's top-right
-  corner — don't do that. On Windows, the OS still paints native
-  minimize/maximize/close caption buttons over that corner even with
-  `appears_transparent: true` and no native titlebar content, silently
-  eating anything GPUI draws underneath. Interactive controls belong
-  elsewhere in the chrome (the sidebar button that once held it was removed; Ctrl+` and the palette toggle the terminal).
+- Window controls: with `appears_transparent: true` GPUI draws no caption buttons on Windows (an earlier note here claimed the OS paints them; it does not). The title bar draws its own three dots (minimise, maximise, close) marked with `window_control_area`. They must be siblings of the `Drag` region, not children: the hit test returns the first matching control area, so a drag region around them swallows their clicks. Terminal toggling stays on Ctrl+` and the palette.
 - Migration 2 (`crates/storage/src/migrations.rs`) added
   `UNIQUE(task_id, repo_id, hash)` plus two triggers
   (`commit_links_same_project_insert/update`) so the project-scope rule holds
@@ -541,8 +550,7 @@ in SQLite (`app.db`) instead.
 ## Pending decisions
 
 - Dependencies awaiting approval:
-  `pdfium-render` (PDF viewer); a syntax highlighter
-  crate for code blocks (`pulldown-cmark` is approved and in use).
+  `pdfium-render` (PDF viewer). (`pulldown-cmark` is approved and in use; code highlighting is built in, no crate needed.)
 - History date filters use UTC day boundaries; a local-offset helper (or
   `chrono`, a new dependency) would make "Today" follow local time.
 - Everything merged from the parallel agents (palette, run commands,

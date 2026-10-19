@@ -7,6 +7,7 @@
 //! closes; a copied value is removed from the clipboard after [`CLIPBOARD_FOR`]
 //! if the clipboard still holds it. This screen is never see-through.
 
+use crate::theme::TypeScale;
 use std::time::Duration;
 
 use devspace_core::{CredentialId, CredentialKind, CredentialMeta, ProjectId};
@@ -19,7 +20,8 @@ use crate::date::format_date;
 use crate::icon_button;
 use crate::state::AppState;
 use crate::text_input::TextInput;
-use crate::theme::{GlassTheme, MONO_FONT};
+use crate::theme::{GlassTheme, CODE_FONT};
+use crate::ui::{self, icon, ButtonKind, Icon};
 
 /// How long a revealed secret stays on screen.
 const REVEAL_FOR: Duration = Duration::from_secs(15);
@@ -228,35 +230,6 @@ impl CredentialsPanel {
         cx.notify();
     }
 
-    fn button(
-        &self,
-        label: &'static str,
-        id: impl Into<gpui::ElementId>,
-        primary: bool,
-    ) -> gpui::Stateful<gpui::Div> {
-        let theme = self.theme;
-        div()
-            .id(id)
-            .px(theme.space_3)
-            .py(theme.space_1)
-            .rounded(theme.radius_sm)
-            .border_1()
-            .border_color(if primary {
-                theme.accent
-            } else {
-                theme.border_light
-            })
-            .text_sm()
-            .text_color(if primary {
-                theme.accent
-            } else {
-                theme.text_secondary
-            })
-            .cursor_pointer()
-            .hover(move |s| s.bg(theme.surface_raised).text_color(theme.text_primary))
-            .child(label)
-    }
-
     fn row(&self, meta: &CredentialMeta, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
         let id = meta.id;
@@ -267,36 +240,39 @@ impl CredentialsPanel {
             .filter(|r| r.id == id)
             .map(|r| SharedString::from(r.value.to_string()));
         let confirming = self.confirm_delete == Some(id);
+        let is_shown = shown.is_some();
         div()
             .flex()
             .flex_col()
             .gap(theme.space_2)
-            .px(theme.space_3)
+            .px(theme.space_2)
             .py(theme.space_3)
-            .rounded(theme.radius_md)
-            .bg(theme.surface_raised)
-            .border_1()
+            .border_b_1()
             .border_color(theme.border_subtle)
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .justify_between()
                     .gap(theme.space_3)
+                    .child(icon(Icon::Key, 16.0, theme.text_muted))
                     .child(
                         div()
                             .flex()
                             .flex_col()
+                            .flex_1()
                             .min_w(px(0.0))
                             .child(
                                 div()
+                                    .t_body()
+                                    .t_strong()
                                     .text_color(theme.text_primary)
+                                    .truncate()
                                     .child(SharedString::from(meta.label.clone())),
                             )
-                            .child(div().text_xs().text_color(theme.text_secondary).child(
+                            .child(div().t_small().t_code().text_color(theme.text_muted).child(
                                 format!(
                                     "{} · added {}",
-                                    meta.kind.label(),
+                                    meta.kind.label().to_lowercase(),
                                     format_date(meta.created_at)
                                 ),
                             )),
@@ -304,13 +280,16 @@ impl CredentialsPanel {
                     .child(
                         div()
                             .flex()
+                            .flex_none()
                             .items_center()
-                            .gap(theme.space_2)
+                            .gap(theme.space_1)
                             .child(
-                                self.button(
-                                    if shown.is_some() { "Hide" } else { "Reveal" },
+                                ui::button(
+                                    &theme,
                                     ("cred-reveal", uid),
-                                    false,
+                                    ButtonKind::Secondary,
+                                    Some(if is_shown { Icon::EyeOff } else { Icon::Eye }),
+                                    if is_shown { "Hide" } else { "Reveal" },
                                 )
                                 .on_click(cx.listener(
                                     move |this, _, _, cx| {
@@ -323,40 +302,58 @@ impl CredentialsPanel {
                                 )),
                             )
                             .child(
-                                self.button("Copy", ("cred-copy", uid), false)
-                                    .on_click(cx.listener(move |this, _, _, cx| this.copy(id, cx))),
+                                ui::button(
+                                    &theme,
+                                    ("cred-copy", uid),
+                                    ButtonKind::Ghost,
+                                    Some(Icon::Copy),
+                                    "Copy",
+                                )
+                                .on_click(cx.listener(move |this, _, _, cx| this.copy(id, cx))),
                             )
                             .child(
-                                self.button("Replace", ("cred-replace", uid), false)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.replace(id, window, cx)
-                                    })),
+                                ui::button(
+                                    &theme,
+                                    ("cred-replace", uid),
+                                    ButtonKind::Ghost,
+                                    Some(Icon::Refresh),
+                                    "Replace",
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| this.replace(id, window, cx),
+                                )),
                             )
                             .child(if confirming {
-                                self.button("Click again to delete", ("cred-delete", uid), false)
-                                    .text_color(theme.danger)
-                                    .border_color(theme.danger)
+                                ui::button(
+                                    &theme,
+                                    ("cred-delete", uid),
+                                    ButtonKind::Danger,
+                                    Some(Icon::Trash),
+                                    "Click again to delete",
+                                )
+                                .on_click(cx.listener(move |this, _, _, cx| this.delete(id, cx)))
+                                .into_any_element()
+                            } else {
+                                icon_button(&theme, "✕", ("cred-delete", uid))
                                     .on_click(
                                         cx.listener(move |this, _, _, cx| this.delete(id, cx)),
                                     )
-                            } else {
-                                self.button("✕", ("cred-delete", uid), false).on_click(
-                                    cx.listener(move |this, _, _, cx| this.delete(id, cx)),
-                                )
+                                    .into_any_element()
                             }),
                     ),
             )
             .when_some(shown, |el, value| {
                 el.child(
                     div()
-                        .px(theme.space_2)
-                        .py(theme.space_1)
-                        .rounded(theme.radius_sm)
-                        .bg(theme.surface_solid)
+                        .ml(px(28.0))
+                        .px(theme.space_3)
+                        .py(theme.space_2)
+                        .rounded(theme.radius_md)
+                        .bg(theme.surface_sunken)
                         .border_1()
-                        .border_color(theme.border_subtle)
-                        .font_family(MONO_FONT)
-                        .text_sm()
+                        .border_color(theme.border_light)
+                        .font_family(CODE_FONT)
+                        .t_body()
                         .text_color(theme.text_primary)
                         .child(value),
                 )
@@ -375,9 +372,13 @@ impl Render for CredentialsPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.theme = crate::theme::current(cx);
         let theme = self.theme;
-        let (project, creds) = {
+        let (project, creds, project_name) = {
             let state = self.state.read(cx);
-            (state.selected_project, state.credentials.clone())
+            let name = state
+                .selected_project
+                .and_then(|id| state.projects.iter().find(|p| p.id == id))
+                .map(|p| p.name.clone());
+            (state.selected_project, state.credentials.clone(), name)
         };
         // Switching project hides whatever was revealed for the old one.
         if project != self.shown_project {
@@ -394,107 +395,124 @@ impl Render for CredentialsPanel {
             .flex_1()
             .h_full()
             .min_w(px(0.0))
-            // Secrets screens are never see-through.
-            .bg(theme.surface_solid)
-            .p(theme.space_4)
-            .gap(theme.space_3)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(theme.space_2)
-                    .child(icon_button(&theme, "←", "cred-back").on_click(cx.listener(
-                        |this, _, window, cx| {
+            .child(ui::page_header(
+                &theme,
+                "Credentials",
+                project_name.map(|n| format!("Secrets for {n}").into()),
+                Some(
+                    ui::back_button(&theme, "cred-back")
+                        .on_click(cx.listener(|this, _, window, cx| {
                             this.hide_secrets(cx);
                             if let Some(close) = &this.on_close {
                                 close(window, cx);
                             }
-                        },
-                    )))
+                        }))
+                        .into_any_element(),
+                ),
+                None,
+            ))
+            .child(
+                div()
+                    .id("cred-scroll")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .gap(theme.space_4)
+                    .px(theme.space_6)
+                    .py(theme.space_4)
+                    .overflow_y_scroll()
                     .child(
                         div()
-                            .text_xl()
-                            .text_color(theme.text_primary)
-                            .child("Credentials"),
-                    ),
-            )
-            .child(div().text_xs().text_color(theme.text_secondary).child(
-                "Encrypted on this computer; the key is kept in your OS keychain. \
-                         Values are never logged, and are not part of project exports. \
-                         Replace swaps a credential's value for what is typed in the value box.",
-            ))
-            .when(project.is_none(), |el| {
-                el.child(
-                    div()
-                        .py(theme.space_4)
-                        .text_color(theme.text_secondary)
-                        .child("Select a project to manage its credentials."),
-                )
-            })
-            .when(project.is_some(), |el| {
-                el.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(theme.space_2)
-                        .p(theme.space_3)
-                        .rounded(theme.radius_md)
-                        .border_1()
-                        .border_color(theme.border_subtle)
-                        .child(self.label_input.clone())
-                        .child(self.value_input.clone())
-                        .child(
+                            .flex()
+                            .items_start()
+                            .gap(theme.space_3)
+                            .p(theme.space_3)
+                            .rounded(theme.radius_md)
+                            .bg(theme.surface_sunken)
+                            .border_1()
+                            .border_color(theme.border_subtle)
+                            .child(div().mt(px(2.0)).child(icon(Icon::Lock, 15.0, theme.accent)))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .t_small()
+                                    .text_color(theme.text_secondary)
+                                    .child(
+                                        "Encrypted on this computer; the key is kept in your OS keychain. \
+                                         Values are never logged and are not part of project exports. \
+                                         Replace swaps a credential's value for what is typed in the value box.",
+                                    ),
+                            ),
+                    )
+                    .when(project.is_none(), |el| {
+                        el.child(ui::empty_state(
+                            &theme,
+                            Icon::Key,
+                            "No project selected",
+                            "Select a project to manage its credentials.",
+                            None,
+                        ))
+                    })
+                    .when(project.is_some(), |el| {
+                        el.child(
                             div()
                                 .flex()
+                                .flex_wrap()
                                 .items_center()
                                 .gap(theme.space_2)
-                                .child(self.button("Save", "cred-save", true).on_click(
-                                    cx.listener(|this, _, window, cx| this.save(window, cx)),
-                                ))
+                                .child(div().flex_1().min_w(px(180.0)).child(self.label_input.clone()))
+                                .child(div().flex_1().min_w(px(180.0)).child(self.value_input.clone()))
                                 .child(
-                                    div()
-                                        .id("cred-kind")
-                                        .flex_none()
-                                        .px(theme.space_3)
-                                        .py(theme.space_1)
-                                        .rounded(theme.radius_sm)
-                                        .border_1()
-                                        .border_color(theme.accent)
-                                        .bg(theme.accent.opacity(0.12))
-                                        .text_sm()
-                                        .text_color(theme.accent)
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.kind = this.kind.cycle();
-                                            cx.notify();
-                                        }))
-                                        .child(format!("Kind: {}", kind.label())),
+                                    ui::button(
+                                        &theme,
+                                        "cred-kind",
+                                        ButtonKind::Secondary,
+                                        None,
+                                        kind.label(),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.kind = this.kind.cycle();
+                                        cx.notify();
+                                    })),
+                                )
+                                .child(
+                                    ui::button(
+                                        &theme,
+                                        "cred-save",
+                                        ButtonKind::Primary,
+                                        Some(Icon::Plus),
+                                        "Save",
+                                    )
+                                    .on_click(
+                                        cx.listener(|this, _, window, cx| this.save(window, cx)),
+                                    ),
                                 ),
-                        ),
-                )
-            })
-            .when_some(self.notice.clone(), |el, (message, is_error)| {
-                el.child(
-                    div()
-                        .text_xs()
-                        .text_color(if is_error {
-                            theme.danger
-                        } else {
-                            theme.text_secondary
-                        })
-                        .child(message),
-                )
-            })
-            .when(project.is_some() && creds.is_empty(), |el| {
-                el.child(
-                    div()
-                        .py(theme.space_3)
-                        .text_sm()
-                        .text_color(theme.text_secondary)
-                        .child("No credentials yet. Add one above."),
-                )
-            })
-            .children(creds.iter().map(|meta| self.row(meta, cx)))
+                        )
+                    })
+                    .when_some(self.notice.clone(), |el, (message, is_error)| {
+                        el.child(ui::notice(&theme, message, is_error))
+                    })
+                    .when(project.is_some() && creds.is_empty(), |el| {
+                        el.child(ui::empty_state(
+                            &theme,
+                            Icon::Key,
+                            "No credentials yet",
+                            "Add a label and a value above. Click the kind to change what it is.",
+                            None,
+                        ))
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .border_t_1()
+                            .border_color(theme.border_subtle)
+                            .when(creds.is_empty(), |d| d.border_t_0())
+                            .children(creds.iter().map(|meta| self.row(meta, cx))),
+                    ),
+            )
     }
 }
 
@@ -510,6 +528,7 @@ impl crate::Root {
             self.open_history = None;
             self.open_task = None;
             self.open_note = None;
+            self.settings_open = false;
             self.run_open = false;
             self.timesheet_open = false;
             self.credentials_open = true;

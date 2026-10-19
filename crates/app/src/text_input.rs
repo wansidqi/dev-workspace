@@ -14,7 +14,7 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::theme::GlassTheme;
+use crate::theme::{GlassTheme, TypeScale};
 
 pub type ConfirmHandler = Box<dyn Fn(&str, &mut Window, &mut Context<TextInput>)>;
 pub type CancelHandler = Box<dyn Fn(&mut Window, &mut Context<TextInput>)>;
@@ -29,6 +29,12 @@ actions!(
         TiSelectLeft,
         TiSelectRight,
         TiSelectAll,
+        TiWordLeft,
+        TiWordRight,
+        TiSelectWordLeft,
+        TiSelectWordRight,
+        TiDeleteWordLeft,
+        TiDeleteWordRight,
         TiHome,
         TiEnd,
         TiPaste,
@@ -49,6 +55,16 @@ pub fn init_key_bindings(cx: &mut App) {
         KeyBinding::new("right", TiRight, Some("TextInput")),
         KeyBinding::new("shift-left", TiSelectLeft, Some("TextInput")),
         KeyBinding::new("shift-right", TiSelectRight, Some("TextInput")),
+        KeyBinding::new("ctrl-left", TiWordLeft, Some("TextInput")),
+        KeyBinding::new("ctrl-right", TiWordRight, Some("TextInput")),
+        KeyBinding::new("alt-left", TiWordLeft, Some("TextInput")),
+        KeyBinding::new("alt-right", TiWordRight, Some("TextInput")),
+        KeyBinding::new("ctrl-shift-left", TiSelectWordLeft, Some("TextInput")),
+        KeyBinding::new("ctrl-shift-right", TiSelectWordRight, Some("TextInput")),
+        KeyBinding::new("alt-shift-left", TiSelectWordLeft, Some("TextInput")),
+        KeyBinding::new("alt-shift-right", TiSelectWordRight, Some("TextInput")),
+        KeyBinding::new("ctrl-backspace", TiDeleteWordLeft, Some("TextInput")),
+        KeyBinding::new("ctrl-delete", TiDeleteWordRight, Some("TextInput")),
         KeyBinding::new("cmd-a", TiSelectAll, Some("TextInput")),
         KeyBinding::new("ctrl-a", TiSelectAll, Some("TextInput")),
         KeyBinding::new("cmd-v", TiPaste, Some("TextInput")),
@@ -133,6 +149,102 @@ impl TextInput {
 
     fn select_right(&mut self, _: &TiSelectRight, window: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.next_boundary(self.cursor_offset()), window, cx);
+    }
+
+    fn word_left(&mut self, _: &TiWordLeft, window: &mut Window, cx: &mut Context<Self>) {
+        let from = if self.selected_range.is_empty() {
+            self.cursor_offset()
+        } else {
+            self.selected_range.start
+        };
+        let to = if self.masked {
+            0
+        } else {
+            crate::text_nav::word_start_before(&self.content, from)
+        };
+        self.move_to(to, window, cx);
+    }
+
+    fn word_right(&mut self, _: &TiWordRight, window: &mut Window, cx: &mut Context<Self>) {
+        let from = if self.selected_range.is_empty() {
+            self.cursor_offset()
+        } else {
+            self.selected_range.end
+        };
+        let to = if self.masked {
+            self.content.len()
+        } else {
+            crate::text_nav::word_end_after(&self.content, from)
+        };
+        self.move_to(to, window, cx);
+    }
+
+    fn select_word_left(
+        &mut self,
+        _: &TiSelectWordLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let to = if self.masked {
+            0
+        } else {
+            crate::text_nav::word_start_before(&self.content, self.cursor_offset())
+        };
+        self.select_to(to, window, cx);
+    }
+
+    fn select_word_right(
+        &mut self,
+        _: &TiSelectWordRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let to = if self.masked {
+            self.content.len()
+        } else {
+            crate::text_nav::word_end_after(&self.content, self.cursor_offset())
+        };
+        self.select_to(to, window, cx);
+    }
+
+    fn delete_word_left(
+        &mut self,
+        _: &TiDeleteWordLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            let to = if self.masked {
+                0
+            } else {
+                crate::text_nav::word_start_before(&self.content, self.cursor_offset())
+            };
+            if to == self.cursor_offset() {
+                return;
+            }
+            self.select_to(to, window, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+
+    fn delete_word_right(
+        &mut self,
+        _: &TiDeleteWordRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            let to = if self.masked {
+                self.content.len()
+            } else {
+                crate::text_nav::word_end_after(&self.content, self.cursor_offset())
+            };
+            if to == self.cursor_offset() {
+                return;
+            }
+            self.select_to(to, window, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx)
     }
 
     fn select_all(&mut self, _: &TiSelectAll, window: &mut Window, cx: &mut Context<Self>) {
@@ -627,7 +739,7 @@ impl Element for TextElement {
         let style = window.text_style();
 
         let (display_text, text_color) = if content.is_empty() {
-            (input.placeholder.clone(), self.theme.text_secondary)
+            (input.placeholder.clone(), self.theme.text_muted)
         } else if masked {
             (
                 SharedString::from("*".repeat(content.chars().count())),
@@ -772,6 +884,12 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::right))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
+            .on_action(cx.listener(Self::delete_word_left))
+            .on_action(cx.listener(Self::delete_word_right))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
@@ -785,16 +903,19 @@ impl Render for TextInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .w_full()
-            .px(theme.space_2)
-            .py(theme.space_1)
+            .items_center()
+            .min_h(px(28.0))
+            .px(theme.space_3)
+            .py(px(3.0))
             .rounded(theme.radius_sm)
-            .bg(theme.surface_solid)
+            .bg(theme.surface_sunken)
             .border_1()
             .border_color(if self.focus_handle.is_focused(window) {
                 theme.accent
             } else {
-                theme.border_subtle
+                theme.border_light
             })
+            .t_body()
             .child(TextElement {
                 input: cx.entity(),
                 theme,

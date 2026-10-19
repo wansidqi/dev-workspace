@@ -8,6 +8,7 @@
 //! remembered in the settings file), double-clicking a tab renames it, and a
 //! tab can be split into two stacked panes, each with its own shell.
 
+use crate::theme::TypeScale;
 use std::collections::HashMap;
 
 use gpui::{div, prelude::*, px, App, Context, Entity, Focusable, Pixels, SharedString, Window};
@@ -44,6 +45,10 @@ impl gpui::Render for EdgeDragGhost {
 
 /// The panel width that puts its left edge at `pointer_x` in a window
 /// `window_width` wide, kept inside the allowed range.
+/// The narrowest the page beside the terminal panel is allowed to get before
+/// the panel gives up width.
+const MIN_PAGE_WIDTH: f32 = 520.0;
+
 pub fn width_for_pointer(window_width: f32, pointer_x: f32) -> u32 {
     let raw = (window_width - pointer_x).round();
     (raw.max(0.0) as u32).clamp(MIN_TERMINAL_WIDTH, MAX_TERMINAL_WIDTH)
@@ -128,6 +133,16 @@ impl TerminalPanel {
         } else {
             width
         }
+    }
+
+    /// The width actually drawn in a window `window_width` wide: the saved
+    /// width, but never so wide that the page beside it drops under
+    /// [`MIN_PAGE_WIDTH`] (the panel itself never goes under its own minimum).
+    pub fn effective_width(&self, window_width: f32, cx: &App) -> f32 {
+        let room = window_width - crate::shell::SIDEBAR_WIDTH - MIN_PAGE_WIDTH;
+        (self.width(cx) as f32)
+            .min(room)
+            .max(MIN_TERMINAL_WIDTH as f32)
     }
 
     /// Sets and remembers the panel width (clamped).
@@ -345,8 +360,15 @@ impl TerminalPanel {
             .rounded(theme.radius_sm)
             .text_color(theme.text_secondary)
             .cursor_pointer()
-            .hover(move |s| s.bg(theme.surface_raised).text_color(theme.text_primary))
-            .child(glyph)
+            .hover(move |s| s.bg(theme.surface_hover).text_color(theme.text_primary))
+            .group("panel-button")
+            .child(crate::ui::icon_group(
+                crate::ui::Icon::from_glyph(glyph).unwrap_or(crate::ui::Icon::Info),
+                14.0,
+                theme.text_secondary,
+                "panel-button",
+                theme.text_primary,
+            ))
     }
 
     /// A small text button for the tab bar (Split / Unsplit).
@@ -365,11 +387,11 @@ impl TerminalPanel {
             .flex()
             .items_center()
             .rounded(theme.radius_sm)
-            .text_xs()
+            .t_small()
             .text_color(theme.text_secondary)
             .when(enabled, |d| {
                 d.cursor_pointer()
-                    .hover(move |s| s.bg(theme.surface_raised).text_color(theme.text_primary))
+                    .hover(move |s| s.bg(theme.surface_hover).text_color(theme.text_primary))
             })
             .when(!enabled, |d| d.opacity(0.4))
             .child(label)
@@ -377,10 +399,10 @@ impl TerminalPanel {
 }
 
 impl Render for TerminalPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.theme = crate::theme::current(cx);
         let theme = self.theme;
-        let width: Pixels = px(self.width(cx) as f32);
+        let width: Pixels = px(self.effective_width(f32::from(window.viewport_size().width), cx));
         let project_name: SharedString = self
             .current
             .and_then(|id| {
@@ -425,9 +447,9 @@ impl Render for TerminalPanel {
                             .pl(theme.space_3)
                             .pr(theme.space_2)
                             .h(px(28.0))
-                            .rounded(theme.radius_sm)
+                            .rounded(theme.radius_md)
                             .cursor_pointer()
-                            .text_sm()
+                            .t_body()
                             .border_1()
                             .text_color(if active {
                                 theme.text_primary
@@ -464,7 +486,7 @@ impl Render for TerminalPanel {
                             .when(tab.panes.len() > 1, |el| {
                                 el.child(
                                     div()
-                                        .text_xs()
+                                        .t_small()
                                         .text_color(theme.text_secondary)
                                         .child(format!("{}×", tab.panes.len())),
                                 )
@@ -472,7 +494,7 @@ impl Render for TerminalPanel {
                             .child(
                                 self.header_button("✕", ("terminal-tab-close", tab.id))
                                     .size(px(18.0))
-                                    .text_xs()
+                                    .t_small()
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.close_tab(tab_id, cx);
                                         cx.stop_propagation();
@@ -482,11 +504,15 @@ impl Render for TerminalPanel {
                             tab_el,
                             ("terminal-tab-fade", tab.id),
                             active || self.hovered_tab == Some(tab_id),
-                            theme.surface_raised,
+                            if active {
+                                theme.surface_hover.opacity(1.6)
+                            } else {
+                                theme.surface_hover
+                            },
                             if active {
                                 theme.border_light
                             } else {
-                                theme.border_subtle
+                                gpui::transparent_black()
                             },
                         )
                         .into_any_element()
@@ -537,20 +563,16 @@ impl Render for TerminalPanel {
                         .child(format!("No terminals open for {project_name}")),
                 )
                 .child(
-                    div()
-                        .id("terminal-empty-new")
-                        .px(theme.space_4)
-                        .py(theme.space_2)
-                        .rounded(theme.radius_md)
-                        .border_1()
-                        .border_color(theme.accent)
-                        .text_color(theme.accent)
-                        .cursor_pointer()
-                        .hover(move |s| s.bg(theme.surface_raised))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.new_tab(window, cx);
-                        }))
-                        .child("New terminal"),
+                    crate::ui::button(
+                        &theme,
+                        "terminal-empty-new",
+                        crate::ui::ButtonKind::Primary,
+                        Some(crate::ui::Icon::Plus),
+                        "New terminal",
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.new_tab(window, cx);
+                    })),
                 )
                 .into_any_element()
         };
@@ -561,9 +583,11 @@ impl Render for TerminalPanel {
             .flex_none()
             .w(width)
             .h_full()
-            .bg(theme.surface)
-            .border_l_1()
-            .border_color(theme.border_subtle)
+            .rounded(theme.radius_lg)
+            .bg(theme.surface_solid)
+            .border_1()
+            .border_color(theme.border_light)
+            .overflow_hidden()
             // Resize handle on the left edge; Root listens for the drag.
             .child(
                 div()
@@ -586,21 +610,9 @@ impl Render for TerminalPanel {
                         div()
                             .flex()
                             .flex_col()
-                            .gap(theme.space_1)
-                            .px(theme.space_3)
-                            .pt(theme.space_3)
+                            .px(theme.space_2)
+                            .pt(theme.space_2)
                             .pb(theme.space_2)
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(theme.space_1)
-                                    .text_xs()
-                                    .text_color(theme.text_secondary)
-                                    .child("TERMINAL")
-                                    .child("·")
-                                    .child(project_name.clone()),
-                            )
                             .child(
                                 div()
                                     .flex()

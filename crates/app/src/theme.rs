@@ -1,20 +1,106 @@
-//! Central glass theme tokens (CLAUDE.md "UI design: modern glass concept").
+//! Central theme tokens: colour, shape, spacing and type.
 //! Views must read colors/radii/spacing from here — never hardcode them.
+//!
+//! Visual identity ("graphite and phosphor"): cool graphite surfaces, one
+//! phosphor-lime accent used for selection, focus, progress and primary
+//! actions, and muted status colours. Geist carries the interface; Geist Mono
+//! carries anything that is data (hashes, counts, dates, code).
 
-use gpui::{hsla, px, Hsla, Pixels};
+use gpui::{hsla, px, App, Hsla, Pixels, Styled};
+use std::borrow::Cow;
 
-/// The whole UI is set in the monospace family (user preference). Per-OS
-/// because GPUI does not ship fonts;
-/// each is present on a stock install of that OS.
+/// The interface typeface (bundled, see [`install_fonts`]). Falls back to
+/// GPUI's default stack if the bundled data ever fails to load.
+pub const UI_FONT: &str = "Geist";
+
+/// Data typeface: hashes, counts, dates, code, note source. Bundled.
+pub const CODE_FONT: &str = "Geist Mono";
+
+/// The terminal keeps a system monospace face: terminal programs draw box and
+/// powerline glyphs that a UI font does not cover. Per-OS because GPUI does
+/// not ship fonts; each is present on a stock install of that OS.
 #[cfg(target_os = "windows")]
-pub const MONO_FONT: &str = "Cascadia Mono";
+pub const TERMINAL_FONT: &str = "Cascadia Mono";
 #[cfg(target_os = "macos")]
-pub const MONO_FONT: &str = "Menlo";
+pub const TERMINAL_FONT: &str = "Menlo";
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-pub const MONO_FONT: &str = "DejaVu Sans Mono";
+pub const TERMINAL_FONT: &str = "DejaVu Sans Mono";
 
-/// UI text uses the same monospace family.
-pub const UI_FONT: &str = MONO_FONT;
+/// Registers the bundled Geist and Geist Mono faces (three UI weights, two
+/// code weights; OFL licence next to the files). Failure is logged, not fatal:
+/// text then renders in the platform's default font.
+pub fn install_fonts(cx: &App) {
+    let fonts: Vec<Cow<'static, [u8]>> = vec![
+        Cow::Borrowed(include_bytes!("../../../assets/fonts/Geist-Regular.ttf")),
+        Cow::Borrowed(include_bytes!("../../../assets/fonts/Geist-Medium.ttf")),
+        Cow::Borrowed(include_bytes!("../../../assets/fonts/Geist-SemiBold.ttf")),
+        Cow::Borrowed(include_bytes!(
+            "../../../assets/fonts/GeistMono-Regular.ttf"
+        )),
+        Cow::Borrowed(include_bytes!("../../../assets/fonts/GeistMono-Medium.ttf")),
+    ];
+    if let Err(err) = cx.text_system().add_fonts(fonts) {
+        tracing::warn!("could not load the bundled fonts: {err}");
+    }
+}
+
+/// Type scale in logical pixels. Six steps, three weights; anything outside
+/// this list is a mistake.
+pub const FS_MICRO: f32 = 11.0;
+pub const FS_SMALL: f32 = 12.0;
+pub const FS_BODY: f32 = 13.0;
+pub const FS_PROSE: f32 = 14.0;
+pub const FS_HEADING: f32 = 15.0;
+pub const FS_TITLE: f32 = 20.0;
+pub const FS_DISPLAY: f32 = 28.0;
+
+/// Line height as a multiple of the font size for running text.
+pub const LINE_HEIGHT: f32 = 1.45;
+
+/// Named type steps for any styled element, so no view picks a raw size.
+pub trait TypeScale: Styled + Sized {
+    /// 11px: uppercase labels and fine print.
+    fn t_micro(self) -> Self {
+        self.text_size(px(FS_MICRO))
+    }
+    /// 12px: supporting text, metadata, chips.
+    fn t_small(self) -> Self {
+        self.text_size(px(FS_SMALL))
+    }
+    /// 13px: body text, controls, rows. The window default.
+    fn t_body(self) -> Self {
+        self.text_size(px(FS_BODY))
+    }
+    /// 14px: long-form reading (rendered notes).
+    fn t_prose(self) -> Self {
+        self.text_size(px(FS_PROSE))
+    }
+    /// 15px: section headings.
+    fn t_heading(self) -> Self {
+        self.text_size(px(FS_HEADING))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+    }
+    /// 20px: page titles.
+    fn t_title(self) -> Self {
+        self.text_size(px(FS_TITLE))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+    }
+    /// 28px: the one hero heading on a screen.
+    fn t_display(self) -> Self {
+        self.text_size(px(FS_DISPLAY))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+    }
+    /// Geist Mono for data: hashes, counts, dates, code.
+    fn t_code(self) -> Self {
+        self.font_family(CODE_FONT)
+    }
+    /// Medium weight for emphasis inside a row (titles, active labels).
+    fn t_strong(self) -> Self {
+        self.font_weight(gpui::FontWeight::MEDIUM)
+    }
+}
+
+impl<T: Styled + Sized> TypeScale for T {}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GlassTheme {
@@ -22,17 +108,31 @@ pub struct GlassTheme {
     /// lightness) adapt to it.
     pub is_light: bool,
 
+    // Surfaces, back to front: window tint, chrome (sidebar), canvas (content
+    // area), raised (cards, popovers). `surface_sunken` is for wells: inputs,
+    // code blocks, logs.
     pub window_tint: Hsla,
+    /// Dims the app behind a modal overlay (command palette).
+    pub scrim: Hsla,
     pub surface: Hsla,
     pub surface_raised: Hsla,
     pub surface_solid: Hsla,
+    pub surface_sunken: Hsla,
+    /// Row hover wash, drawn over any surface.
+    pub surface_hover: Hsla,
 
     pub border_light: Hsla,
     pub border_subtle: Hsla,
+    pub border_strong: Hsla,
 
     pub text_primary: Hsla,
     pub text_secondary: Hsla,
+    /// Placeholders, disabled text and fine print. Not for anything the user
+    /// must read (3:1 on the canvas, not 4.5:1).
+    pub text_muted: Hsla,
     pub accent: Hsla,
+    /// Text and icons drawn on a solid accent fill.
+    pub accent_fg: Hsla,
     pub success: Hsla,
     pub warning: Hsla,
     pub danger: Hsla,
@@ -45,36 +145,52 @@ pub struct GlassTheme {
     pub space_2: Pixels,
     pub space_3: Pixels,
     pub space_4: Pixels,
+    pub space_5: Pixels,
+    pub space_6: Pixels,
+    pub space_8: Pixels,
 }
+
+/// Cool graphite hue shared by every dark neutral.
+const DARK_HUE: f32 = 228.0 / 360.0;
+const LIGHT_HUE: f32 = 224.0 / 360.0;
 
 impl GlassTheme {
     /// Dark theme first, per CLAUDE.md.
     pub fn dark() -> Self {
         Self {
             is_light: false,
-            window_tint: hsla(0.0, 0.0, 0.04, 0.80),
-            surface: hsla(0.0, 0.0, 0.08, 0.72),
-            surface_raised: hsla(0.0, 0.0, 0.12, 0.88),
-            surface_solid: hsla(0.0, 0.0, 0.07, 1.0),
+            window_tint: hsla(DARK_HUE, 0.16, 0.050, 0.82),
+            scrim: hsla(DARK_HUE, 0.3, 0.02, 0.62),
+            surface: hsla(DARK_HUE, 0.14, 0.072, 0.72),
+            surface_raised: hsla(DARK_HUE, 0.12, 0.125, 0.94),
+            surface_solid: hsla(DARK_HUE, 0.12, 0.092, 1.0),
+            surface_sunken: hsla(DARK_HUE, 0.16, 0.064, 1.0),
+            surface_hover: hsla(0.0, 0.0, 1.0, 0.05),
 
-            border_light: hsla(0.0, 0.0, 1.0, 0.10),
-            border_subtle: hsla(0.0, 0.0, 1.0, 0.06),
+            border_light: hsla(0.0, 0.0, 1.0, 0.11),
+            border_subtle: hsla(0.0, 0.0, 1.0, 0.065),
+            border_strong: hsla(0.0, 0.0, 1.0, 0.20),
 
-            text_primary: hsla(0.0, 0.0, 0.92, 1.0),
-            text_secondary: hsla(0.0, 0.0, 0.60, 1.0),
-            accent: hsla(212.0 / 360.0, 0.85, 0.64, 1.0),
-            success: hsla(142.0 / 360.0, 0.4, 0.5, 1.0),
-            warning: hsla(38.0 / 360.0, 0.55, 0.55, 1.0),
-            danger: hsla(0.0, 0.55, 0.58, 1.0),
+            text_primary: hsla(DARK_HUE, 0.10, 0.93, 1.0),
+            text_secondary: hsla(DARK_HUE, 0.07, 0.66, 1.0),
+            text_muted: hsla(DARK_HUE, 0.06, 0.52, 1.0),
+            accent: hsla(74.0 / 360.0, 0.80, 0.60, 1.0),
+            accent_fg: hsla(80.0 / 360.0, 0.50, 0.08, 1.0),
+            success: hsla(160.0 / 360.0, 0.48, 0.52, 1.0),
+            warning: hsla(38.0 / 360.0, 0.88, 0.60, 1.0),
+            danger: hsla(3.0 / 360.0, 0.74, 0.65, 1.0),
 
-            radius_sm: px(8.0),
-            radius_md: px(12.0),
-            radius_lg: px(16.0),
+            radius_sm: px(6.0),
+            radius_md: px(8.0),
+            radius_lg: px(12.0),
 
             space_1: px(4.0),
             space_2: px(8.0),
             space_3: px(12.0),
             space_4: px(16.0),
+            space_5: px(20.0),
+            space_6: px(24.0),
+            space_8: px(32.0),
         }
     }
 
@@ -82,29 +198,38 @@ impl GlassTheme {
     pub fn light() -> Self {
         Self {
             is_light: true,
-            window_tint: hsla(220.0 / 360.0, 0.3, 0.96, 0.6),
-            surface: hsla(220.0 / 360.0, 0.25, 0.97, 0.65),
-            surface_raised: hsla(220.0 / 360.0, 0.3, 0.99, 0.82),
-            surface_solid: hsla(220.0 / 360.0, 0.3, 0.98, 1.0),
+            window_tint: hsla(LIGHT_HUE, 0.22, 0.945, 0.72),
+            scrim: hsla(LIGHT_HUE, 0.3, 0.15, 0.32),
+            surface: hsla(LIGHT_HUE, 0.20, 0.955, 0.70),
+            surface_raised: hsla(0.0, 0.0, 1.0, 0.90),
+            surface_solid: hsla(LIGHT_HUE, 0.30, 0.992, 1.0),
+            surface_sunken: hsla(LIGHT_HUE, 0.22, 0.952, 1.0),
+            surface_hover: hsla(LIGHT_HUE, 0.35, 0.18, 0.055),
 
-            border_light: hsla(0.0, 0.0, 1.0, 0.6),
-            border_subtle: hsla(220.0 / 360.0, 0.15, 0.2, 0.08),
+            border_light: hsla(LIGHT_HUE, 0.25, 0.20, 0.15),
+            border_subtle: hsla(LIGHT_HUE, 0.25, 0.20, 0.085),
+            border_strong: hsla(LIGHT_HUE, 0.25, 0.20, 0.26),
 
-            text_primary: hsla(220.0 / 360.0, 0.2, 0.12, 1.0),
-            text_secondary: hsla(220.0 / 360.0, 0.1, 0.35, 1.0),
-            accent: hsla(217.0 / 360.0, 0.8, 0.5, 1.0),
-            success: hsla(142.0 / 360.0, 0.45, 0.38, 1.0),
-            warning: hsla(38.0 / 360.0, 0.6, 0.45, 1.0),
-            danger: hsla(0.0, 0.6, 0.48, 1.0),
+            text_primary: hsla(LIGHT_HUE, 0.25, 0.11, 1.0),
+            text_secondary: hsla(LIGHT_HUE, 0.10, 0.37, 1.0),
+            text_muted: hsla(LIGHT_HUE, 0.08, 0.52, 1.0),
+            accent: hsla(80.0 / 360.0, 0.85, 0.25, 1.0),
+            accent_fg: hsla(70.0 / 360.0, 0.60, 0.97, 1.0),
+            success: hsla(160.0 / 360.0, 0.60, 0.30, 1.0),
+            warning: hsla(32.0 / 360.0, 0.95, 0.38, 1.0),
+            danger: hsla(2.0 / 360.0, 0.70, 0.45, 1.0),
 
-            radius_sm: px(8.0),
-            radius_md: px(12.0),
-            radius_lg: px(16.0),
+            radius_sm: px(6.0),
+            radius_md: px(8.0),
+            radius_lg: px(12.0),
 
             space_1: px(4.0),
             space_2: px(8.0),
             space_3: px(12.0),
             space_4: px(16.0),
+            space_5: px(20.0),
+            space_6: px(24.0),
+            space_8: px(32.0),
         }
     }
 }
@@ -157,6 +282,20 @@ pub fn current(cx: &gpui::App) -> GlassTheme {
         .map_or_else(GlassTheme::default, |active| active.0)
 }
 
+/// Colours for code in rendered notes, per palette: keywords coral, strings
+/// blue, numbers teal, function calls amber, comments muted.
+pub fn syntax_color(theme: &GlassTheme, token: crate::highlight::Token) -> Hsla {
+    use crate::highlight::Token;
+    let l = if theme.is_light { 0.40 } else { 0.70 };
+    match token {
+        Token::Keyword => hsla(6.0 / 360.0, 0.72, l, 1.0),
+        Token::String => hsla(208.0 / 360.0, 0.78, l, 1.0),
+        Token::Number => hsla(176.0 / 360.0, 0.55, l - 0.03, 1.0),
+        Token::Function => hsla(32.0 / 360.0, 0.85, l - 0.02, 1.0),
+        Token::Comment => theme.text_muted,
+    }
+}
+
 /// A stable colour for a label (tag or repo name): the same text always gets
 /// the same hue, so chips are recognisable at a glance. Saturation is fixed
 /// and lightness follows the theme, so every hue stays readable on both the
@@ -199,15 +338,6 @@ impl ThemeMode {
             ThemeMode::System => "system",
             ThemeMode::Dark => "dark",
             ThemeMode::Light => "light",
-        }
-    }
-
-    /// Name shown in the UI.
-    pub fn label(self) -> &'static str {
-        match self {
-            ThemeMode::System => "Follow system",
-            ThemeMode::Dark => "Dark",
-            ThemeMode::Light => "Light",
         }
     }
 
@@ -287,6 +417,16 @@ mod tests {
             // Secondary text is body text too: WCAG AA is 4.5:1.
             assert!(contrast(theme.text_secondary, theme.surface_solid) >= 4.5);
             assert!(contrast(theme.accent, theme.surface_solid) >= 3.0);
+            // Muted text is placeholders and fine print only: 3:1.
+            assert!(contrast(theme.text_muted, theme.surface_solid) >= 3.0);
+            assert!(contrast(theme.text_muted, theme.surface_sunken) >= 3.0);
+            // Primary buttons draw label text on a solid accent fill.
+            assert!(contrast(theme.accent_fg, theme.accent) >= 4.5);
+            // Status colours carry text (chips) on the canvas and the wells.
+            for status in [theme.success, theme.warning, theme.danger] {
+                assert!(contrast(status, theme.surface_solid) >= 3.0);
+                assert!(contrast(status, theme.surface_sunken) >= 3.0);
+            }
         }
     }
 

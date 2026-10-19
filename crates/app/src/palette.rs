@@ -9,6 +9,7 @@
 //! The navigation side (`impl Root` bow) is kept here rather than in
 //! `main.rs` so the palette stays one self-contained module.
 
+use crate::theme::TypeScale;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -27,6 +28,7 @@ use crate::palette_rank::{
 use crate::state::AppState;
 use crate::text_input::TextInput;
 use crate::theme::GlassTheme;
+use crate::ui::{icon, kbd, section_label, Icon};
 use crate::Root;
 
 /// Wait this long after the last keystroke before hitting the database and
@@ -380,11 +382,9 @@ impl Render for CommandPalette {
                 list = list.child(
                     div()
                         .px(theme.space_3)
-                        .pt(theme.space_2)
+                        .pt(theme.space_3)
                         .pb(theme.space_1)
-                        .text_xs()
-                        .text_color(theme.text_secondary)
-                        .child(item.group.label()),
+                        .child(section_label(&theme, item.group.label())),
                 );
                 child_ix += 1;
             }
@@ -399,18 +399,25 @@ impl Render for CommandPalette {
                 .items_center()
                 .justify_between()
                 .gap(theme.space_3)
+                .h(px(36.0))
                 .px(theme.space_3)
-                .py(theme.space_2)
-                .rounded(theme.radius_sm)
+                .rounded(theme.radius_md)
                 .cursor_pointer()
-                .text_sm()
+                .t_body()
                 .text_color(theme.text_primary)
-                .when(!selected, |el| {
-                    el.hover(move |s| s.bg(theme.surface_raised))
-                })
+                .when(!selected, |el| el.hover(move |s| s.bg(theme.surface_hover)))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.run_at(ix, window, cx);
                 }))
+                .child(icon(
+                    group_icon(item.group),
+                    15.0,
+                    if selected {
+                        theme.accent
+                    } else {
+                        theme.text_muted
+                    },
+                ))
                 .child(
                     div()
                         .flex_1()
@@ -426,8 +433,9 @@ impl Render for CommandPalette {
                             .max_w(px(220.0))
                             .overflow_hidden()
                             .whitespace_nowrap()
-                            .text_xs()
-                            .text_color(theme.text_secondary)
+                            .t_small()
+                            .t_code()
+                            .text_color(theme.text_muted)
                             .child(SharedString::from(item.detail.clone())),
                     )
                 });
@@ -436,7 +444,7 @@ impl Render for CommandPalette {
                 row,
                 ("palette-row-fade", ix),
                 selected,
-                theme.accent.opacity(0.22),
+                theme.accent.opacity(0.14),
                 gpui::transparent_black(),
             ));
         }
@@ -445,7 +453,7 @@ impl Render for CommandPalette {
                 div()
                     .px(theme.space_3)
                     .py(theme.space_4)
-                    .text_sm()
+                    .t_body()
                     .text_color(theme.text_secondary)
                     .child("No results"),
             );
@@ -467,7 +475,7 @@ impl Render for CommandPalette {
             .flex_col()
             .items_center()
             .pt(px(80.0))
-            .bg(theme.window_tint.opacity(0.5))
+            .bg(theme.scrim)
             .occlude()
             .on_mouse_down(
                 MouseButton::Left,
@@ -479,17 +487,25 @@ impl Render for CommandPalette {
                     .id("palette-panel")
                     .flex()
                     .flex_col()
-                    .w(px(560.0))
+                    .w(px(600.0))
                     .max_w_full()
                     .gap(theme.space_2)
                     .p(theme.space_2)
                     .rounded(theme.radius_lg)
                     .bg(theme.surface_raised)
                     .border_1()
-                    .border_color(theme.border_light)
+                    .border_color(theme.border_strong)
                     .shadow_lg()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(self.input.clone())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(theme.space_2)
+                            .pl(theme.space_2)
+                            .child(icon(Icon::Search, 16.0, theme.text_muted))
+                            .child(div().flex_1().child(self.input.clone())),
+                    )
                     .child(
                         // Reading area: near-solid, per the readability
                         // rules, not glass.
@@ -500,8 +516,54 @@ impl Render for CommandPalette {
                             .border_color(theme.border_subtle)
                             .overflow_hidden()
                             .child(list),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(theme.space_4)
+                            .px(theme.space_2)
+                            .pb(px(2.0))
+                            .t_micro()
+                            .t_code()
+                            .text_color(theme.text_muted)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(theme.space_1)
+                                    .child(kbd(&theme, "↑↓"))
+                                    .child("navigate"),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(theme.space_1)
+                                    .child(kbd(&theme, "Enter"))
+                                    .child("open"),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(theme.space_1)
+                                    .child(kbd(&theme, "Esc"))
+                                    .child("close"),
+                            ),
                     ),
             )
+    }
+}
+
+/// The icon that marks a palette group.
+fn group_icon(group: Group) -> Icon {
+    match group {
+        Group::Commands => Icon::Command,
+        Group::Projects => Icon::Folder,
+        Group::Tasks => Icon::ListChecks,
+        Group::Notes | Group::NoteText => Icon::FileText,
+        Group::Commits => Icon::GitCommit,
     }
 }
 
@@ -561,6 +623,7 @@ impl Root {
         self.open_history = None;
         self.open_task = None;
         self.open_note = None;
+        self.settings_open = false;
         if self.state.read(cx).selected_project != Some(project) {
             self.state
                 .update(cx, |state, _| state.select_project(project));
@@ -600,6 +663,11 @@ impl Root {
             Command::OpenCredentials => {
                 if !self.credentials_open {
                     self.toggle_credentials_view(cx);
+                }
+            }
+            Command::OpenSettings => {
+                if !self.settings_open {
+                    self.toggle_settings_view(cx);
                 }
             }
             Command::NewProject => {

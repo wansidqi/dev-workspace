@@ -2,6 +2,7 @@
 //! attached files and mapped git commits, in tabs. Opened from a task row;
 //! replaces the main content like the note editor does.
 
+use crate::theme::TypeScale;
 use std::collections::HashMap;
 
 use devspace_core::{
@@ -21,6 +22,10 @@ use crate::external::{open_attachment, reveal, OpenOutcome};
 use crate::state::AppState;
 use crate::text_input::TextInput;
 use crate::theme::GlassTheme;
+use crate::ui::{
+    back_button, button, chip, empty_state, icon, icon_button, icon_chip, notice, section_label,
+    segment, segmented, status_style, tab, tab_bar, ButtonKind, Icon,
+};
 
 pub type CloseHandler = Box<dyn Fn(&mut Window, &mut App)>;
 pub type OpenNoteHandler = Box<dyn Fn(NoteId, SharedString, &mut Window, &mut App)>;
@@ -49,6 +54,17 @@ enum Field {
 }
 
 impl TaskDetail {
+    /// Switches tab by name (debug QA hook; unknown names change nothing).
+    pub(crate) fn show_tab(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.tab = match name {
+            "notes" => Tab::Notes,
+            "attachments" => Tab::Attachments,
+            "commits" => Tab::Commits,
+            _ => return,
+        };
+        cx.notify();
+    }
+
     /// The task this page shows (remembered across restarts, see settings).
     pub fn task_id(&self) -> TaskId {
         self.task_id
@@ -280,26 +296,23 @@ impl TaskDetail {
             .gap(theme.space_2)
             .children(task.tags.iter().enumerate().map(|(ix, tag)| {
                 let name = tag.clone();
+                let tint = crate::theme::label_color(&theme, tag);
                 div()
                     .flex()
                     .items_center()
-                    .gap(theme.space_2)
+                    .gap(px(2.0))
+                    .h(px(26.0))
                     .pl(theme.space_3)
-                    .pr(theme.space_2)
-                    .py(theme.space_1)
+                    .pr(px(3.0))
                     .rounded(theme.radius_sm)
-                    .bg(crate::theme::label_color(&theme, tag).opacity(0.16))
-                    .border_1()
-                    .border_color(crate::theme::label_color(&theme, tag).opacity(0.5))
-                    .text_sm()
-                    .text_color(crate::theme::label_color(&theme, tag))
+                    .bg(tint.opacity(0.14))
+                    .t_small()
+                    .t_strong()
+                    .text_color(tint)
                     .child(tag.clone())
                     .child(
-                        div()
-                            .id(("remove-tag", ix as u64))
-                            .text_xs()
-                            .cursor_pointer()
-                            .hover(move |s| s.text_color(theme.danger))
+                        icon_button(&theme, Icon::X, ("remove-tag", ix as u64), theme.danger)
+                            .size(px(20.0))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let id = this.task_id;
                                 let name = name.clone();
@@ -307,11 +320,10 @@ impl TaskDetail {
                                     state.remove_task_tag(id, &name);
                                     cx.notify();
                                 });
-                            }))
-                            .child("✕"),
+                            })),
                     )
             }))
-            .child(div().w(px(180.0)).child(self.tag_input.clone()))
+            .child(div().w(px(160.0)).child(self.tag_input.clone()))
             .into_any_element()
     }
 
@@ -340,6 +352,18 @@ impl TaskDetail {
                 .due_at
                 .is_some_and(|due| due < now - now.rem_euclid(86_400));
 
+        // One property cell: a micro label over the value.
+        let cell = |label: &'static str| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(1.0))
+                .px(theme.space_3)
+                .py(theme.space_2)
+                .rounded(theme.radius_md)
+                .child(section_label(&theme, label))
+        };
+
         let field = |label: &'static str,
                      value: Option<String>,
                      which: Field,
@@ -352,46 +376,26 @@ impl TaskDetail {
                 .filter(|(f, _)| *f == which)
                 .map(|(_, input)| input.clone());
             match editing_here {
-                Some(input) => div()
-                    .flex()
-                    .items_center()
-                    .gap(theme.space_2)
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.text_secondary)
-                            .child(label),
-                    )
-                    .child(div().w(px(240.0)).child(input))
+                Some(input) => cell(label)
+                    .child(div().w(px(220.0)).child(input))
                     .into_any_element(),
-                None => div()
+                None => cell(label)
                     .id(match which {
                         Field::Due => "edit-due",
                         Field::Branch => "edit-branch",
                     })
-                    .flex()
-                    .items_center()
-                    .gap(theme.space_2)
-                    .px(theme.space_2)
-                    .py(theme.space_1)
-                    .rounded(theme.radius_sm)
-                    .border_1()
-                    .border_color(theme.border_subtle)
-                    .text_sm()
                     .cursor_pointer()
-                    .hover(move |s| s.bg(theme.surface_raised))
+                    .hover(move |s| s.bg(theme.surface_hover))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.start_edit(which, window, cx);
                     }))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.text_secondary)
-                            .child(label),
-                    )
                     .child(match value {
-                        Some(v) => div().text_color(color).child(v),
-                        None => div().text_color(theme.text_secondary).child("not set"),
+                        Some(v) => div()
+                            .t_body()
+                            .when(which == Field::Branch, |d| d.t_code())
+                            .text_color(color)
+                            .child(v),
+                        None => div().t_body().text_color(theme.text_muted).child("Not set"),
                     })
                     .into_any_element(),
             }
@@ -403,19 +407,10 @@ impl TaskDetail {
             .items_center()
             .gap(theme.space_2)
             .child(
-                div()
+                cell("Priority")
                     .id("cycle-priority")
-                    .flex()
-                    .items_center()
-                    .gap(theme.space_2)
-                    .px(theme.space_2)
-                    .py(theme.space_1)
-                    .rounded(theme.radius_sm)
-                    .border_1()
-                    .border_color(theme.border_subtle)
-                    .text_sm()
                     .cursor_pointer()
-                    .hover(move |s| s.bg(theme.surface_raised))
+                    .hover(move |s| s.bg(theme.surface_hover))
                     .on_click(cx.listener(|this, _, _, cx| {
                         let id = this.task_id;
                         this.state.update(cx, |state, cx| {
@@ -425,11 +420,14 @@ impl TaskDetail {
                     }))
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(theme.text_secondary)
-                            .child("Priority"),
-                    )
-                    .child(div().text_color(priority_color).child(priority_label)),
+                            .flex()
+                            .items_center()
+                            .gap(theme.space_2)
+                            .t_body()
+                            .text_color(priority_color)
+                            .child(div().size(px(8.0)).rounded_full().bg(priority_color))
+                            .child(priority_label),
+                    ),
             )
             .child(field(
                 if overdue { "Overdue" } else { "Due" },
@@ -715,148 +713,101 @@ impl TaskDetail {
         cx.notify();
     }
 
-    fn chip(
-        &self,
-        label: impl Into<SharedString>,
-        active: bool,
-        id: impl Into<gpui::ElementId>,
-    ) -> gpui::Stateful<gpui::Div> {
-        let theme = self.theme;
-        div()
-            .id(id)
-            .flex_none()
-            .px(theme.space_3)
-            .py(theme.space_1)
-            .rounded(theme.radius_sm)
-            .border_1()
-            .text_sm()
-            .cursor_pointer()
-            .when(active, |d| {
-                d.border_color(theme.accent)
-                    .text_color(theme.accent)
-                    .bg(theme.accent.opacity(0.12))
-            })
-            .when(!active, |d| {
-                d.border_color(theme.border_subtle)
-                    .text_color(theme.text_secondary)
-                    .hover(move |s| s.bg(theme.surface_raised))
-            })
-            .child(label.into())
-    }
-
-    fn small_button(
-        &self,
-        label: &'static str,
-        id: impl Into<gpui::ElementId>,
-        danger: bool,
-    ) -> gpui::Stateful<gpui::Div> {
-        let theme = self.theme;
-        div()
-            .id(id)
-            .text_xs()
-            .text_color(theme.text_secondary)
-            .cursor_pointer()
-            .hover(move |s| {
-                s.text_color(if danger {
-                    theme.danger
-                } else {
-                    theme.text_primary
-                })
-            })
-            .child(label)
-    }
-
+    /// A flat list row with a hairline under it. Its action area (see
+    /// [`row_actions`]) shows while the row is hovered.
     fn row(&self) -> gpui::Div {
         let theme = self.theme;
         div()
+            .group("row")
             .flex()
             .items_center()
-            .justify_between()
             .gap(theme.space_3)
-            .px(theme.space_3)
-            .py(theme.space_3)
-            .rounded(theme.radius_md)
-            .bg(theme.surface_raised)
-            .border_1()
+            .min_h(px(48.0))
+            .px(theme.space_2)
+            .py(theme.space_2)
+            .border_b_1()
             .border_color(theme.border_subtle)
     }
 
-    fn empty(&self, message: &'static str) -> AnyElement {
+    fn empty(&self, glyph: Icon, title: &'static str, hint: &'static str) -> AnyElement {
+        empty_state(&self.theme, glyph, title, hint, None).into_any_element()
+    }
+
+    fn section_header(&self, label: String) -> AnyElement {
         let theme = self.theme;
         div()
-            .py(theme.space_4)
-            .text_sm()
-            .text_color(theme.text_secondary)
-            .child(message)
+            .mt(theme.space_5)
+            .pb(theme.space_1)
+            .child(section_label(&theme, &label))
             .into_any_element()
     }
 
     fn notes_tab(&mut self, notes: Vec<Note>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = self.theme;
-        let mut out: Vec<AnyElement> = vec![self.new_note_input.clone().into_any_element()];
-        let kind = self.state.read(cx).new_note_kind;
+        let mut out: Vec<AnyElement> =
+            vec![div().child(self.new_note_input.clone()).into_any_element()];
         out.push(
             div()
-                .flex()
-                .items_center()
-                .gap(theme.space_2)
                 .px(theme.space_1)
-                .child(
-                    self.chip(format!("Kind: {}", kind.label()), true, "task-note-kind")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.state.update(cx, |state, cx| {
-                                state.new_note_kind = state.new_note_kind.cycle();
-                                cx.notify();
-                            });
-                        })),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.text_secondary)
-                        .child("Click the kind to change it. Enter creates the note and opens it"),
-                )
+                .t_small()
+                .text_color(theme.text_muted)
+                .child("Notes are markdown. Enter creates the note and opens it.")
                 .into_any_element(),
         );
         if notes.is_empty() {
-            out.push(self.empty("No notes on this task yet."));
+            out.push(self.empty(
+                Icon::StickyNote,
+                "No notes on this task",
+                "Notes are markdown files: write down decisions, scripts or SQL for this task.",
+            ));
         }
-        out.extend(notes.into_iter().map(|note| {
+        let rows = notes.into_iter().map(|note| {
             let id = note.id;
             let title: SharedString = note.title.clone().into();
             self.row()
                 .id(("task-note", id.0 as u64))
                 .cursor_pointer()
-                .hover(move |s| s.border_color(theme.border_light))
+                .hover(move |s| s.bg(theme.surface_hover))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     if let Some(open) = &this.on_open_note {
                         open(id, title.clone(), window, cx);
                     }
                 }))
+                .child(icon(note_icon(note.kind), 16.0, theme.text_muted))
                 .child(
                     div()
                         .flex()
                         .flex_col()
+                        .flex_1()
+                        .min_w(px(0.0))
                         .child(
                             div()
+                                .t_body()
                                 .text_color(theme.text_primary)
+                                .truncate()
                                 .child(note.title.clone()),
                         )
-                        .child(div().text_xs().text_color(theme.text_secondary).child(
+                        .child(div().t_small().t_code().text_color(theme.text_muted).child(
                             match note.kind {
                                 NoteKind::Note => {
-                                    format!("Updated {}", format_date(note.updated_at))
+                                    format!("updated {}", format_date(note.updated_at))
                                 }
                                 kind => format!(
                                     "{} · updated {}",
-                                    kind.label(),
+                                    kind.label().to_lowercase(),
                                     format_date(note.updated_at)
                                 ),
                             },
                         )),
                 )
                 .child(
-                    self.small_button("✕", ("task-note-delete", id.0 as u64), true)
+                    row_actions().child(
+                        icon_button(
+                            &theme,
+                            Icon::Trash,
+                            ("task-note-delete", id.0 as u64),
+                            theme.danger,
+                        )
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.state.update(cx, |state, cx| {
                                 state.delete_note(id);
@@ -864,9 +815,19 @@ impl TaskDetail {
                             });
                             cx.stop_propagation();
                         })),
+                    ),
                 )
                 .into_any_element()
-        }));
+        });
+        out.push(
+            div()
+                .flex()
+                .flex_col()
+                .border_t_1()
+                .border_color(theme.border_subtle)
+                .children(rows.collect::<Vec<_>>())
+                .into_any_element(),
+        );
         out
     }
 
@@ -880,95 +841,111 @@ impl TaskDetail {
             .flex()
             .flex_wrap()
             .items_center()
-            .gap(theme.space_2)
+            .gap(theme.space_3)
             .child(
-                div()
-                    .id("attach-files")
-                    .px(theme.space_4)
-                    .py(theme.space_2)
-                    .rounded(theme.radius_md)
-                    .border_1()
-                    .border_color(theme.accent)
-                    .text_color(theme.accent)
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(theme.surface_raised))
-                    .on_click(cx.listener(|this, _, _, cx| this.add_files(cx)))
-                    .child("Add files…"),
+                button(
+                    &theme,
+                    "attach-files",
+                    ButtonKind::Secondary,
+                    Some(Icon::Plus),
+                    "Add files",
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.add_files(cx))),
             )
             .child(
-                self.chip("Copy into workspace", self.copy_files, "attach-copy")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.copy_files = true;
-                        cx.notify();
-                    })),
-            )
-            .child(
-                self.chip("Link by path", !self.copy_files, "attach-link")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.copy_files = false;
-                        cx.notify();
-                    })),
+                segmented(&theme)
+                    .child(
+                        segment(
+                            &theme,
+                            "attach-copy",
+                            "Copy into workspace",
+                            self.copy_files,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.copy_files = true;
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        segment(&theme, "attach-link", "Link by path", !self.copy_files).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.copy_files = false;
+                                cx.notify();
+                            }),
+                        ),
+                    ),
             )
             .into_any_element()];
         out.push(
             div()
                 .px(theme.space_1)
-                .text_xs()
-                .text_color(theme.text_secondary)
+                .t_small()
+                .text_color(theme.text_muted)
                 .child(if self.copy_files {
-                    "Files are copied into this project's folder — they stay available even if the original moves."
+                    "Files are copied into this project's folder and stay available even if the original moves."
                 } else {
                     "Files stay where they are; Devspace only remembers the path."
                 })
                 .into_any_element(),
         );
         if attachments.is_empty() {
-            out.push(self.empty("No files attached to this task yet."));
+            out.push(self.empty(
+                Icon::Paperclip,
+                "No files attached",
+                "Attach specs, screenshots or exports that belong to this task.",
+            ));
         }
-        out.extend(attachments.into_iter().map(|attachment| {
+        let rows = attachments.into_iter().map(|attachment| {
             let id: AttachmentId = attachment.id;
             let for_open = attachment.clone();
             let for_reveal = attachment.clone();
             self.row()
                 .id(("attachment", id.0 as u64))
                 .cursor_pointer()
-                .hover(move |s| s.border_color(theme.border_light))
+                .hover(move |s| s.bg(theme.surface_hover))
                 .on_click(cx.listener(move |this, _, _, cx| this.open_file(&for_open, cx)))
+                .child(icon(
+                    if attachment.is_linked {
+                        Icon::Link
+                    } else {
+                        Icon::Paperclip
+                    },
+                    16.0,
+                    theme.text_muted,
+                ))
                 .child(
                     div()
                         .flex()
                         .flex_col()
+                        .flex_1()
                         .min_w(px(0.0))
                         .child(
                             div()
+                                .t_body()
                                 .text_color(theme.text_primary)
+                                .truncate()
                                 .child(attachment.name.clone()),
                         )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.text_secondary)
-                                .child(format!(
-                                    "{} · added {}",
-                                    if attachment.is_linked {
-                                        "Linked"
-                                    } else {
-                                        "Copied"
-                                    },
-                                    format_date(attachment.created_at)
-                                )),
-                        ),
+                        .child(div().t_small().t_code().text_color(theme.text_muted).child(
+                            format!(
+                                "{} · {}",
+                                if attachment.is_linked {
+                                    "linked"
+                                } else {
+                                    "copied"
+                                },
+                                format_date(attachment.created_at)
+                            ),
+                        )),
                 )
                 .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(theme.space_3)
+                    row_actions()
                         .child(
-                            self.small_button(
-                                "Show in folder",
+                            icon_button(
+                                &theme,
+                                Icon::FolderOpen,
                                 ("attachment-reveal", id.0 as u64),
-                                false,
+                                theme.text_primary,
                             )
                             .on_click(cx.listener(
                                 move |this, _, _, cx| {
@@ -978,31 +955,50 @@ impl TaskDetail {
                             )),
                         )
                         .child(
-                            self.small_button("✕", ("attachment-remove", id.0 as u64), true)
-                                .on_click(cx.listener(move |this, _, _, cx| {
+                            icon_button(
+                                &theme,
+                                Icon::Trash,
+                                ("attachment-remove", id.0 as u64),
+                                theme.danger,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
                                     this.state.update(cx, |state, cx| {
                                         state.remove_attachment(id);
                                         cx.notify();
                                     });
                                     cx.stop_propagation();
-                                })),
+                                },
+                            )),
                         ),
                 )
                 .into_any_element()
-        }));
+        });
+        out.push(
+            div()
+                .flex()
+                .flex_col()
+                .border_t_1()
+                .border_color(theme.border_subtle)
+                .children(rows.collect::<Vec<_>>())
+                .into_any_element(),
+        );
         out
     }
 
     fn commits_tab(&mut self, links: Vec<CommitLink>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = self.theme;
+        let has_links = !links.is_empty();
         let mut out: Vec<AnyElement> = vec![div()
             .flex()
+            .flex_wrap()
             .items_center()
             .justify_between()
+            .gap(theme.space_3)
             .child(
                 div()
-                    .text_sm()
-                    .text_color(theme.text_secondary)
+                    .t_small()
+                    .text_color(theme.text_muted)
                     .child("Commits mapped to this task, in the order they were linked."),
             )
             .child(
@@ -1010,164 +1006,185 @@ impl TaskDetail {
                     .flex()
                     .items_center()
                     .gap(theme.space_2)
-                    .when(!links.is_empty(), |d| {
+                    .when(has_links, |d| {
                         d.child(
-                            div()
-                                .id("copy-cherry-pick")
-                                .px(theme.space_3)
-                                .py(theme.space_1)
-                                .rounded(theme.radius_md)
-                                .border_1()
-                                .border_color(theme.border_light)
-                                .text_sm()
-                                .text_color(theme.text_secondary)
-                                .cursor_pointer()
-                                .hover(move |s| {
-                                    s.bg(theme.surface_raised).text_color(theme.text_primary)
-                                })
-                                .on_click(cx.listener(|this, _, _, cx| this.copy_cherry_pick(cx)))
-                                .child("Copy cherry-pick list"),
+                            button(
+                                &theme,
+                                "copy-cherry-pick",
+                                ButtonKind::Secondary,
+                                Some(Icon::Copy),
+                                "Copy cherry-pick list",
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.copy_cherry_pick(cx))),
                         )
                     })
                     .child(
-                        div()
-                            .id("open-history-from-task")
-                            .px(theme.space_3)
-                            .py(theme.space_1)
-                            .rounded(theme.radius_md)
-                            .border_1()
-                            .border_color(theme.accent)
-                            .text_sm()
-                            .text_color(theme.accent)
-                            .cursor_pointer()
-                            .hover(move |s| s.bg(theme.surface_raised))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                if let Some(open) = &this.on_open_history {
-                                    open(window, cx);
-                                }
-                            }))
-                            .child("Map commits…"),
+                        button(
+                            &theme,
+                            "open-history-from-task",
+                            ButtonKind::Primary,
+                            Some(Icon::GitCommit),
+                            "Map commits",
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            if let Some(open) = &this.on_open_history {
+                                open(window, cx);
+                            }
+                        })),
                     ),
             )
             .into_any_element()];
-        if links.is_empty() {
+        if !has_links {
             out.push(self.empty(
-                "No commits mapped yet. Open Commit history, select commits and map them here.",
+                Icon::GitCommit,
+                "No commits mapped yet",
+                "Open Commit history, select commits and map them to this task.",
             ));
         }
-        out.extend(links.into_iter().map(|link| {
-            let id: CommitLinkId = link.id;
-            let color = link_status_color(&theme, link.status);
-            let info = self
-                .commit_info
-                .get(&(link.repo_id, link.hash.clone()))
-                .cloned();
-            let (repo, summary, meta, missing) = match info {
-                Some(Some(entry)) => (
-                    Some(entry.repo_name),
-                    entry.commit.summary,
-                    format!(
-                        "{} · {}",
-                        entry.commit.author,
-                        format_date(entry.commit.time)
+        let link_rows: Vec<AnyElement> = links
+            .into_iter()
+            .map(|link| {
+                let id: CommitLinkId = link.id;
+                let color = link_status_color(&theme, link.status);
+                let info = self
+                    .commit_info
+                    .get(&(link.repo_id, link.hash.clone()))
+                    .cloned();
+                let (repo, summary, meta, missing) = match info {
+                    Some(Some(entry)) => (
+                        Some(entry.repo_name),
+                        entry.commit.summary,
+                        format!(
+                            "{} · {}",
+                            entry.commit.author,
+                            format_date(entry.commit.time)
+                        ),
+                        false,
                     ),
-                    false,
-                ),
-                // Lookup finished and git doesn't have it: rebased/squashed
-                // away, or the repo moved. Warn rather than show stale data.
-                Some(None) => (
-                    None,
-                    "Commit not found in the repository".to_string(),
-                    "It may have been rebased or squashed, or the repo was moved".to_string(),
-                    true,
-                ),
-                None => (None, "Loading…".to_string(), String::new(), false),
-            };
-            self.row()
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(theme.space_2)
-                                .when_some(repo, |d, name| {
-                                    d.child(
+                    // Lookup finished and git doesn't have it: rebased/squashed
+                    // away, or the repo moved. Warn rather than show stale data.
+                    Some(None) => (
+                        None,
+                        "Commit not found in the repository".to_string(),
+                        "It may have been rebased or squashed, or the repo was moved".to_string(),
+                        true,
+                    ),
+                    None => (None, "Loading…".to_string(), String::new(), false),
+                };
+                self.row()
+                    .child(icon(
+                        if missing {
+                            Icon::Triangle
+                        } else {
+                            Icon::GitCommit
+                        },
+                        16.0,
+                        if missing {
+                            theme.warning
+                        } else {
+                            theme.text_muted
+                        },
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(theme.space_2)
+                                    .when_some(repo, |d, name| {
+                                        d.child(
+                                            div()
+                                                .flex_none()
+                                                .px(theme.space_2)
+                                                .rounded(theme.radius_sm)
+                                                .bg(theme.surface_hover)
+                                                .t_small()
+                                                .t_code()
+                                                .text_color(theme.text_secondary)
+                                                .child(name),
+                                        )
+                                    })
+                                    .child(
                                         div()
-                                            .flex_none()
-                                            .px(theme.space_1)
-                                            .rounded(theme.radius_sm)
-                                            .border_1()
-                                            .border_color(theme.border_light)
-                                            .text_xs()
-                                            .text_color(theme.text_secondary)
-                                            .child(name),
-                                    )
-                                })
-                                .child(
-                                    div()
-                                        .text_color(if missing {
-                                            theme.warning
-                                        } else {
-                                            theme.text_primary
-                                        })
-                                        .child(summary),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.text_secondary)
-                                .child(format!(
+                                            .t_body()
+                                            .truncate()
+                                            .text_color(if missing {
+                                                theme.warning
+                                            } else {
+                                                theme.text_primary
+                                            })
+                                            .child(summary),
+                                    ),
+                            )
+                            .child(div().t_small().t_code().text_color(theme.text_muted).child(
+                                format!(
                                     "{}{}{}",
                                     &link.hash[..7.min(link.hash.len())],
                                     if meta.is_empty() { "" } else { " · " },
                                     meta
-                                )),
-                        )
-                        .when_some(link.note.clone(), |d, note| {
-                            d.child(div().text_xs().text_color(theme.text_secondary).child(note))
-                        }),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(theme.space_3)
-                        .child(
-                            div()
-                                .id(("task-link-status", id.0 as u64))
-                                .px(theme.space_2)
-                                .rounded(theme.radius_sm)
-                                .border_1()
-                                .border_color(color.opacity(0.5))
-                                .text_xs()
-                                .text_color(color)
-                                .cursor_pointer()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.state.update(cx, |state, cx| {
-                                        state.cycle_link_status(id);
-                                        cx.notify();
-                                    });
-                                }))
-                                .child(link_status_label(link.status)),
-                        )
-                        .child(
-                            self.small_button("✕", ("task-link-remove", id.0 as u64), true)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.state.update(cx, |state, cx| {
-                                        state.unlink_commit(id);
-                                        cx.notify();
-                                    });
-                                })),
-                        ),
-                )
-                .into_any_element()
-        }));
+                                ),
+                            ))
+                            .when_some(link.note.clone(), |d, note| {
+                                d.child(
+                                    div().t_small().text_color(theme.text_secondary).child(note),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .gap(theme.space_2)
+                            .child(
+                                chip(&theme, link_status_label(link.status), color)
+                                    .id(("task-link-status", id.0 as u64))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.state.update(cx, |state, cx| {
+                                            state.cycle_link_status(id);
+                                            cx.notify();
+                                        });
+                                    })),
+                            )
+                            .child(
+                                row_actions().child(
+                                    icon_button(
+                                        &theme,
+                                        Icon::X,
+                                        ("task-link-remove", id.0 as u64),
+                                        theme.danger,
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.state.update(cx, |state, cx| {
+                                                state.unlink_commit(id);
+                                                cx.notify();
+                                            });
+                                        },
+                                    )),
+                                ),
+                            ),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        if !link_rows.is_empty() {
+            out.push(
+                div()
+                    .flex()
+                    .flex_col()
+                    .border_t_1()
+                    .border_color(theme.border_subtle)
+                    .children(link_rows)
+                    .into_any_element(),
+            );
+        }
 
         // Commits already mapped to this task, to mark them in the lists below.
         let mapped: std::collections::HashSet<CommitKey> = self
@@ -1191,23 +1208,23 @@ impl TaskDetail {
             None => out.push(
                 div()
                     .mt(theme.space_3)
-                    .text_xs()
-                    .text_color(theme.text_secondary)
+                    .t_small()
+                    .text_color(theme.text_muted)
                     .child(
-                        "Set a branch on this task (above) to see the commits on it \
+                        "Set a branch on this task (Branch, above) to see the commits on it \
                          that are not in your main branch.",
                     )
                     .into_any_element(),
             ),
             Some(name) => {
-                out.push(self.section_header(format!("ON BRANCH {name}")));
+                out.push(self.section_header(format!("On branch {name}")));
                 let views = self.branch_views.clone();
                 let mut ix = 0usize;
                 for (repo_id, repo_name, view) in views {
                     if !view.branch_found {
                         out.push(
                             div()
-                                .text_xs()
+                                .t_small()
                                 .text_color(theme.text_secondary)
                                 .child(format!("{repo_name}: branch not found"))
                                 .into_any_element(),
@@ -1220,7 +1237,7 @@ impl TaskDetail {
                         .unwrap_or_else(|| "(no target found)".into());
                     out.push(
                         div()
-                            .text_xs()
+                            .t_small()
                             .text_color(theme.text_secondary)
                             .child(format!(
                                 "{repo_name}: {} commit{} not in {target}{}",
@@ -1253,7 +1270,7 @@ impl TaskDetail {
         // Suggestions: commits that mention this task (#id) or its branch.
         let suggestions = self.suggestions.clone();
         if !suggestions.is_empty() {
-            out.push(self.section_header("SUGGESTED — mention this task or its branch".into()));
+            out.push(self.section_header("Suggested: mention this task or its branch".into()));
             for (ix, entry) in suggestions.iter().enumerate() {
                 out.push(self.candidate_row(
                     Some(entry.repo_id),
@@ -1266,16 +1283,6 @@ impl TaskDetail {
             }
         }
         out
-    }
-
-    fn section_header(&self, label: String) -> AnyElement {
-        let theme = self.theme;
-        div()
-            .mt(theme.space_3)
-            .text_xs()
-            .text_color(theme.text_secondary)
-            .child(label)
-            .into_any_element()
     }
 
     /// A commit that is not (necessarily) mapped yet, with a one-click Map.
@@ -1291,6 +1298,7 @@ impl TaskDetail {
         let theme = self.theme;
         let hash = commit.hash.clone();
         self.row()
+            .child(icon(Icon::GitCommit, 16.0, theme.text_muted))
             .child(
                 div()
                     .flex()
@@ -1305,24 +1313,27 @@ impl TaskDetail {
                             .child(
                                 div()
                                     .flex_none()
-                                    .px(theme.space_1)
+                                    .px(theme.space_2)
                                     .rounded(theme.radius_sm)
-                                    .border_1()
-                                    .border_color(theme.border_light)
-                                    .text_xs()
+                                    .bg(theme.surface_hover)
+                                    .t_small()
+                                    .t_code()
                                     .text_color(theme.text_secondary)
                                     .child(repo_name.to_string()),
                             )
                             .child(
                                 div()
+                                    .t_body()
+                                    .truncate()
                                     .text_color(theme.text_primary)
                                     .child(commit.summary.clone()),
                             ),
                     )
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(theme.text_secondary)
+                            .t_small()
+                            .t_code()
+                            .text_color(theme.text_muted)
                             .child(format!(
                                 "{} · {} · {}",
                                 &commit.hash[..7.min(commit.hash.len())],
@@ -1332,30 +1343,42 @@ impl TaskDetail {
                     ),
             )
             .child(match (mapped, repo_id) {
-                (true, _) => div()
-                    .text_xs()
-                    .text_color(theme.success)
-                    .child("Mapped ✓")
-                    .into_any_element(),
-                (false, Some(repo_id)) => div()
-                    .id(id)
-                    .px(theme.space_3)
-                    .py(theme.space_1)
-                    .rounded(theme.radius_sm)
-                    .border_1()
-                    .border_color(theme.accent)
-                    .text_xs()
-                    .text_color(theme.accent)
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(theme.surface_raised))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.map_commit(repo_id, &hash, cx);
-                    }))
-                    .child("Map to task")
-                    .into_any_element(),
+                (true, _) => {
+                    icon_chip(&theme, Icon::Check, "Mapped", theme.success).into_any_element()
+                }
+                (false, Some(repo_id)) => button(
+                    &theme,
+                    id,
+                    ButtonKind::Secondary,
+                    Some(Icon::Plus),
+                    "Map to task",
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.map_commit(repo_id, &hash, cx);
+                }))
+                .into_any_element(),
                 (false, None) => div().into_any_element(),
             })
             .into_any_element()
+    }
+}
+
+/// The hover-only action area at the right of a [`TaskDetail::row`].
+fn row_actions() -> gpui::Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .invisible()
+        .group_hover("row", |s| s.visible())
+}
+
+/// Icon for a note kind.
+fn note_icon(kind: NoteKind) -> Icon {
+    match kind {
+        NoteKind::Note => Icon::FileText,
+        NoteKind::Script => Icon::Script,
+        NoteKind::Sql => Icon::Database,
     }
 }
 
@@ -1402,29 +1425,31 @@ impl Render for TaskDetail {
             // Deleted while open (or project switched): offer the way out.
             return div()
                 .flex()
-                .flex_col()
                 .flex_1()
                 .size_full()
-                .bg(theme.surface_solid)
-                .p(theme.space_4)
-                .gap(theme.space_3)
-                .child(
-                    div()
-                        .text_color(theme.text_secondary)
-                        .child("This task no longer exists."),
-                )
-                .child(
-                    div()
-                        .id("task-gone-back")
-                        .text_color(theme.accent)
-                        .cursor_pointer()
+                .items_center()
+                .justify_center()
+                .child(empty_state(
+                    &theme,
+                    Icon::Info,
+                    "This task no longer exists",
+                    "It was deleted, or you switched projects.",
+                    Some(
+                        button(
+                            &theme,
+                            "task-gone-back",
+                            ButtonKind::Secondary,
+                            Some(Icon::ArrowLeft),
+                            "Back to project",
+                        )
                         .on_click(cx.listener(|this, _, window, cx| {
                             if let Some(close) = &this.on_close {
                                 close(window, cx);
                             }
                         }))
-                        .child("← Back"),
-                )
+                        .into_any_element(),
+                    ),
+                ))
                 .into_any_element();
         };
 
@@ -1434,19 +1459,7 @@ impl Render for TaskDetail {
             Tab::Attachments => self.attachments_tab(attachments, cx),
             Tab::Commits => self.commits_tab(links, cx),
         };
-        let status_color = match task.status {
-            TaskStatus::Done => theme.success,
-            TaskStatus::Blocked => theme.warning,
-            TaskStatus::InProgress => theme.accent,
-            TaskStatus::Todo => theme.text_secondary,
-        };
-        let tab_label = |name: &str, n: usize| {
-            if n == 0 {
-                name.to_string()
-            } else {
-                format!("{name} {n}")
-            }
-        };
+        let (status_glyph, status_color) = status_style(&theme, task.status);
 
         div()
             .flex()
@@ -1454,137 +1467,150 @@ impl Render for TaskDetail {
             .flex_1()
             .size_full()
             .min_h(px(0.0))
-            .bg(theme.surface_solid)
-            .p(theme.space_4)
-            .gap(theme.space_3)
             .child(
                 div()
                     .flex()
-                    .items_center()
-                    .gap(theme.space_3)
-                    .child(
-                        div()
-                            .id("task-back")
-                            .px(theme.space_2)
-                            .rounded(theme.radius_sm)
-                            .text_color(theme.text_secondary)
-                            .cursor_pointer()
-                            .hover(move |s| {
-                                s.bg(theme.surface_raised).text_color(theme.text_primary)
-                            })
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                if let Some(close) = &this.on_close {
-                                    close(window, cx);
-                                }
-                            }))
-                            .child("←"),
-                    )
+                    .flex_col()
+                    .flex_none()
+                    .gap(theme.space_4)
+                    .px(theme.space_6)
+                    .pt(theme.space_5)
                     .child(
                         div()
                             .flex()
-                            .flex_col()
-                            .when(!trail.is_empty(), |d| {
-                                d.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.text_secondary)
-                                        .child(trail.join(" › ")),
-                                )
-                            })
+                            .items_center()
+                            .gap(theme.space_3)
+                            .child(back_button(&theme, "task-back").on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    if let Some(close) = &this.on_close {
+                                        close(window, cx);
+                                    }
+                                },
+                            )))
                             .child(
                                 div()
                                     .flex()
-                                    .items_baseline()
-                                    .gap(theme.space_2)
+                                    .flex_col()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .when(!trail.is_empty(), |d| {
+                                        d.child(
+                                            div()
+                                                .t_small()
+                                                .text_color(theme.text_muted)
+                                                .truncate()
+                                                .child(trail.join("  ›  ")),
+                                        )
+                                    })
                                     .child(
                                         div()
-                                            .text_xl()
-                                            .text_color(theme.text_primary)
-                                            .child(task.title.clone()),
-                                    )
-                                    .child(
-                                        // Commit messages reference a task as #<id>.
-                                        div()
-                                            .text_sm()
-                                            .text_color(theme.text_secondary)
-                                            .child(format!("#{}", task.id.0)),
+                                            .flex()
+                                            .items_baseline()
+                                            .gap(theme.space_2)
+                                            .child(
+                                                div()
+                                                    .t_title()
+                                                    .text_color(theme.text_primary)
+                                                    .truncate()
+                                                    .child(task.title.clone()),
+                                            )
+                                            .child(
+                                                // Commit messages reference a task as #<id>.
+                                                div()
+                                                    .t_small()
+                                                    .t_code()
+                                                    .text_color(theme.text_muted)
+                                                    .child(format!("#{}", task.id.0)),
+                                            ),
                                     ),
+                            )
+                            .child(
+                                div()
+                                    .id("task-detail-status")
+                                    .flex()
+                                    .flex_none()
+                                    .items_center()
+                                    .gap(theme.space_2)
+                                    .h(px(28.0))
+                                    .px(theme.space_3)
+                                    .rounded(theme.radius_sm)
+                                    .bg(status_color.opacity(0.14))
+                                    .text_color(status_color)
+                                    .t_body()
+                                    .t_strong()
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let id = this.task_id;
+                                        this.state.update(cx, |state, cx| {
+                                            state.cycle_task_status(id);
+                                            cx.notify();
+                                        });
+                                    }))
+                                    .child(icon(status_glyph, 14.0, status_color))
+                                    .child(status_label(task.status)),
                             ),
                     )
+                    .child(self.details_row(&task, cx))
+                    .child(self.tags_row(&task, cx))
                     .child(
-                        div()
-                            .id("task-detail-status")
-                            .px(theme.space_2)
-                            .py(theme.space_1)
-                            .rounded(theme.radius_sm)
-                            .bg(status_color.opacity(0.15))
-                            .text_color(status_color)
-                            .text_sm()
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let id = this.task_id;
-                                this.state.update(cx, |state, cx| {
-                                    state.cycle_task_status(id);
-                                    cx.notify();
-                                });
-                            }))
-                            .child(status_label(task.status)),
-                    ),
-            )
-            .child(self.details_row(&task, cx))
-            .child(self.tags_row(&task, cx))
-            .child(
-                div()
-                    .flex()
-                    .gap(theme.space_2)
-                    .child(
-                        self.chip(
-                            tab_label("Notes", counts.0),
-                            self.tab == Tab::Notes,
-                            "tab-notes",
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.tab = Tab::Notes;
-                            this.notice = None;
-                            cx.notify();
-                        })),
-                    )
-                    .child(
-                        self.chip(
-                            tab_label("Attachments", counts.1),
-                            self.tab == Tab::Attachments,
-                            "tab-attachments",
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.tab = Tab::Attachments;
-                            this.notice = None;
-                            cx.notify();
-                        })),
-                    )
-                    .child(
-                        self.chip(
-                            tab_label("Commits", counts.2),
-                            self.tab == Tab::Commits,
-                            "tab-commits",
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.tab = Tab::Commits;
-                            this.notice = None;
-                            this.refresh_commits(cx);
-                            cx.notify();
-                        })),
+                        tab_bar(&theme)
+                            .child(
+                                tab(
+                                    &theme,
+                                    "tab-notes",
+                                    "Notes",
+                                    Some(counts.0),
+                                    self.tab == Tab::Notes,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.tab = Tab::Notes;
+                                        this.notice = None;
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(
+                                tab(
+                                    &theme,
+                                    "tab-attachments",
+                                    "Attachments",
+                                    Some(counts.1),
+                                    self.tab == Tab::Attachments,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.tab = Tab::Attachments;
+                                        this.notice = None;
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(
+                                tab(
+                                    &theme,
+                                    "tab-commits",
+                                    "Commits",
+                                    Some(counts.2),
+                                    self.tab == Tab::Commits,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.tab = Tab::Commits;
+                                        this.notice = None;
+                                        this.refresh_commits(cx);
+                                        cx.notify();
+                                    },
+                                )),
+                            ),
                     ),
             )
             .when_some(self.notice.clone(), |d, (message, is_error)| {
                 d.child(
                     div()
-                        .text_sm()
-                        .text_color(if is_error {
-                            theme.danger
-                        } else {
-                            theme.success
-                        })
-                        .child(message),
+                        .px(theme.space_6)
+                        .pt(theme.space_3)
+                        .child(notice(&theme, message, is_error)),
                 )
             })
             .child(
@@ -1594,7 +1620,9 @@ impl Render for TaskDetail {
                     .flex_col()
                     .flex_1()
                     .min_h(px(0.0))
-                    .gap(theme.space_2)
+                    .gap(theme.space_3)
+                    .px(theme.space_6)
+                    .py(theme.space_4)
                     .overflow_y_scroll()
                     .children(body),
             )

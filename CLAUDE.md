@@ -40,7 +40,7 @@ Non-goals:
 
 1. **Projects**: create, edit, archive, switch; link one or more git repos; dashboard with open tasks, recent notes, recent commits.
 2. **Tasks and subtasks**: unlimited nesting; status, priority, due date, tags; optional branch per task; each has notes, attachments and linked commits.
-3. **Notes**: markdown at project, task and subtask level; types: note, script, SQL; syntax highlighting; live preview; search. Stored as plain files.
+3. **Notes**: markdown at project, task and subtask level; every note is markdown (the stored `kind` column is unused by the UI); live preview with highlighted, copyable code blocks; search. Stored as plain files.
 4. **Attachments**: PDFs, images, other files on a project, task or subtask; built-in PDF viewer; copy into workspace or link by path.
 5. **Credentials vault**: per project; encrypted; reveal/copy with auto-hide and clipboard auto-clear; optional injection into terminal sessions as environment variables.
 6. **Git integration**: commit history browser (search, filter by repo/branch/author/date) that merges history across all repos linked to the project, newest first, each row labeled with its repo; select single, multiple or range and tag/map/label them to any task or subtask at any nesting depth in the same project (a task can have many commits; a commit can be mapped to more than one task; tasks are picked from the project's task tree); per-link note and status (needs migration, cherry-picked, deployed); badges on linked commits; unassigned commits view; branch view (commits on task branch not in target); suggested commits (task ID in message or branch); export ordered cherry-pick list; warn when a linked commit is missing after rebase or squash.
@@ -155,28 +155,38 @@ All colors, radii, spacing and shadows come from a central theme. No hardcoded c
 
 ```rust
 pub struct GlassTheme {
-    // Backgrounds (use alpha)
+    // Surfaces, back to front
     pub window_tint: Hsla,        // tint over the OS blur
-    pub surface: Hsla,            // panels, sidebar (alpha about 0.55 to 0.70)
-    pub surface_raised: Hsla,     // cards, popovers (alpha about 0.70 to 0.85)
-    pub surface_solid: Hsla,      // fallback when blur is unavailable
-    // Edges and light
-    pub border_light: Hsla,       // 1px top/left highlight (white, low alpha)
-    pub border_subtle: Hsla,      // 1px general separator
-    pub shadow: Hsla,
+    pub scrim: Hsla,              // dims the app behind the palette
+    pub surface: Hsla,            // chrome: sidebar (alpha about 0.70)
+    pub surface_solid: Hsla,      // the canvas content sits on (opaque)
+    pub surface_raised: Hsla,     // cards, popovers, toasts (alpha about 0.90)
+    pub surface_sunken: Hsla,     // wells: inputs, logs, code, terminal
+    pub surface_hover: Hsla,      // row hover wash, drawn over any surface
+    // Edges
+    pub border_subtle: Hsla,      // hairlines between rows
+    pub border_light: Hsla,       // edge of a surface
+    pub border_strong: Hsla,      // popovers, hovered controls
     // Content
     pub text_primary: Hsla,
-    pub text_secondary: Hsla,
-    pub accent: Hsla,
+    pub text_secondary: Hsla,     // body text too: 4.5:1
+    pub text_muted: Hsla,         // placeholders and fine print only: 3:1
+    pub accent: Hsla,             // phosphor lime (dark), deep moss (light)
+    pub accent_fg: Hsla,          // text on a solid accent fill
     pub success: Hsla,
     pub warning: Hsla,
     pub danger: Hsla,
-    // Shape
-    pub radius_sm: Pixels,        // 8
-    pub radius_md: Pixels,        // 12
-    pub radius_lg: Pixels,        // 16
+    // Shape and space
+    pub radius_sm: Pixels,        // 6: controls, chips
+    pub radius_md: Pixels,        // 8: rows, wells
+    pub radius_lg: Pixels,        // 12: canvases, panels, popovers
+    pub space_1..space_8: Pixels, // 4, 8, 12, 16, 20, 24, 32
 }
 ```
+
+Type comes from `theme.rs` too: `UI_FONT` (Geist), `CODE_FONT` (Geist Mono), `TERMINAL_FONT` (a system monospace, kept for terminal glyph coverage), the `FS_*` scale and the `TypeScale` helpers (`t_micro`, `t_small`, `t_body`, `t_prose`, `t_heading`, `t_title`, `t_display`, `t_code`, `t_strong`). Fonts are bundled in `assets/fonts` (OFL) and registered by `theme::install_fonts`.
+
+The app icon is `assets/images/logo.png`, embedded as the Windows icon resource by `crates/app/build.rs` (see progress.md).
 
 Provide a dark theme first and a light theme second, switchable at runtime. Dark is the default (the user's choice); "Follow system" is an option.
 
@@ -184,11 +194,12 @@ Provide a dark theme first and a light theme second, switchable at runtime. Dark
 
 - **Layering**: window tint at the back, sidebar and panels above, cards and popovers on top. Higher layers are more opaque and have stronger shadows.
 - **Edges**: every glass surface gets a 1px light border; the top edge can be slightly brighter to suggest light from above.
-- **Radius**: rounded corners everywhere, consistent scale (8, 12, 16).
+- **Radius**: consistent scale (6 controls, 8 rows and wells, 12 canvases and popovers). Not everything is a card: lists are flat rows on hairlines; cards are for grouped forms and popovers.
 - **Spacing**: use a 4px grid. Prefer generous padding over dense layouts.
-- **Typography**: one clean sans-serif UI font and one monospace font for code, terminal, hashes and SQL. Clear size scale; avoid more than three weights.
-- **Color**: a single accent color, used sparingly for selection, focus and primary actions. Status colors (success, warning, danger) are muted, not neon.
-- **Icons**: one consistent line-icon set, same stroke width.
+- **Typography**: Geist for the interface, Geist Mono for data (hashes, counts, dates, code, note source, uppercase section labels). Six sizes (11, 12, 13, 14 prose, 15, 20, 28) and three weights (regular, medium, semibold), always through the `TypeScale` helpers, never raw sizes. Rendered notes use the prose size.
+- **Color**: graphite surfaces with one phosphor-lime accent, used for selection, focus, progress and the single primary action of a view. Status colors (success, warning, danger) are muted, not neon, and status is always also a shape (Lucide status icons), never colour alone.
+- **Icons**: Lucide line icons (ISC), stroke 2, embedded from `assets/icons` through `ui::Icon`; an SVG does not inherit text colour, so tint it explicitly (`ui::icon`, `ui::icon_group` for hover).
+- **Shared primitives** live in `ui.rs` (`button`, `icon_button`, `chip`, `filter_chip`, `segmented`, `switch`, `tab`, `page_header`, `empty_state`, `notice`, `kbd`). Screens compose these instead of styling raw divs; add a primitive when a third screen needs the same thing.
 - **Motion**: short, subtle transitions (about 120 to 200 ms, ease-out) for hover, panel open and selection. No long or bouncy animation. Respect a reduced-motion setting.
 
 ### Readability rules
@@ -209,15 +220,17 @@ Translucency and shadows cost GPU time and memory, which conflicts with this pro
 
 ### Layout concept
 
-- Custom title bar blended into the window (draggable, with window controls styled to match).
-- Left glass sidebar: projects, then tasks tree.
-- Center: the selected task or project with notes, attachments and linked commits in tabs.
+- Custom title bar blended into the window: brand at the left over the sidebar, a search field in the middle that opens the command palette (it opts out of dragging with `occlude`), and window controls at the right drawn as three small status-light dots (minimise amber, maximise green, close red; the glyph shows on hover). GPUI draws no caption buttons for a transparent title bar, so these are ours; each is marked with `window_control_area` and is a sibling of the drag region, never a child of it.
+- Left glass sidebar (248px): the project list (hover or select shows edit and archive), then a Workspace group of icon rows: Commit history, Run commands, Timesheet, Credentials, Settings (shortcut shown on hover).
+- The view area is a floating canvas (radius 12, hairline border) beside the terminal canvas; clip children to it, so a view must not paint its own opaque background at the corners.
+- Project page: header (name, meta, Open in IDE, New task) over a status strip, then tasks as a flat list (status icon cycles the status, the row opens the task, actions float over the right edge on hover) and a rail with notes, files and repositories. The rail sits beside the tasks when the canvas is at least 960px wide and stacks below otherwise; the terminal panel gives up width before the page drops under 520px.
+- Task page: breadcrumb, title, status, properties (priority, due, branch), tags, then underline tabs for Notes, Attachments and Commits.
 - Terminal: a collapsible right-hand panel with tabs, one tab set per project (Ctrl+` toggles, Ctrl+Shift+` new tab). Drag its left edge to resize, double-click a tab to rename it, "Split" stacks a second shell in the tab.
 - Commit history browser: a full-content view opened from the sidebar, with a mapping side panel. Credentials: a full-content view from the sidebar (add, reveal with auto-hide, copy with clipboard auto-clear, replace, delete).
-- Command palette (Ctrl+K or Ctrl+Shift+P) as a centered floating glass popover with a soft shadow; searches commands, projects, tasks, note titles, note text and commits. Shortcuts: Ctrl+Shift+H history, R run commands, M timesheet, L credentials, N new project.
-- Run commands: a sidebar row opens a full-content view with saved commands and a live log. Project page carries a "Workspace tools" card (Open in IDE, backup, export, import).
+- Command palette (Ctrl+K or Ctrl+Shift+P) as a centered floating glass popover with a soft shadow; searches commands, projects, tasks, note titles, note text and commits. Shortcuts: Ctrl+Shift+H history, R run commands, M timesheet, L credentials, N new project, Ctrl+, settings.
+- Run commands: a sidebar row opens a full-content view with saved commands and a live log. Open in IDE is a project page action; the Settings view (Ctrl+,) holds appearance, terminal scrollback, the IDE command, the data location (a "Show in folder" button selects `app.db` in the file manager) and backup, export and import. Results of those actions show as a toast at the bottom right.
 - Timesheet: a sidebar view with a per-month table per project, built from the author's git commits (stored in SQLite, migration 4); copies as tab-separated text.
-- Settings live in `settings.txt` (key=value) in the data directory: last project and task, terminal visibility and width, terminal scrollback, IDE command, theme (dark, light, system), reduced transparency, reduced motion. Theme, transparency, motion and scrollback are changed from the Workspace tools card or the command palette.
+- Settings live in `settings.txt` (key=value) in the data directory: last project and task, terminal visibility and width, terminal scrollback, IDE command, theme (dark, light, system), reduced transparency, reduced motion. Theme, transparency, motion and scrollback are changed in the Settings view or the command palette.
 - Empty states have a short message and one primary action.
 
 ## Performance rules
@@ -256,6 +269,8 @@ cargo test -p core                  # domain tests only
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 ```
+
+Debug builds read `DEVSPACE_DATA_DIR`, `DEVSPACE_SIZE` (`1280x760`) and `DEVSPACE_VIEW` (`settings`, `history`, `run`, `timesheet`, `credentials`, `palette`, `terminal`, `task:<id>[:notes|attachments|commits]`, `note:<id>[:edit]`) so a screenshot run can start on a given screen against a copy of the data without synthetic input (see `qa.rs`). They compile to nothing in release. GPUI is very slow unoptimised, so judge typing and scrolling responsiveness on `cargo run --release -p app`, not on the debug build.
 
 ## Testing
 

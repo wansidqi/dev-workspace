@@ -21,7 +21,7 @@ use crate::theme::GlassTheme;
 const INITIAL_COLS: usize = 100;
 const INITIAL_ROWS: usize = 28;
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
-const FONT_FAMILY: &str = crate::theme::MONO_FONT;
+const FONT_FAMILY: &str = crate::theme::TERMINAL_FONT;
 const FONT_SIZE: f32 = 13.0;
 const LINE_HEIGHT: f32 = 18.0;
 
@@ -448,10 +448,10 @@ impl Render for TerminalView {
             .min_h(px(0.0))
             .p(theme.space_2)
             .rounded(theme.radius_md)
-            .bg(theme.surface_solid)
+            .bg(theme.surface_sunken)
             .border_1()
             .border_color(if focused {
-                theme.accent
+                theme.accent.opacity(0.5)
             } else {
                 theme.border_subtle
             })

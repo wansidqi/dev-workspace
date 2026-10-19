@@ -10,6 +10,7 @@
 //! background timer and never blocks the UI thread. The log is rendered with
 //! a `uniform_list`, so only visible lines are laid out.
 
+use crate::theme::TypeScale;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::time::Duration;
@@ -24,6 +25,7 @@ use gpui::{
 use crate::state::AppState;
 use crate::text_input::TextInput;
 use crate::theme::GlassTheme;
+use crate::ui::{self, icon, section_label, ButtonKind, Icon};
 use crate::{icon_button, icon_button_tinted, Root};
 
 /// How often running commands are polled for new output. Same cadence as
@@ -33,7 +35,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(120);
 const LOG_LINE_HEIGHT: f32 = 18.0;
 /// Monospace UI font for the log, same family the commit browser uses for
 /// hashes.
-use crate::theme::MONO_FONT;
+use crate::theme::TERMINAL_FONT;
 
 pub type CloseHandler = Box<dyn Fn(&mut Window, &mut App)>;
 
@@ -84,7 +86,7 @@ pub struct RunPanel {
 }
 
 /// Status chip text and colour for a run state.
-fn chip(theme: &GlassTheme, state: Option<RunState>) -> Option<(String, Hsla)> {
+fn state_chip(theme: &GlassTheme, state: Option<RunState>) -> Option<(String, Hsla)> {
     Some(match state? {
         RunState::Running => ("Running".to_string(), theme.accent),
         RunState::Exited(Some(0)) => ("Exited 0".to_string(), theme.success),
@@ -379,27 +381,17 @@ impl RunPanel {
         id: impl Into<gpui::ElementId>,
         primary: bool,
     ) -> gpui::Stateful<gpui::Div> {
-        let theme = self.theme;
-        div()
-            .id(id)
-            .px(theme.space_3)
-            .py(theme.space_1)
-            .rounded(theme.radius_sm)
-            .border_1()
-            .border_color(if primary {
-                theme.accent
+        ui::button(
+            &self.theme,
+            id,
+            if primary {
+                ButtonKind::Primary
             } else {
-                theme.border_light
-            })
-            .text_sm()
-            .text_color(if primary {
-                theme.accent
-            } else {
-                theme.text_secondary
-            })
-            .cursor_pointer()
-            .hover(move |s| s.bg(theme.surface_raised).text_color(theme.text_primary))
-            .child(label)
+                ButtonKind::Secondary
+            },
+            None,
+            label,
+        )
     }
 
     fn render_form(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -414,49 +406,57 @@ impl RunPanel {
                 .flex()
                 .flex_col()
                 .gap(theme.space_1)
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.text_secondary)
-                        .child(label),
-                )
+                .child(section_label(&theme, label))
                 .child(input.clone())
         };
         Some(
             div()
                 .flex()
                 .flex_col()
-                .gap(theme.space_2)
-                .p(theme.space_3)
-                .rounded(theme.radius_md)
+                .gap(theme.space_3)
+                .p(theme.space_4)
+                .rounded(theme.radius_lg)
                 .bg(theme.surface_raised)
                 .border_1()
                 .border_color(theme.border_light)
-                .child(div().text_color(theme.text_primary).child(title))
+                .child(
+                    div()
+                        .t_heading()
+                        .text_color(theme.text_primary)
+                        .child(title),
+                )
                 .child(field("Name", &form.name))
                 .child(field("Command", &form.command))
                 .child(field("Working directory", &form.cwd))
                 .when_some(form.error.clone(), |el, message| {
-                    el.child(div().text_xs().text_color(theme.danger).child(message))
+                    el.child(ui::notice(&theme, message, true))
                 })
                 .child(
                     div()
                         .flex()
+                        .items_center()
                         .gap(theme.space_2)
                         .child(
                             self.button("Save", "run-form-save", true)
                                 .on_click(cx.listener(|this, _, _, cx| this.save_form(None, cx))),
                         )
-                        .child(self.button("Cancel", "run-form-cancel", false).on_click(
-                            cx.listener(|this, _, _, cx| {
+                        .child(
+                            ui::button(
+                                &theme,
+                                "run-form-cancel",
+                                ButtonKind::Ghost,
+                                None,
+                                "Cancel",
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
                                 this.form = None;
                                 cx.notify();
-                            }),
-                        ))
+                            })),
+                        )
                         .child(
                             div()
-                                .text_xs()
-                                .text_color(theme.text_secondary)
+                                .t_small()
+                                .text_color(theme.text_muted)
                                 .child("Enter saves, Esc cancels"),
                         ),
                 )
@@ -480,7 +480,7 @@ impl RunPanel {
             }
             None => (None, false),
         };
-        let chip = chip(&theme, state);
+        let state_chip = state_chip(&theme, state);
         let cwd_label = self.state.read(cx).run_command_cwd(cmd);
         let edit_values = (
             cmd.name.clone(),
@@ -493,20 +493,33 @@ impl RunPanel {
             .id(("run-cmd", key))
             .flex()
             .items_center()
-            .justify_between()
             .gap(theme.space_3)
             .px(theme.space_3)
-            .py(theme.space_2)
+            .py(theme.space_3)
             .rounded(theme.radius_md)
-            .bg(theme.surface_raised)
             .border_1()
             .border_color(if selected {
-                theme.accent
+                theme.accent.opacity(0.3)
             } else {
-                theme.border_subtle
+                gpui::transparent_black()
             })
+            .when(selected, |d| d.bg(theme.accent.opacity(0.08)))
+            .when(!selected, |d| d.hover(move |s| s.bg(theme.surface_hover)))
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| this.select(id, cx)))
+            .child(icon(
+                if running {
+                    Icon::CircleDot
+                } else {
+                    Icon::Terminal
+                },
+                16.0,
+                if running {
+                    theme.accent
+                } else {
+                    theme.text_muted
+                },
+            ))
             .child(
                 div()
                     .flex()
@@ -519,24 +532,21 @@ impl RunPanel {
                             .flex()
                             .items_center()
                             .gap(theme.space_2)
-                            .child(div().text_color(theme.text_primary).child(cmd.name.clone()))
-                            .when_some(chip, |el, (label, color)| {
-                                el.child(
-                                    div()
-                                        .px(theme.space_2)
-                                        .rounded(theme.radius_sm)
-                                        .border_1()
-                                        .border_color(color)
-                                        .text_xs()
-                                        .text_color(color)
-                                        .child(label),
-                                )
+                            .child(
+                                div()
+                                    .t_body()
+                                    .t_strong()
+                                    .text_color(theme.text_primary)
+                                    .child(cmd.name.clone()),
+                            )
+                            .when_some(state_chip, |el, (label, color)| {
+                                el.child(ui::chip(&theme, label, color))
                             }),
                     )
                     .child(
                         div()
-                            .text_xs()
-                            .font_family(MONO_FONT)
+                            .t_small()
+                            .font_family(TERMINAL_FONT)
                             .text_color(theme.text_secondary)
                             .overflow_hidden()
                             .whitespace_nowrap()
@@ -544,8 +554,9 @@ impl RunPanel {
                     )
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(theme.text_secondary)
+                            .t_small()
+                            .t_code()
+                            .text_color(theme.text_muted)
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .child(format!("in {}", cwd_label.display())),
@@ -554,33 +565,62 @@ impl RunPanel {
             .child(
                 div()
                     .flex()
+                    .flex_none()
                     .items_center()
-                    .gap(theme.space_2)
+                    .gap(theme.space_1)
                     .child(if running {
-                        self.button("Stop", ("run-stop", key), false)
-                            .on_click(cx.listener(move |this, _, _, cx| this.stop(id, cx)))
+                        ui::button(
+                            &theme,
+                            ("run-stop", key),
+                            ButtonKind::Secondary,
+                            Some(Icon::Square),
+                            "Stop",
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.stop(id, cx);
+                            cx.stop_propagation();
+                        }))
                     } else {
-                        self.button("Start", ("run-start", key), true)
-                            .on_click(cx.listener(move |this, _, _, cx| this.start(id, cx)))
+                        ui::button(
+                            &theme,
+                            ("run-start", key),
+                            ButtonKind::Primary,
+                            Some(Icon::Play),
+                            "Start",
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.start(id, cx);
+                            cx.stop_propagation();
+                        }))
                     })
                     .child(
                         icon_button(&theme, "✎", ("run-edit", key)).on_click(cx.listener(
                             move |this, _, window, cx| {
                                 this.open_form(FormMode::Edit(id), edit_values.clone(), None, cx);
                                 this.focus_form_name(window, cx);
+                                cx.stop_propagation();
                             },
                         )),
                     )
                     .child(if confirming {
-                        self.button("Delete?", ("run-delete", key), false)
-                            .text_color(theme.danger)
-                            .on_click(cx.listener(move |this, _, _, cx| this.delete(id, cx)))
-                            .into_any_element()
+                        ui::button(
+                            &theme,
+                            ("run-delete", key),
+                            ButtonKind::Danger,
+                            Some(Icon::Trash),
+                            "Delete?",
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.delete(id, cx);
+                            cx.stop_propagation();
+                        }))
+                        .into_any_element()
                     } else {
                         icon_button_tinted(&theme, "✕", ("run-delete", key), theme.danger)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.confirm_delete = Some(id);
                                 cx.notify();
+                                cx.stop_propagation();
                             }))
                             .into_any_element()
                     }),
@@ -621,7 +661,7 @@ impl RunPanel {
                 _ => (String::new(), None, 0, 0),
             }
         };
-        let status = chip(&theme, state);
+        let status = state_chip(&theme, state);
         let empty_message = if selected.is_none() {
             "Select a command to see its log."
         } else if state.is_none() {
@@ -636,16 +676,17 @@ impl RunPanel {
             .flex_1()
             .min_h(px(0.0))
             .rounded(theme.radius_md)
-            .bg(theme.surface_solid)
+            .bg(theme.surface_sunken)
             .border_1()
             .border_color(theme.border_light)
+            .overflow_hidden()
             .child(
                 div()
                     .flex()
                     .items_center()
                     .justify_between()
+                    .h(px(40.0))
                     .px(theme.space_3)
-                    .py(theme.space_2)
                     .border_b_1()
                     .border_color(theme.border_subtle)
                     .child(
@@ -653,21 +694,22 @@ impl RunPanel {
                             .flex()
                             .items_center()
                             .gap(theme.space_2)
-                            .child(div().text_sm().text_color(theme.text_secondary).child(
-                                if title.is_empty() {
-                                    "LOG".to_string()
+                            .child(section_label(
+                                &theme,
+                                &if title.is_empty() {
+                                    "Log".to_string()
                                 } else {
-                                    format!("LOG · {title}")
+                                    format!("Log · {title}")
                                 },
                             ))
                             .when_some(status, |el, (label, color)| {
-                                el.child(div().text_xs().text_color(color).child(label))
+                                el.child(ui::chip(&theme, label, color))
                             })
                             .when(dropped > 0, |el| {
                                 el.child(
                                     div()
-                                        .text_xs()
-                                        .text_color(theme.text_secondary)
+                                        .t_small()
+                                        .text_color(theme.text_muted)
                                         .child(format!("{dropped} older lines dropped")),
                                 )
                             }),
@@ -675,22 +717,34 @@ impl RunPanel {
                     .child(
                         div()
                             .flex()
-                            .gap(theme.space_2)
+                            .gap(theme.space_1)
                             .child(
-                                self.button("Copy log", "run-copy-log", false)
-                                    .on_click(cx.listener(|this, _, _, cx| this.copy_log(cx))),
+                                ui::button(
+                                    &theme,
+                                    "run-copy-log",
+                                    ButtonKind::Ghost,
+                                    Some(Icon::Copy),
+                                    "Copy",
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| this.copy_log(cx))),
                             )
                             .child(
-                                self.button("Clear", "run-clear-log", false)
-                                    .on_click(cx.listener(|this, _, _, cx| this.clear_log(cx))),
+                                ui::button(
+                                    &theme,
+                                    "run-clear-log",
+                                    ButtonKind::Ghost,
+                                    Some(Icon::Trash),
+                                    "Clear",
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| this.clear_log(cx))),
                             ),
                     ),
             )
             .child(if count == 0 {
                 div()
-                    .p(theme.space_3)
-                    .text_sm()
-                    .text_color(theme.text_secondary)
+                    .p(theme.space_4)
+                    .t_body()
+                    .text_color(theme.text_muted)
                     .child(empty_message)
                     .into_any_element()
             } else {
@@ -711,8 +765,8 @@ impl RunPanel {
                                         .id(("run-log-line", ix))
                                         .h(px(LOG_LINE_HEIGHT))
                                         .px(theme.space_3)
-                                        .text_xs()
-                                        .font_family(MONO_FONT)
+                                        .t_small()
+                                        .font_family(TERMINAL_FONT)
                                         .text_color(theme.text_primary)
                                         .overflow_hidden()
                                         .whitespace_nowrap()
@@ -739,11 +793,38 @@ impl Render for RunPanel {
         let commands = self.state.read(cx).run_commands.clone();
         let selected = self.selected_id(cx);
         let has_project = self.state.read(cx).selected_project.is_some();
+        let project_name = {
+            let state = self.state.read(cx);
+            state
+                .selected_project
+                .and_then(|id| state.projects.iter().find(|p| p.id == id))
+                .map(|p| p.name.clone())
+        };
 
         let mut list: Vec<AnyElement> = Vec::new();
         for cmd in &commands {
             list.push(self.render_command_row(cmd, selected == Some(cmd.id), cx));
         }
+
+        let add = (has_project && self.form.is_none()).then(|| {
+            ui::button(
+                &theme,
+                "run-add",
+                ButtonKind::Primary,
+                Some(Icon::Plus),
+                "Add command",
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.open_form(
+                    FormMode::New,
+                    (String::new(), String::new(), String::new()),
+                    None,
+                    cx,
+                );
+                this.focus_form_name(window, cx);
+            }))
+            .into_any_element()
+        });
 
         div()
             .flex()
@@ -751,83 +832,66 @@ impl Render for RunPanel {
             .flex_1()
             .h_full()
             .min_w(px(0.0))
-            .bg(theme.surface_solid)
-            .p(theme.space_4)
-            .gap(theme.space_3)
+            .child(ui::page_header(
+                &theme,
+                "Run commands",
+                project_name.map(|n| format!("Saved commands for {n}").into()),
+                Some(
+                    ui::back_button(&theme, "run-back")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            if let Some(close) = &this.on_close {
+                                close(window, cx);
+                            }
+                        }))
+                        .into_any_element(),
+                ),
+                add,
+            ))
             .child(
                 div()
                     .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(theme.space_2)
-                            .child(icon_button(&theme, "←", "run-back").on_click(cx.listener(
-                                |this, _, window, cx| {
-                                    if let Some(close) = &this.on_close {
-                                        close(window, cx);
-                                    }
-                                },
-                            )))
-                            .child(
-                                div()
-                                    .text_xl()
-                                    .text_color(theme.text_primary)
-                                    .child("Run commands"),
-                            ),
-                    )
-                    .when(has_project && self.form.is_none(), |el| {
-                        el.child(self.button("+ Add command", "run-add", true).on_click(
-                            cx.listener(|this, _, window, cx| {
-                                this.open_form(
-                                    FormMode::New,
-                                    (String::new(), String::new(), String::new()),
-                                    None,
-                                    cx,
-                                );
-                                this.focus_form_name(window, cx);
-                            }),
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .gap(theme.space_4)
+                    .px(theme.space_6)
+                    .py(theme.space_4)
+                    .when_some(self.notice.clone(), |el, (message, is_error)| {
+                        el.child(ui::notice(&theme, message, is_error))
+                    })
+                    .when_some(self.render_form(cx), |el, form| el.child(form))
+                    .when(commands.is_empty() && self.form.is_none(), |el| {
+                        el.child(ui::empty_state(
+                            &theme,
+                            Icon::Play,
+                            if has_project {
+                                "No run commands yet"
+                            } else {
+                                "No project selected"
+                            },
+                            if has_project {
+                                "Save the commands you run often (dev server, tests, builds) and watch their output here."
+                            } else {
+                                "Select a project to manage its run commands."
+                            },
+                            None,
                         ))
-                    }),
-            )
-            .when_some(self.notice.clone(), |el, (message, is_error)| {
-                el.child(
-                    div()
-                        .text_sm()
-                        .text_color(if is_error {
-                            theme.danger
-                        } else {
-                            theme.text_secondary
-                        })
-                        .child(message),
-                )
-            })
-            .when_some(self.render_form(cx), |el, form| el.child(form))
-            .when(commands.is_empty() && self.form.is_none(), |el| {
-                el.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_start()
-                        .gap(theme.space_2)
-                        .py(theme.space_3)
-                        .child(
+                    })
+                    .when(!list.is_empty(), |el| {
+                        el.child(
                             div()
-                                .text_color(theme.text_secondary)
-                                .child(if has_project {
-                                    "No run commands for this project yet."
-                                } else {
-                                    "Select a project to manage its run commands."
-                                }),
-                        ),
-                )
-            })
-            .when(!list.is_empty(), |el| {
-                el.child(div().flex().flex_col().gap(theme.space_2).children(list))
-            })
-            .child(self.render_log(selected, cx))
+                                .id("run-command-list")
+                                .flex()
+                                .flex_col()
+                                .flex_none()
+                                .max_h(px(280.0))
+                                .gap(px(2.0))
+                                .overflow_y_scroll()
+                                .children(list),
+                        )
+                    })
+                    .child(self.render_log(selected, cx)),
+            )
     }
 }
 
@@ -842,6 +906,7 @@ impl Root {
             self.open_history = None;
             self.open_task = None;
             self.open_note = None;
+            self.settings_open = false;
             self.timesheet_open = false;
             self.run_open = true;
         }
@@ -859,7 +924,7 @@ impl Root {
                 .rounded(theme.radius_sm)
                 .border_1()
                 .border_color(theme.accent)
-                .text_xs()
+                .t_small()
                 .text_color(theme.accent)
                 .child(format!("▶ {running}"))
                 .into_any_element()

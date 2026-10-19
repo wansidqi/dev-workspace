@@ -8,6 +8,7 @@
 //! this file is only the view. Git is read on a background task, and every
 //! edit is saved to the database straight away.
 
+use crate::theme::TypeScale;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -23,7 +24,8 @@ use gpui::{
 
 use crate::state::{AppState, TimesheetProject};
 use crate::text_input::TextInput;
-use crate::theme::{GlassTheme, MONO_FONT};
+use crate::theme::GlassTheme;
+use crate::ui::{back_button, chip, icon, icon_chip, page_header, section_label, ButtonKind, Icon};
 use crate::{icon_button, icon_button_tinted};
 
 pub type CloseHandler = Box<dyn Fn(&mut Window, &mut App)>;
@@ -605,27 +607,17 @@ impl TimesheetPanel {
         id: impl Into<gpui::ElementId>,
         primary: bool,
     ) -> gpui::Stateful<gpui::Div> {
-        let theme = self.theme;
-        div()
-            .id(id)
-            .px(theme.space_3)
-            .py(theme.space_1)
-            .rounded(theme.radius_sm)
-            .border_1()
-            .border_color(if primary {
-                theme.accent
+        crate::ui::button(
+            &self.theme,
+            id,
+            if primary {
+                ButtonKind::Primary
             } else {
-                theme.border_light
-            })
-            .text_sm()
-            .text_color(if primary {
-                theme.accent
-            } else {
-                theme.text_secondary
-            })
-            .cursor_pointer()
-            .hover(move |s| s.bg(theme.surface_raised).text_color(theme.text_primary))
-            .child(label)
+                ButtonKind::Secondary
+            },
+            None,
+            label,
+        )
     }
 
     fn render_settings(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -638,7 +630,7 @@ impl TimesheetPanel {
                 .gap(theme.space_1)
                 .child(
                     div()
-                        .text_xs()
+                        .t_small()
                         .text_color(theme.text_secondary)
                         .child(*label),
                 )
@@ -661,7 +653,7 @@ impl TimesheetPanel {
                 )
                 .children(fields)
                 .when_some(form.error.clone(), |el, message| {
-                    el.child(div().text_xs().text_color(theme.danger).child(message))
+                    el.child(div().t_small().text_color(theme.danger).child(message))
                 })
                 .child(
                     div()
@@ -680,7 +672,7 @@ impl TimesheetPanel {
                         ))
                         .child(
                             div()
-                                .text_xs()
+                                .t_small()
                                 .text_color(theme.text_secondary)
                                 .child("Enter saves, Esc cancels"),
                         ),
@@ -707,22 +699,22 @@ impl TimesheetPanel {
         div()
             .id(id)
             .px(theme.space_2)
-            .py(theme.space_1)
+            .py(px(3.0))
             .rounded(theme.radius_sm)
             .border_1()
             .border_color(gpui::transparent_black())
             .cursor_pointer()
             .text_color(if empty {
-                theme.text_secondary
+                theme.text_muted
             } else {
                 theme.text_primary
             })
-            .hover(move |s| s.bg(theme.surface_raised).border_color(theme.border_subtle))
+            .hover(move |s| s.bg(theme.surface_hover).border_color(theme.border_subtle))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.begin_edit(target.clone(), initial.clone(), window, cx);
             }))
             .child(if empty {
-                SharedString::from("(click to edit)")
+                SharedString::from("Click to edit")
             } else {
                 shown
             })
@@ -767,11 +759,12 @@ impl TimesheetPanel {
         let (step_key_a, step_key_b, remove_key, toggle_key) =
             (key.clone(), key.clone(), key.clone(), key.clone());
         div()
+            .group("ts-row")
             .flex()
             .flex_col()
             .gap(theme.space_1)
             .py(theme.space_2)
-            .border_t_1()
+            .border_b_1()
             .border_color(theme.border_subtle)
             .child(
                 div()
@@ -781,15 +774,17 @@ impl TimesheetPanel {
                     .child(
                         div()
                             .w(px(24.0))
-                            .text_xs()
-                            .text_color(theme.text_secondary)
+                            .t_small()
+                            .t_code()
+                            .text_color(theme.text_muted)
                             .child((index + 1).to_string()),
                     )
                     .child(div().flex_1().min_w(px(0.0)).child(title))
                     .child(
                         div()
                             .w(px(150.0))
-                            .text_xs()
+                            .t_small()
+                            .t_code()
                             .text_color(theme.text_secondary)
                             .child(fmt_range(&row.date_from, &row.date_to)),
                     )
@@ -798,19 +793,19 @@ impl TimesheetPanel {
                             .flex()
                             .items_center()
                             .gap(theme.space_1)
-                            .w(px(150.0))
+                            .w(px(170.0))
                             .child(icon_button(&theme, "−", ("ts-minus", uid)).on_click(
                                 cx.listener(move |this, _, _, cx| {
                                     this.step_hours(project, &step_key_a, -HOURS_STEP, cx)
                                 }),
                             ))
-                            .child(div().w(px(56.0)).child(hours))
+                            .child(div().w(px(56.0)).t_code().child(hours))
                             .child(icon_button(&theme, "+", ("ts-plus", uid)).on_click(
                                 cx.listener(move |this, _, _, cx| {
                                     this.step_hours(project, &step_key_b, HOURS_STEP, cx)
                                 }),
                             ))
-                            .child(div().text_xs().text_color(theme.text_secondary).child(
+                            .child(div().t_small().text_color(theme.text_muted).child(
                                 if row.auto && row.hours.is_some() {
                                     "h est."
                                 } else {
@@ -831,14 +826,26 @@ impl TimesheetPanel {
                     div()
                         .id(("ts-commits", uid))
                         .ml(px(24.0))
-                        .text_xs()
+                        .flex()
+                        .items_center()
+                        .gap(theme.space_1)
+                        .t_small()
                         .text_color(theme.text_secondary)
                         .cursor_pointer()
                         .hover(move |s| s.text_color(theme.text_primary))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.toggle_commits(project, &toggle_key, cx)
                         }))
-                        .child(format!("{} {stats}", if open { "▾" } else { "▸" })),
+                        .child(icon(
+                            if open {
+                                Icon::ChevronDown
+                            } else {
+                                Icon::ChevronRight
+                            },
+                            12.0,
+                            theme.text_muted,
+                        ))
+                        .child(stats),
                 )
             })
             .when(open, |el| {
@@ -848,24 +855,32 @@ impl TimesheetPanel {
                         .flex()
                         .flex_col()
                         .gap(px(2.0))
-                        .p(theme.space_2)
-                        .rounded(theme.radius_sm)
-                        .bg(theme.surface_solid)
+                        .p(theme.space_3)
+                        .rounded(theme.radius_md)
+                        .bg(theme.surface_sunken)
                         .children(row.commits.iter().map(|c| {
                             div()
                                 .flex()
-                                .gap(theme.space_2)
-                                .text_xs()
+                                .gap(theme.space_3)
+                                .t_small()
                                 .child(
                                     div()
-                                        .font_family(MONO_FONT)
+                                        .t_code()
                                         .text_color(theme.accent)
                                         .child(c.hash.chars().take(7).collect::<String>()),
                                 )
-                                .child(div().text_color(theme.text_secondary).child(c.date.clone()))
+                                .child(
+                                    div()
+                                        .t_code()
+                                        .text_color(theme.text_muted)
+                                        .child(c.date.clone()),
+                                )
                                 .child(div().text_color(theme.text_secondary).child(c.repo.clone()))
                                 .child(
                                     div()
+                                        .flex_1()
+                                        .min_w(px(0.0))
+                                        .truncate()
                                         .text_color(theme.text_primary)
                                         .child(c.subject.clone()),
                                 )
@@ -892,11 +907,6 @@ impl TimesheetPanel {
         div()
             .flex()
             .flex_col()
-            .p(theme.space_3)
-            .rounded(theme.radius_md)
-            .bg(theme.surface_raised)
-            .border_1()
-            .border_color(theme.border_light)
             .child(
                 div()
                     .flex()
@@ -907,39 +917,60 @@ impl TimesheetPanel {
                         div()
                             .flex()
                             .items_center()
-                            .gap(theme.space_2)
+                            .gap(theme.space_3)
                             .child(
                                 div()
+                                    .t_heading()
                                     .text_color(theme.text_primary)
                                     .child(project.name.clone()),
                             )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.accent)
-                                    .child(format!("{} h", fmt_hours(total_hours(rows)))),
-                            )
+                            .child(chip(
+                                &theme,
+                                format!("{} h", fmt_hours(total_hours(rows))),
+                                theme.accent,
+                            ))
                             .when(project.repos.is_empty(), |el| {
-                                el.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.warning)
-                                        .child("no repos linked"),
-                                )
+                                el.child(icon_chip(
+                                    &theme,
+                                    Icon::Triangle,
+                                    "No repos linked",
+                                    theme.warning,
+                                ))
                             }),
                     )
                     .child(
-                        self.button("+ Add task", ("ts-add", id.0 as u64), false)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.add_task(id, window, cx)
-                            })),
+                        crate::ui::button(
+                            &theme,
+                            ("ts-add", id.0 as u64),
+                            ButtonKind::Ghost,
+                            Some(Icon::Plus),
+                            "Add task",
+                        )
+                        .on_click(
+                            cx.listener(move |this, _, window, cx| this.add_task(id, window, cx)),
+                        ),
                     ),
+            )
+            .child(
+                // Column heads.
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(theme.space_3)
+                    .pb(theme.space_1)
+                    .border_b_1()
+                    .border_color(theme.border_light)
+                    .child(div().w(px(24.0)).child(section_label(&theme, "#")))
+                    .child(div().flex_1().child(section_label(&theme, "Task")))
+                    .child(div().w(px(150.0)).child(section_label(&theme, "Dates")))
+                    .child(div().w(px(170.0)).child(section_label(&theme, "Hours")))
+                    .child(div().w(px(24.0))),
             )
             .when(rows.is_empty(), |el| {
                 el.child(
                     div()
-                        .py(theme.space_3)
-                        .text_sm()
+                        .py(theme.space_4)
+                        .t_body()
                         .text_color(theme.text_secondary)
                         .child("No commits found this month."),
                 )
@@ -947,6 +978,26 @@ impl TimesheetPanel {
             .children(rendered)
             .into_any_element()
     }
+}
+
+/// A big number over a small label, for the summary strip.
+fn summary_stat(theme: &GlassTheme, value: String, label: &str) -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .t_title()
+                .t_code()
+                .text_color(theme.text_primary)
+                .child(value),
+        )
+        .child(
+            div()
+                .t_small()
+                .text_color(theme.text_secondary)
+                .child(label.to_string()),
+        )
 }
 
 impl Render for TimesheetPanel {
@@ -975,105 +1026,88 @@ impl Render for TimesheetPanel {
             cx,
         );
 
+        let month_switch = div()
+            .flex()
+            .items_center()
+            .child(
+                icon_button(&theme, "‹", "ts-prev")
+                    .on_click(cx.listener(|this, _, _, cx| this.change_month(-1, cx))),
+            )
+            .child(
+                div()
+                    .w(px(132.0))
+                    .text_center()
+                    .t_body()
+                    .t_strong()
+                    .text_color(theme.text_primary)
+                    .child(month_label(&self.month)),
+            )
+            .child(
+                icon_button(&theme, "›", "ts-next")
+                    .on_click(cx.listener(|this, _, _, cx| this.change_month(1, cx))),
+            );
+
+        let actions = div()
+            .flex()
+            .items_center()
+            .gap(theme.space_2)
+            .child(month_switch)
+            .child(
+                crate::ui::button(
+                    &theme,
+                    "ts-sync",
+                    ButtonKind::Secondary,
+                    Some(Icon::Refresh),
+                    if self.syncing {
+                        "Syncing…"
+                    } else {
+                        "Sync from git"
+                    },
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.sync(cx))),
+            )
+            .child(
+                crate::ui::button(
+                    &theme,
+                    "ts-settings",
+                    ButtonKind::Ghost,
+                    Some(Icon::Settings),
+                    "",
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
+            )
+            .child(
+                crate::ui::button(
+                    &theme,
+                    "ts-copy",
+                    ButtonKind::Primary,
+                    Some(Icon::Copy),
+                    "Copy all",
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.copy_all(cx))),
+            );
+
         div()
             .flex()
             .flex_col()
             .flex_1()
             .h_full()
             .min_w(px(0.0))
-            .bg(theme.surface_solid)
-            .p(theme.space_4)
-            .gap(theme.space_3)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(theme.space_2)
-                            .child(icon_button(&theme, "←", "ts-back").on_click(cx.listener(
-                                |this, _, window, cx| {
-                                    if let Some(close) = &this.on_close {
-                                        close(window, cx);
-                                    }
-                                },
-                            )))
-                            .child(
-                                div()
-                                    .text_xl()
-                                    .text_color(theme.text_primary)
-                                    .child("Timesheet"),
-                            )
-                            .child(
-                                icon_button(&theme, "‹", "ts-prev").on_click(
-                                    cx.listener(|this, _, _, cx| this.change_month(-1, cx)),
-                                ),
-                            )
-                            .child(
-                                div()
-                                    .w(px(150.0))
-                                    .text_center()
-                                    .text_color(theme.text_primary)
-                                    .child(month_label(&self.month)),
-                            )
-                            .child(
-                                icon_button(&theme, "›", "ts-next").on_click(
-                                    cx.listener(|this, _, _, cx| this.change_month(1, cx)),
-                                ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap(theme.space_2)
-                            .child(
-                                self.button(
-                                    if self.syncing {
-                                        "Syncing…"
-                                    } else {
-                                        "Sync from git"
-                                    },
-                                    "ts-sync",
-                                    false,
-                                )
-                                .on_click(cx.listener(|this, _, _, cx| this.sync(cx))),
-                            )
-                            .child(self.button("Settings", "ts-settings", false).on_click(
-                                cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
-                            ))
-                            .child(
-                                self.button("Copy all", "ts-copy", true)
-                                    .on_click(cx.listener(|this, _, _, cx| this.copy_all(cx))),
-                            ),
-                    ),
-            )
-            .when_some(self.notice.clone(), |el, (message, is_error)| {
-                el.child(
-                    div()
-                        .text_sm()
-                        .text_color(if is_error {
-                            theme.danger
-                        } else {
-                            theme.text_secondary
-                        })
-                        .child(message),
-                )
-            })
-            .when_some(self.render_settings(cx), |el, form| el.child(form))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(theme.text_secondary)
-                    .child(format!(
-                        "{} h · {tasks} task{} · {commits} commit{}",
-                        fmt_hours(hours),
-                        if tasks == 1 { "" } else { "s" },
-                        if commits == 1 { "" } else { "s" },
-                    )),
-            )
+            .child(page_header(
+                &theme,
+                "Timesheet",
+                Some("Hours from your git commits, grouped by ticket".into()),
+                Some(
+                    back_button(&theme, "ts-back")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            if let Some(close) = &this.on_close {
+                                close(window, cx);
+                            }
+                        }))
+                        .into_any_element(),
+                ),
+                Some(actions.into_any_element()),
+            ))
             .child(
                 div()
                     .id("ts-scroll")
@@ -1081,14 +1115,35 @@ impl Render for TimesheetPanel {
                     .flex_col()
                     .flex_1()
                     .min_h(px(0.0))
-                    .gap(theme.space_3)
+                    .gap(theme.space_6)
+                    .px(theme.space_6)
+                    .py(theme.space_5)
                     .overflow_y_scroll()
+                    .when_some(self.notice.clone(), |el, (message, is_error)| {
+                        el.child(crate::ui::notice(&theme, message, is_error))
+                    })
+                    .when_some(self.render_settings(cx), |el, form| el.child(form))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(theme.space_8)
+                            .child(summary_stat(
+                                &theme,
+                                format!("{} h", fmt_hours(hours)),
+                                "Total",
+                            ))
+                            .child(summary_stat(&theme, tasks.to_string(), "Tasks"))
+                            .child(summary_stat(&theme, commits.to_string(), "Commits")),
+                    )
                     .when(projects.is_empty(), |el| {
-                        el.child(
-                            div()
-                                .text_color(theme.text_secondary)
-                                .child("No projects yet. Create one and link its git repos."),
-                        )
+                        el.child(crate::ui::empty_state(
+                            &theme,
+                            Icon::Clock,
+                            "No projects yet",
+                            "Create a project and link its git repositories to build a timesheet.",
+                            None,
+                        ))
                     })
                     .children(sections)
                     .child(
@@ -1096,17 +1151,7 @@ impl Render for TimesheetPanel {
                             .flex()
                             .flex_col()
                             .gap(theme.space_1)
-                            .p(theme.space_3)
-                            .rounded(theme.radius_md)
-                            .bg(theme.surface_raised)
-                            .border_1()
-                            .border_color(theme.border_light)
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.text_secondary)
-                                    .child("REMARKS"),
-                            )
+                            .child(section_label(&theme, "Remarks"))
                             .child(remarks),
                     ),
             )
@@ -1123,6 +1168,7 @@ impl crate::Root {
             self.open_history = None;
             self.open_task = None;
             self.open_note = None;
+            self.settings_open = false;
             self.run_open = false;
             self.credentials_open = false;
             self.timesheet_open = true;

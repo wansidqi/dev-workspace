@@ -37,6 +37,12 @@ actions!(
         NeSelectLeft,
         NeSelectRight,
         NeSelectAll,
+        NeWordLeft,
+        NeWordRight,
+        NeSelectWordLeft,
+        NeSelectWordRight,
+        NeDeleteWordLeft,
+        NeDeleteWordRight,
         NeHome,
         NeEnd,
         NeNewline,
@@ -58,6 +64,16 @@ pub fn init_key_bindings(cx: &mut App) {
         KeyBinding::new("down", NeDown, Some("NoteEditor")),
         KeyBinding::new("shift-left", NeSelectLeft, Some("NoteEditor")),
         KeyBinding::new("shift-right", NeSelectRight, Some("NoteEditor")),
+        KeyBinding::new("ctrl-left", NeWordLeft, Some("NoteEditor")),
+        KeyBinding::new("ctrl-right", NeWordRight, Some("NoteEditor")),
+        KeyBinding::new("alt-left", NeWordLeft, Some("NoteEditor")),
+        KeyBinding::new("alt-right", NeWordRight, Some("NoteEditor")),
+        KeyBinding::new("ctrl-shift-left", NeSelectWordLeft, Some("NoteEditor")),
+        KeyBinding::new("ctrl-shift-right", NeSelectWordRight, Some("NoteEditor")),
+        KeyBinding::new("alt-shift-left", NeSelectWordLeft, Some("NoteEditor")),
+        KeyBinding::new("alt-shift-right", NeSelectWordRight, Some("NoteEditor")),
+        KeyBinding::new("ctrl-backspace", NeDeleteWordLeft, Some("NoteEditor")),
+        KeyBinding::new("ctrl-delete", NeDeleteWordRight, Some("NoteEditor")),
         KeyBinding::new("cmd-a", NeSelectAll, Some("NoteEditor")),
         KeyBinding::new("ctrl-a", NeSelectAll, Some("NoteEditor")),
         KeyBinding::new("cmd-v", NePaste, Some("NoteEditor")),
@@ -203,6 +219,78 @@ impl NoteEditor {
 
     fn select_right(&mut self, _: &NeSelectRight, window: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.next_boundary(self.cursor_offset()), window, cx);
+    }
+
+    fn word_left(&mut self, _: &NeWordLeft, window: &mut Window, cx: &mut Context<Self>) {
+        let from = if self.selected_range.is_empty() {
+            self.cursor_offset()
+        } else {
+            self.selected_range.start
+        };
+        let to = crate::text_nav::word_start_before(&self.content, from);
+        self.move_to(to, window, cx);
+    }
+
+    fn word_right(&mut self, _: &NeWordRight, window: &mut Window, cx: &mut Context<Self>) {
+        let from = if self.selected_range.is_empty() {
+            self.cursor_offset()
+        } else {
+            self.selected_range.end
+        };
+        let to = crate::text_nav::word_end_after(&self.content, from);
+        self.move_to(to, window, cx);
+    }
+
+    fn select_word_left(
+        &mut self,
+        _: &NeSelectWordLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let to = crate::text_nav::word_start_before(&self.content, self.cursor_offset());
+        self.select_to(to, window, cx);
+    }
+
+    fn select_word_right(
+        &mut self,
+        _: &NeSelectWordRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let to = crate::text_nav::word_end_after(&self.content, self.cursor_offset());
+        self.select_to(to, window, cx);
+    }
+
+    fn delete_word_left(
+        &mut self,
+        _: &NeDeleteWordLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            let to = crate::text_nav::word_start_before(&self.content, self.cursor_offset());
+            if to == self.cursor_offset() {
+                return;
+            }
+            self.select_to(to, window, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+
+    fn delete_word_right(
+        &mut self,
+        _: &NeDeleteWordRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            let to = crate::text_nav::word_end_after(&self.content, self.cursor_offset());
+            if to == self.cursor_offset() {
+                return;
+            }
+            self.select_to(to, window, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx)
     }
 
     fn select_all(&mut self, _: &NeSelectAll, window: &mut Window, cx: &mut Context<Self>) {
@@ -798,7 +886,10 @@ impl Render for NoteEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.theme = crate::theme::current(cx);
         let theme = self.theme;
-        div()
+        let focused = self.focus_handle.is_focused(window);
+        // The scroll container carries the frame; the padded text box inside it
+        // grows with the content (padding on the scroller itself clips the text).
+        let editor = div()
             .flex()
             .key_context("NoteEditor")
             .track_focus(&self.focus_handle(cx))
@@ -811,6 +902,12 @@ impl Render for NoteEditor {
             .on_action(cx.listener(Self::down))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
+            .on_action(cx.listener(Self::delete_word_left))
+            .on_action(cx.listener(Self::delete_word_right))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
@@ -824,22 +921,31 @@ impl Render for NoteEditor {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .flex_1()
             .w_full()
-            .h_full()
-            .p(theme.space_3)
-            .rounded(theme.radius_md)
-            .bg(theme.surface_solid)
-            .border_1()
-            .border_color(if self.focus_handle.is_focused(window) {
-                theme.accent
-            } else {
-                theme.border_subtle
-            })
+            .min_h_full()
+            .p(theme.space_4)
+            .font_family(crate::theme::CODE_FONT)
+            .text_size(px(crate::theme::FS_BODY))
+            .line_height(gpui::relative(1.6))
             .child(NoteTextElement {
                 input: cx.entity(),
                 theme,
+            });
+        div()
+            .id("note-editor-scroll")
+            .flex_1()
+            .w_full()
+            .h_full()
+            .overflow_y_scroll()
+            .rounded(theme.radius_md)
+            .bg(theme.surface_sunken)
+            .border_1()
+            .border_color(if focused {
+                theme.accent.opacity(0.6)
+            } else {
+                theme.border_light
             })
+            .child(editor)
     }
 }
 

@@ -2,6 +2,7 @@
 //! project itself rather than to a task. Same copy-or-link choice, open and
 //! remove rules as the task page's Attachments tab.
 
+use crate::theme::TypeScale;
 use devspace_core::AttachmentId;
 use gpui::{div, prelude::*, px, Context, Entity, PathPromptOptions, SharedString, Window};
 
@@ -10,6 +11,7 @@ use crate::date::format_date;
 use crate::external::{open_attachment, reveal, OpenOutcome};
 use crate::state::AppState;
 use crate::theme::GlassTheme;
+use crate::ui::{button, icon, icon_button, notice, segment, segmented, ButtonKind, Icon};
 
 pub struct ProjectFiles {
     state: Entity<AppState>,
@@ -18,6 +20,8 @@ pub struct ProjectFiles {
     copy_files: bool,
     /// Result of the last action: (message, is_error).
     notice: Option<(String, bool)>,
+    /// Row under the pointer, to show its actions.
+    hovered: Option<u64>,
 }
 
 impl ProjectFiles {
@@ -27,6 +31,7 @@ impl ProjectFiles {
             theme,
             copy_files: true,
             notice: None,
+            hovered: None,
         }
     }
 
@@ -91,57 +96,6 @@ impl ProjectFiles {
         };
         cx.notify();
     }
-
-    fn chip(
-        &self,
-        label: &'static str,
-        active: bool,
-        id: &'static str,
-    ) -> gpui::Stateful<gpui::Div> {
-        let theme = self.theme;
-        div()
-            .id(id)
-            .flex_none()
-            .px(theme.space_3)
-            .py(theme.space_1)
-            .rounded(theme.radius_sm)
-            .border_1()
-            .text_sm()
-            .cursor_pointer()
-            .when(active, |d| {
-                d.border_color(theme.accent)
-                    .text_color(theme.accent)
-                    .bg(theme.accent.opacity(0.12))
-            })
-            .when(!active, |d| {
-                d.border_color(theme.border_subtle)
-                    .text_color(theme.text_secondary)
-                    .hover(move |s| s.bg(theme.surface_raised))
-            })
-            .child(label)
-    }
-
-    fn small_button(
-        &self,
-        label: &'static str,
-        id: impl Into<gpui::ElementId>,
-        danger: bool,
-    ) -> gpui::Stateful<gpui::Div> {
-        let theme = self.theme;
-        div()
-            .id(id)
-            .text_xs()
-            .text_color(theme.text_secondary)
-            .cursor_pointer()
-            .hover(move |s| {
-                s.text_color(if danger {
-                    theme.danger
-                } else {
-                    theme.text_primary
-                })
-            })
-            .child(label)
-    }
 }
 
 impl Render for ProjectFiles {
@@ -153,139 +107,158 @@ impl Render for ProjectFiles {
         div()
             .flex()
             .flex_col()
-            .gap(theme.space_2)
-            .child(
-                div()
-                    .text_xl()
-                    .text_color(theme.text_primary)
-                    .mt(theme.space_4)
-                    .child("Files"),
-            )
+            .gap(theme.space_1)
             .child(
                 div()
                     .flex()
                     .flex_wrap()
                     .items_center()
                     .gap(theme.space_2)
+                    .pb(theme.space_1)
                     .child(
-                        div()
-                            .id("project-attach-files")
-                            .px(theme.space_4)
-                            .py(theme.space_2)
-                            .rounded(theme.radius_md)
-                            .border_1()
-                            .border_color(theme.accent)
-                            .text_color(theme.accent)
-                            .cursor_pointer()
-                            .hover(move |s| s.bg(theme.surface_raised))
-                            .on_click(cx.listener(|this, _, _, cx| this.add_files(cx)))
-                            .child("Add files…"),
-                    )
-                    .child(
-                        self.chip(
-                            "Copy into workspace",
-                            self.copy_files,
-                            "project-attach-copy",
+                        button(
+                            &theme,
+                            "project-attach-files",
+                            ButtonKind::Secondary,
+                            Some(Icon::Plus),
+                            "Add files",
                         )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.copy_files = true;
-                            cx.notify();
-                        })),
+                        .on_click(cx.listener(|this, _, _, cx| this.add_files(cx))),
                     )
                     .child(
-                        self.chip("Link by path", !self.copy_files, "project-attach-link")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.copy_files = false;
-                                cx.notify();
-                            })),
+                        segmented(&theme)
+                            .child(
+                                segment(&theme, "project-attach-copy", "Copy", self.copy_files)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.copy_files = true;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                segment(&theme, "project-attach-link", "Link", !self.copy_files)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.copy_files = false;
+                                        cx.notify();
+                                    })),
+                            ),
                     ),
             )
             .when_some(self.notice.clone(), |el, (message, is_error)| {
                 el.child(
                     div()
                         .px(theme.space_1)
-                        .text_xs()
-                        .text_color(if is_error {
-                            theme.danger
-                        } else {
-                            theme.text_secondary
-                        })
-                        .child(message),
+                        .child(notice(&theme, message, is_error)),
                 )
             })
             .when(files.is_empty(), |el| {
                 el.child(
                     div()
-                        .py(theme.space_3)
-                        .text_sm()
+                        .px(theme.space_2)
+                        .t_small()
                         .text_color(theme.text_secondary)
-                        .child("No files on this project yet."),
+                        .child(
+                            "No files yet. Copy keeps a copy in the workspace; \
+                             Link only remembers the path.",
+                        ),
                 )
             })
             .children(files.into_iter().map(|file| {
                 let id = file.id;
+                let key = id.0 as u64;
+                let hovered = self.hovered == Some(key);
                 div()
-                    .id(("project-file", id.0 as u64))
+                    .id(("project-file", key))
                     .flex()
                     .items_center()
-                    .justify_between()
-                    .gap(theme.space_3)
-                    .px(theme.space_3)
-                    .py(theme.space_3)
+                    .gap(theme.space_2)
+                    .min_h(px(40.0))
+                    .px(theme.space_2)
                     .rounded(theme.radius_md)
-                    .bg(theme.surface_raised)
-                    .border_1()
-                    .border_color(theme.border_subtle)
                     .cursor_pointer()
-                    .hover(move |s| s.border_color(theme.border_light))
+                    .when(hovered, |d| d.bg(theme.surface_hover))
+                    .on_hover(cx.listener(move |this, over: &bool, _, cx| {
+                        let next = if *over {
+                            Some(key)
+                        } else if this.hovered == Some(key) {
+                            None
+                        } else {
+                            this.hovered
+                        };
+                        if next != this.hovered {
+                            this.hovered = next;
+                            cx.notify();
+                        }
+                    }))
                     .on_click(cx.listener(move |this, _, _, cx| this.open_file(id, cx)))
+                    .child(icon(
+                        if file.is_linked {
+                            Icon::Link
+                        } else {
+                            Icon::Paperclip
+                        },
+                        15.0,
+                        theme.text_muted,
+                    ))
                     .child(
                         div()
                             .flex()
                             .flex_col()
+                            .flex_1()
                             .min_w(px(0.0))
                             .child(
                                 div()
+                                    .t_body()
                                     .text_color(theme.text_primary)
+                                    .truncate()
                                     .child(SharedString::from(file.name.clone())),
                             )
-                            .child(div().text_xs().text_color(theme.text_secondary).child(
+                            .child(div().t_small().t_code().text_color(theme.text_muted).child(
                                 format!(
-                                    "{} · added {}",
-                                    if file.is_linked { "Linked" } else { "Copied" },
+                                    "{} · {}",
+                                    if file.is_linked { "linked" } else { "copied" },
                                     format_date(file.created_at)
                                 ),
                             )),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(theme.space_3)
-                            .child(
-                                self.small_button(
-                                    "Show in folder",
-                                    ("project-file-reveal", id.0 as u64),
-                                    false,
+                    .when(hovered, |d| {
+                        d.child(
+                            div()
+                                .flex()
+                                .flex_none()
+                                .items_center()
+                                .child(
+                                    icon_button(
+                                        &theme,
+                                        Icon::FolderOpen,
+                                        ("project-file-reveal", key),
+                                        theme.text_primary,
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.reveal_file(id, cx);
+                                            cx.stop_propagation();
+                                        },
+                                    )),
                                 )
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        this.reveal_file(id, cx);
-                                        cx.stop_propagation();
-                                    },
-                                )),
-                            )
-                            .child(
-                                self.small_button("✕", ("project-file-remove", id.0 as u64), true)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.state.update(cx, |state, cx| {
-                                            state.remove_attachment(id);
-                                            cx.notify();
-                                        });
-                                        cx.stop_propagation();
-                                    })),
-                            ),
-                    )
+                                .child(
+                                    icon_button(
+                                        &theme,
+                                        Icon::Trash,
+                                        ("project-file-remove", key),
+                                        theme.danger,
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.state.update(cx, |state, cx| {
+                                                state.remove_attachment(id);
+                                                cx.notify();
+                                            });
+                                            cx.stop_propagation();
+                                        },
+                                    )),
+                                ),
+                        )
+                    })
             }))
     }
 }

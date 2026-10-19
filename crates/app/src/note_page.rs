@@ -1,12 +1,14 @@
 //! The open-note page: header, Edit / Split / Preview toggle, formatting
 //! toolbar and the body. Lives in its own module so `main.rs` stays small.
 
+use crate::theme::TypeScale;
 use gpui::{div, prelude::*, px, AnyElement, Context, IntoElement, SharedString, Window};
 
 use crate::markdown;
 use crate::markdown_view;
 use crate::note_format::Format;
 use crate::theme::GlassTheme;
+use crate::ui::{back_button, icon_chip, page_header, segment, segmented, Icon};
 use crate::Root;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,11 +43,12 @@ const TOOLBAR: &[(&str, &str, Format)] = &[
     ("H", "fmt-heading", Format::Heading),
     ("<>", "fmt-inline", Format::InlineCode),
     ("Code", "fmt-code", Format::CodeBlock),
+    ("SQL", "fmt-sql", Format::SqlBlock),
     ("Table", "fmt-table", Format::Table),
-    ("• List", "fmt-bullets", Format::Bullets),
+    ("List", "fmt-bullets", Format::Bullets),
     ("1. List", "fmt-numbered", Format::Numbered),
-    ("☑ Tasks", "fmt-tasks", Format::Tasks),
-    ("❝ Quote", "fmt-quote", Format::Quote),
+    ("Tasks", "fmt-tasks", Format::Tasks),
+    ("Quote", "fmt-quote", Format::Quote),
     ("Link", "fmt-link", Format::Link),
     ("—", "fmt-rule", Format::Rule),
 ];
@@ -64,28 +67,17 @@ impl Root {
         }
     }
 
-    fn mode_button(&self, mode: NoteMode, cx: &mut Context<Self>) -> AnyElement {
-        let theme = self.theme;
-        let active = self.note_mode == mode;
-        div()
-            .id(("note-mode", mode as u64))
-            .px(theme.space_3)
-            .py(theme.space_1)
-            .rounded(theme.radius_sm)
-            .text_xs()
-            .cursor_pointer()
-            .when(active, |d| {
-                d.bg(theme.surface_raised).text_color(theme.text_primary)
-            })
-            .when(!active, |d| {
-                d.text_color(theme.text_secondary)
-                    .hover(move |s| s.text_color(theme.text_primary))
-            })
-            .child(mode.label())
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.set_note_mode(mode, window, cx);
-            }))
-            .into_any_element()
+    fn mode_segment(&self, mode: NoteMode, cx: &mut Context<Self>) -> AnyElement {
+        segment(
+            &self.theme,
+            ("note-mode", mode as u64),
+            mode.label(),
+            self.note_mode == mode,
+        )
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.set_note_mode(mode, window, cx);
+        }))
+        .into_any_element()
     }
 
     pub fn set_note_mode(&mut self, mode: NoteMode, window: &mut Window, cx: &mut Context<Self>) {
@@ -108,22 +100,21 @@ impl Root {
             .flex()
             .flex_wrap()
             .items_center()
-            .gap(theme.space_1)
-            .p(theme.space_1)
-            .rounded(theme.radius_md)
-            .border_1()
-            .border_color(theme.border_subtle)
-            .bg(theme.surface)
+            .gap(px(2.0))
             .children(TOOLBAR.iter().map(|&(label, id, format)| {
                 div()
                     .id(id)
+                    .flex()
+                    .items_center()
+                    .h(px(26.0))
                     .px(theme.space_2)
-                    .py(theme.space_1)
                     .rounded(theme.radius_sm)
-                    .text_xs()
+                    .t_small()
+                    .t_strong()
+                    .t_code()
                     .text_color(theme.text_secondary)
                     .cursor_pointer()
-                    .hover(move |s| s.bg(theme.surface_raised).text_color(theme.text_primary))
+                    .hover(move |s| s.bg(theme.surface_hover).text_color(theme.text_primary))
                     .child(label)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if let Some((_, _, editor)) = &this.open_note {
@@ -144,33 +135,82 @@ impl Root {
             return div().into_any_element();
         };
 
-        let preview = |this: &Self| -> AnyElement {
+        // The rendered note reads as a page: a comfortable measure, centred
+        // in the available width.
+        let root = cx.entity();
+        let preview = |this: &Self, centred: bool| -> AnyElement {
+            let root = root.clone();
+            let editable = this.note_mode == NoteMode::Preview;
             let blocks = this.note_preview.as_ref().map(|(_, b)| b.as_slice());
+            let copy_root = root.clone();
+            let hook = markdown_view::CopyHook {
+                copied: this.note_copied,
+                on_copy: std::rc::Rc::new(move |index, _text, _window, cx| {
+                    copy_root.update(cx, |this, cx| {
+                        this.note_copied = Some(index);
+                        cx.notify();
+                        cx.spawn(async move |this, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(1600))
+                                .await;
+                            let _ = this.update(cx, |this, cx| {
+                                if this.note_copied == Some(index) {
+                                    this.note_copied = None;
+                                    cx.notify();
+                                }
+                            });
+                        })
+                        .detach();
+                    });
+                }),
+            };
             div()
                 .id("note-preview")
+                .on_click(move |event, window, cx| {
+                    // Double-click the rendered note to start editing it.
+                    if editable && event.click_count() >= 2 {
+                        root.update(cx, |this, cx| {
+                            this.set_note_mode(NoteMode::Edit, window, cx)
+                        });
+                    }
+                })
+                .flex()
+                .flex_col()
                 .flex_1()
                 .h_full()
+                .min_h(px(0.0))
                 .min_w(px(0.0))
                 .overflow_y_scroll()
-                .p(theme.space_4)
-                .rounded(theme.radius_md)
-                .border_1()
-                .border_color(theme.border_subtle)
-                .bg(theme.surface_solid)
-                .child(markdown_view::render(blocks.unwrap_or(&[]), &theme))
+                .when(centred, |d| d.items_center())
+                .child(
+                    div()
+                        .w_full()
+                        .mb(theme.space_4)
+                        .px(theme.space_8)
+                        .py(theme.space_6)
+                        .rounded(theme.radius_lg)
+                        .bg(theme.surface_raised.opacity(0.45))
+                        .border_1()
+                        .border_color(theme.border_subtle)
+                        .child(markdown_view::render(blocks.unwrap_or(&[]), &theme, &hook)),
+                )
                 .into_any_element()
         };
 
         let body = match self.note_mode {
             NoteMode::Edit => div().flex().flex_1().min_h(px(0.0)).child(editor.clone()),
-            NoteMode::Preview => div().flex().flex_1().min_h(px(0.0)).child(preview(self)),
+            NoteMode::Preview => div()
+                .flex()
+                .flex_1()
+                .min_h(px(0.0))
+                .child(preview(self, false)),
             NoteMode::Split => div()
                 .flex()
                 .flex_1()
                 .min_h(px(0.0))
-                .gap(theme.space_3)
+                .gap(theme.space_4)
                 .child(div().flex().flex_1().min_w(px(0.0)).child(editor.clone()))
-                .child(preview(self)),
+                .child(preview(self, false)),
         };
 
         let (words, chars) = {
@@ -178,70 +218,60 @@ impl Root {
             (content.split_whitespace().count(), content.chars().count())
         };
 
+        let actions = div()
+            .flex()
+            .items_center()
+            .gap(theme.space_3)
+            .child(
+                segmented(&theme)
+                    .child(self.mode_segment(NoteMode::Edit, cx))
+                    .child(self.mode_segment(NoteMode::Split, cx))
+                    .child(self.mode_segment(NoteMode::Preview, cx)),
+            )
+            .child(icon_chip(&theme, Icon::Check, "Saved", theme.success));
+
         div()
             .flex()
             .flex_col()
             .flex_1()
             .h_full()
             .min_w(px(0.0))
-            .bg(theme.surface_solid)
-            .p(theme.space_4)
-            .gap(theme.space_3)
+            .child(page_header(
+                &theme,
+                title,
+                None,
+                Some(
+                    back_button(&theme, "note-back")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.open_note = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                ),
+                Some(actions.into_any_element()),
+            ))
             .child(
                 div()
                     .flex()
-                    .items_center()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.0))
                     .gap(theme.space_3)
-                    .child(
-                        crate::icon_button(&theme, "←", "note-back").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                this.open_note = None;
-                                cx.notify();
-                            },
-                        )),
-                    )
+                    .px(theme.space_6)
+                    .py(theme.space_4)
+                    .when(self.note_mode != NoteMode::Preview, |d| {
+                        d.child(self.toolbar(cx))
+                    })
+                    .child(body)
                     .child(
                         div()
-                            .flex_1()
-                            .truncate()
-                            .text_xl()
-                            .text_color(theme.text_primary)
-                            .child(title),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .p(px(2.0))
-                            .rounded(theme.radius_md)
-                            .border_1()
-                            .border_color(theme.border_subtle)
-                            .child(self.mode_button(NoteMode::Edit, cx))
-                            .child(self.mode_button(NoteMode::Split, cx))
-                            .child(self.mode_button(NoteMode::Preview, cx)),
-                    )
-                    .child(
-                        div()
-                            .px(theme.space_3)
-                            .py(theme.space_1)
-                            .rounded(theme.radius_sm)
-                            .bg(theme.surface_raised)
-                            .text_xs()
-                            .text_color(theme.success)
-                            .child("Saved"),
+                            .t_small()
+                            .t_code()
+                            .text_color(theme.text_muted)
+                            .child(format!(
+                                "{words} words · {chars} chars · Ctrl+S to save and preview"
+                            )),
                     ),
-            )
-            .when(self.note_mode != NoteMode::Preview, |d| {
-                d.child(self.toolbar(cx))
-            })
-            .child(body)
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.text_secondary)
-                    .child(format!(
-                        "{words} words · {chars} chars · Ctrl+S to save and preview"
-                    )),
             )
             .into_any_element()
     }

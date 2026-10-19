@@ -11,6 +11,8 @@ pub enum Format {
     Heading,
     InlineCode,
     CodeBlock,
+    /// A fenced block tagged `sql`.
+    SqlBlock,
     Table,
     Bullets,
     Numbered,
@@ -38,7 +40,8 @@ pub fn apply(content: &str, selection: Range<usize>, format: Format) -> Edit {
         Format::Italic => wrap(content, selection, "*", "*", "italic"),
         Format::InlineCode => wrap(content, selection, "`", "`", "code"),
         Format::Link => wrap(content, selection, "[", "](https://)", "link text"),
-        Format::CodeBlock => code_block(content, selection),
+        Format::CodeBlock => code_block(content, selection, ""),
+        Format::SqlBlock => code_block(content, selection, "sql"),
         Format::Heading => line_prefix(content, selection, LinePrefix::Fixed("## ")),
         Format::Bullets => line_prefix(content, selection, LinePrefix::Fixed("- ")),
         Format::Tasks => line_prefix(content, selection, LinePrefix::Fixed("- [ ] ")),
@@ -92,17 +95,23 @@ fn wrap(content: &str, sel: Range<usize>, open: &str, close: &str, placeholder: 
     }
 }
 
-fn code_block(content: &str, sel: Range<usize>) -> Edit {
+fn code_block(content: &str, sel: Range<usize>, lang: &str) -> Edit {
     let inner = &content[sel.clone()];
-    let body = if inner.is_empty() { "code" } else { inner };
+    let body = if !inner.is_empty() {
+        inner
+    } else if lang.is_empty() {
+        "code"
+    } else {
+        "SELECT 1;"
+    };
     // Fences must start on their own line.
     let lead = if sel.start == 0 || content[..sel.start].ends_with('\n') {
         ""
     } else {
         "\n"
     };
-    let text = format!("{lead}```\n{body}\n```");
-    let start = sel.start + lead.len() + 4;
+    let text = format!("{lead}```{lang}\n{body}\n```");
+    let start = sel.start + lead.len() + 4 + lang.len();
     Edit {
         range: sel,
         text,

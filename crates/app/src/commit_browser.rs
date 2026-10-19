@@ -8,6 +8,7 @@
 //! is virtualized, so thousands of commits stay cheap (CLAUDE.md GPUI and
 //! performance rules).
 
+use crate::theme::TypeScale;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::time::Duration;
@@ -23,6 +24,10 @@ use crate::date::{format_date, parse_date};
 use crate::state::AppState;
 use crate::text_input::TextInput;
 use crate::theme::GlassTheme;
+use crate::ui::{
+    back_button, button, chip, empty_state, filter_chip, icon, icon_button, notice, page_header,
+    section_label, status_style, ButtonKind, Icon,
+};
 
 /// Commits fetched per background page.
 const PAGE_SIZE: usize = 200;
@@ -625,33 +630,14 @@ impl CommitBrowser {
         cx.notify();
     }
 
+    /// A filter pill (see [`crate::ui::filter_chip`]).
     fn chip(
         &self,
         label: impl Into<SharedString>,
         active: bool,
         id: impl Into<gpui::ElementId>,
     ) -> gpui::Stateful<gpui::Div> {
-        let theme = self.theme;
-        div()
-            .id(id)
-            .flex_none()
-            .px(theme.space_3)
-            .py(theme.space_1)
-            .rounded(theme.radius_sm)
-            .border_1()
-            .text_xs()
-            .cursor_pointer()
-            .when(active, |d| {
-                d.border_color(theme.accent)
-                    .text_color(theme.accent)
-                    .bg(theme.accent.opacity(0.12))
-            })
-            .when(!active, |d| {
-                d.border_color(theme.border_subtle)
-                    .text_color(theme.text_secondary)
-                    .hover(move |s| s.bg(theme.surface_raised))
-            })
-            .child(label.into())
+        filter_chip(&self.theme, id, label, active)
     }
 
     fn render_row(
@@ -676,10 +662,11 @@ impl CommitBrowser {
         let extra = badges.len().saturating_sub(2);
 
         let short_hash = commit.hash[..7.min(commit.hash.len())].to_string();
+        let repo_tint = crate::theme::label_color(&theme, &entry.repo_name);
 
-        // Two lines like GitHub Desktop: the title on top (ellipsis when it
-        // is long), the details underneath, task badges pinned right. The row
-        // fills the list width so dividers and badges line up.
+        // Two lines: the title on top (ellipsis when it is long), the details
+        // underneath, task badges pinned right. The row fills the list width
+        // so dividers and badges line up.
         div()
             .id(("commit-row", visible_ix as u64))
             .flex()
@@ -687,13 +674,13 @@ impl CommitBrowser {
             .gap(theme.space_3)
             .w_full()
             .h(px(ROW_HEIGHT))
-            .pl(theme.space_2)
-            .pr(theme.space_4)
+            .pl(theme.space_3)
+            .pr(theme.space_6)
             .border_b_1()
             .border_color(theme.border_subtle)
             .cursor_pointer()
-            .when(selected, |d| d.bg(theme.accent.opacity(0.14)))
-            .when(!selected, |d| d.hover(move |s| s.bg(theme.surface_raised)))
+            .when(selected, |d| d.bg(theme.accent.opacity(0.10)))
+            .when(!selected, |d| d.hover(move |s| s.bg(theme.surface_hover)))
             .on_click(
                 cx.listener(move |this, event: &gpui::ClickEvent, _window, cx| {
                     this.click_row(visible_ix, event.modifiers(), cx);
@@ -705,7 +692,7 @@ impl CommitBrowser {
                 div()
                     .flex_none()
                     .w(px(3.0))
-                    .h(px(ROW_HEIGHT - 20.0))
+                    .h(px(ROW_HEIGHT - 24.0))
                     .rounded_full()
                     .bg(if selected {
                         theme.accent
@@ -719,11 +706,12 @@ impl CommitBrowser {
                     .flex_col()
                     .flex_1()
                     .min_w(px(0.0))
-                    .gap(theme.space_1)
+                    .gap(px(2.0))
                     .child(
                         div()
                             .truncate()
-                            .text_sm()
+                            .t_body()
+                            .t_strong()
                             .text_color(theme.text_primary)
                             .child(commit.summary.clone()),
                     )
@@ -732,22 +720,25 @@ impl CommitBrowser {
                             .flex()
                             .items_center()
                             .gap(theme.space_2)
-                            .text_xs()
+                            .t_small()
                             .text_color(theme.text_secondary)
                             .child(
                                 // Every row names its repo: a hash is only
                                 // unique within one repo.
                                 div()
                                     .flex_none()
-                                    .px(theme.space_1)
+                                    .px(theme.space_2)
                                     .rounded(theme.radius_sm)
-                                    .border_1()
-                                    .border_color(
-                                        crate::theme::label_color(&theme, &entry.repo_name)
-                                            .opacity(0.5),
-                                    )
-                                    .text_color(crate::theme::label_color(&theme, &entry.repo_name))
+                                    .bg(repo_tint.opacity(0.14))
+                                    .text_color(repo_tint)
                                     .child(entry.repo_name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .t_code()
+                                    .text_color(theme.text_muted)
+                                    .child(short_hash),
                             )
                             .child(
                                 div()
@@ -755,14 +746,11 @@ impl CommitBrowser {
                                     .max_w(px(180.0))
                                     .child(commit.author.clone()),
                             )
-                            .child("·")
-                            .child(div().flex_none().child(format_date(commit.time)))
-                            .child("·")
                             .child(
                                 div()
                                     .flex_none()
-                                    .font_family(crate::theme::MONO_FONT)
-                                    .child(short_hash),
+                                    .text_color(theme.text_muted)
+                                    .child(format_date(commit.time)),
                             ),
                     ),
             )
@@ -784,18 +772,18 @@ impl CommitBrowser {
                             .px(theme.space_2)
                             .py(px(1.0))
                             .rounded(theme.radius_sm)
-                            .border_1()
-                            .border_color(color.opacity(0.5))
-                            .bg(color.opacity(0.10))
-                            .text_xs()
+                            .bg(color.opacity(0.14))
+                            .t_small()
+                            .t_strong()
                             .text_color(color)
                             .child(title)
                     }))
                     .when(extra > 0, |d| {
                         d.child(
                             div()
-                                .text_xs()
-                                .text_color(theme.text_secondary)
+                                .t_small()
+                                .t_code()
+                                .text_color(theme.text_muted)
                                 .child(format!("+{extra}")),
                         )
                     }),
@@ -816,7 +804,7 @@ impl CommitBrowser {
             .px(theme.space_3)
             .py(theme.space_1)
             .rounded(theme.radius_sm)
-            .text_sm()
+            .t_body()
             .cursor_pointer()
             .truncate()
             .text_color(if active {
@@ -825,7 +813,7 @@ impl CommitBrowser {
                 theme.text_primary
             })
             .when(active, |d| d.bg(theme.accent.opacity(0.12)))
-            .hover(move |s| s.bg(theme.surface))
+            .hover(move |s| s.bg(theme.surface_hover))
             .child(name.to_owned())
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.branch_filter = if this.branch_filter.as_deref() == Some(target.as_str()) {
@@ -852,26 +840,38 @@ impl CommitBrowser {
             .items_center()
             .gap(theme.space_2)
             .max_w(px(320.0))
+            .h(px(24.0))
             .px(theme.space_3)
-            .py(theme.space_1)
             .rounded(theme.radius_sm)
             .border_1()
-            .text_xs()
+            .t_small()
+            .t_strong()
             .cursor_pointer()
             .border_color(if self.branch_filter.is_some() || self.branches_open {
-                theme.accent
+                theme.accent.opacity(0.4)
             } else {
                 theme.border_subtle
             })
-            .text_color(theme.text_primary)
-            .hover(move |s| s.bg(theme.surface_raised))
-            .child(div().text_color(theme.text_secondary).child("Branch:"))
+            .when(self.branch_filter.is_some(), |d| {
+                d.bg(theme.accent.opacity(0.12))
+            })
+            .text_color(if self.branch_filter.is_some() {
+                theme.accent
+            } else {
+                theme.text_secondary
+            })
+            .hover(move |s| s.bg(theme.surface_hover))
+            .child(icon(Icon::GitBranch, 13.0, theme.text_muted))
             .child(div().truncate().child(label))
-            .child(
-                div()
-                    .text_color(theme.text_secondary)
-                    .child(if self.branches_open { "▴" } else { "▾" }),
-            )
+            .child(icon(
+                if self.branches_open {
+                    Icon::ChevronUp
+                } else {
+                    Icon::ChevronDown
+                },
+                12.0,
+                theme.text_muted,
+            ))
             .on_click(cx.listener(|this, _, window, cx| {
                 this.branches_open = !this.branches_open;
                 if this.branches_open {
@@ -911,14 +911,14 @@ impl CommitBrowser {
                         .px(theme.space_3)
                         .py(theme.space_1)
                         .rounded(theme.radius_sm)
-                        .text_sm()
+                        .t_body()
                         .cursor_pointer()
                         .text_color(if self.branch_filter.is_none() {
                             theme.accent
                         } else {
                             theme.text_primary
                         })
-                        .hover(move |s| s.bg(theme.surface))
+                        .hover(move |s| s.bg(theme.surface_hover))
                         .child("All branches")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.branches_open = false;
@@ -939,7 +939,7 @@ impl CommitBrowser {
                         div()
                             .px(theme.space_3)
                             .py(theme.space_1)
-                            .text_xs()
+                            .t_small()
                             .text_color(theme.text_secondary)
                             .child("No matching branches"),
                     )
@@ -979,6 +979,7 @@ impl CommitBrowser {
             .flex_wrap()
             .items_center()
             .gap(theme.space_1)
+            .child(branch_row)
             .child(
                 div()
                     .w(px(160.0))
@@ -1025,13 +1026,12 @@ impl CommitBrowser {
             .flex()
             .flex_col()
             .gap(theme.space_1)
-            .child(branch_row)
             .child(date_row)
             .when_some(self.date_error.clone(), |d, error| {
-                d.child(div().text_xs().text_color(theme.danger).child(error))
+                d.child(div().t_small().text_color(theme.danger).child(error))
             })
             .when_some(missing_note, |d, note| {
-                d.child(div().text_xs().text_color(theme.warning).child(note))
+                d.child(div().t_small().text_color(theme.warning).child(note))
             })
             .into_any_element()
     }
@@ -1058,19 +1058,21 @@ impl CommitBrowser {
             .h_full()
             .min_h(px(0.0))
             .gap(theme.space_3)
-            .p(theme.space_3)
-            .bg(theme.surface)
+            .p(theme.space_4)
+            .bg(theme.surface_sunken)
             .border_l_1()
             .border_color(theme.border_subtle);
 
         if selected.is_empty() {
             return panel
-                .child(
-                    div()
-                        .text_color(theme.text_secondary)
-                        .text_sm()
-                        .child("Select one or more commits to map them to a task. Ctrl-click adds, Shift-click selects a range."),
-                )
+                .justify_center()
+                .child(empty_state(
+                    &theme,
+                    Icon::GitMerge,
+                    "Map commits to tasks",
+                    "Select one or more commits. Ctrl-click adds one, Shift-click selects a range.",
+                    None,
+                ))
                 .into_any_element();
         }
 
@@ -1079,23 +1081,19 @@ impl CommitBrowser {
                 .flex()
                 .items_center()
                 .justify_between()
-                .child(div().text_color(theme.text_primary).child(format!(
-                    "{} commit{} selected",
-                    selected.len(),
-                    if selected.len() == 1 { "" } else { "s" }
-                )))
                 .child(
                     div()
-                        .id("clear-selection")
-                        .text_xs()
-                        .text_color(theme.text_secondary)
-                        .cursor_pointer()
-                        .hover(move |s| s.text_color(theme.text_primary))
-                        .on_click(cx.listener(|this, _, _, cx| {
+                        .t_heading()
+                        .text_color(theme.text_primary)
+                        .child(format!("{} selected", selected.len())),
+                )
+                .child(
+                    button(&theme, "clear-selection", ButtonKind::Ghost, None, "Clear").on_click(
+                        cx.listener(|this, _, _, cx| {
                             this.selected.clear();
                             cx.notify();
-                        }))
-                        .child("Clear"),
+                        }),
+                    ),
                 ),
         );
 
@@ -1115,20 +1113,26 @@ impl CommitBrowser {
                             .gap(theme.space_1)
                             .p(theme.space_3)
                             .rounded(theme.radius_md)
-                            .bg(theme.surface_raised)
+                            .bg(theme.surface_hover)
                             .child(
                                 div()
-                                    .text_sm()
+                                    .t_body()
+                                    .t_strong()
                                     .text_color(theme.text_primary)
                                     .child(entry.commit.summary.clone()),
                             )
-                            .child(div().text_xs().text_color(theme.text_secondary).child(
+                            .child(div().t_small().t_code().text_color(theme.text_muted).child(
                                 format!(
-                                    "{} · {} · {} · {}",
+                                    "{} · {}",
                                     entry.repo_name,
-                                    entry.commit.author,
-                                    format_date(entry.commit.time),
                                     &entry.commit.hash[..10.min(entry.commit.hash.len())]
+                                ),
+                            ))
+                            .child(div().t_small().text_color(theme.text_secondary).child(
+                                format!(
+                                    "{} · {}",
+                                    entry.commit.author,
+                                    format_date(entry.commit.time)
                                 ),
                             )),
                     );
@@ -1138,14 +1142,8 @@ impl CommitBrowser {
                 .filter(|l| l.repo_id == key.0 && l.hash == key.1)
                 .collect();
             if !existing.is_empty() {
-                panel = panel
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.text_secondary)
-                            .child("MAPPED TO"),
-                    )
-                    .children(existing.into_iter().map(|link| {
+                panel = panel.child(section_label(&theme, "Mapped to")).children(
+                    existing.into_iter().map(|link| {
                         let id = link.id;
                         let color = status_color(&theme, link.status);
                         div()
@@ -1153,23 +1151,31 @@ impl CommitBrowser {
                             .items_center()
                             .justify_between()
                             .gap(theme.space_2)
-                            .px(theme.space_3)
                             .py(theme.space_2)
-                            .rounded(theme.radius_sm)
-                            .border_1()
+                            .border_b_1()
                             .border_color(theme.border_subtle)
                             .child(
                                 div()
                                     .flex()
                                     .flex_col()
+                                    .flex_1()
                                     .min_w(px(0.0))
-                                    .child(div().text_sm().text_color(theme.text_primary).child(
-                                        task_titles.get(&link.task_id).cloned().unwrap_or_default(),
-                                    ))
+                                    .child(
+                                        div()
+                                            .t_body()
+                                            .truncate()
+                                            .text_color(theme.text_primary)
+                                            .child(
+                                                task_titles
+                                                    .get(&link.task_id)
+                                                    .cloned()
+                                                    .unwrap_or_default(),
+                                            ),
+                                    )
                                     .when_some(link.note.clone(), |d, note| {
                                         d.child(
                                             div()
-                                                .text_xs()
+                                                .t_small()
                                                 .text_color(theme.text_secondary)
                                                 .child(note),
                                         )
@@ -1178,54 +1184,45 @@ impl CommitBrowser {
                             .child(
                                 div()
                                     .flex()
+                                    .flex_none()
                                     .items_center()
-                                    .gap(theme.space_2)
+                                    .gap(theme.space_1)
                                     .child(
-                                        div()
+                                        chip(&theme, status_label(link.status), color)
                                             .id(("link-status", id.0 as u64))
-                                            .px(theme.space_2)
-                                            .rounded(theme.radius_sm)
-                                            .border_1()
-                                            .border_color(color.opacity(0.5))
-                                            .text_xs()
-                                            .text_color(color)
                                             .cursor_pointer()
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.state.update(cx, |state, cx| {
                                                     state.cycle_link_status(id);
                                                     cx.notify();
                                                 });
-                                            }))
-                                            .child(status_label(link.status)),
+                                            })),
                                     )
                                     .child(
-                                        div()
-                                            .id(("link-remove", id.0 as u64))
-                                            .text_xs()
-                                            .text_color(theme.text_secondary)
-                                            .cursor_pointer()
-                                            .hover(move |s| s.text_color(theme.danger))
-                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                        icon_button(
+                                            &theme,
+                                            Icon::X,
+                                            ("link-remove", id.0 as u64),
+                                            theme.danger,
+                                        )
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
                                                 this.state.update(cx, |state, cx| {
                                                     state.unlink_commit(id);
                                                     cx.notify();
                                                 });
-                                            }))
-                                            .child("✕"),
+                                            }),
+                                        ),
                                     ),
                             )
-                    }));
+                    }),
+                );
             }
         }
 
         // Label + note for the commits about to be mapped.
         panel = panel
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.text_secondary)
-                    .child("LABEL"),
-            )
+            .child(section_label(&theme, "Label"))
             .child(div().flex().flex_wrap().gap(theme.space_1).children(
                 SELECTABLE_STATUSES.iter().map(|&status| {
                     self.chip(
@@ -1242,29 +1239,15 @@ impl CommitBrowser {
             .child(self.note_input.clone());
 
         if let Some((message, is_error)) = &self.notice {
-            panel = panel.child(
-                div()
-                    .text_xs()
-                    .text_color(if *is_error {
-                        theme.danger
-                    } else {
-                        theme.success
-                    })
-                    .child(message.clone()),
-            );
+            panel = panel.child(notice(&theme, message.clone(), *is_error));
         }
 
         // Task picker: the project's whole task tree, indented by depth.
-        panel = panel.child(
-            div()
-                .text_xs()
-                .text_color(theme.text_secondary)
-                .child("MAP TO TASK"),
-        );
+        panel = panel.child(section_label(&theme, "Map to task"));
         if tasks.is_empty() {
             panel = panel.child(
                 div()
-                    .text_sm()
+                    .t_small()
                     .text_color(theme.text_secondary)
                     .child("This project has no tasks yet. Create one on the project page first."),
             );
@@ -1276,35 +1259,48 @@ impl CommitBrowser {
                     .flex_col()
                     .flex_1()
                     .min_h(px(0.0))
-                    .gap(theme.space_1)
                     .overflow_y_scroll()
+                    .border_t_1()
+                    .border_color(theme.border_subtle)
                     .children(tasks.into_iter().map(|(task, depth)| {
                         let id = task.id;
                         let title = task.title.clone();
+                        let (status_glyph, status_tint) = status_style(&theme, task.status);
                         div()
                             .id(("map-task", id.0 as u64))
+                            .group("map-row")
                             .flex()
                             .items_center()
-                            .justify_between()
                             .gap(theme.space_2)
-                            .pl(theme.space_3 + px(16.0) * depth as f32)
-                            .pr(theme.space_3)
-                            .py(theme.space_2)
-                            .rounded(theme.radius_sm)
-                            .border_1()
+                            .min_h(px(36.0))
+                            .pl(theme.space_2 + px(16.0) * depth as f32)
+                            .pr(theme.space_2)
+                            .border_b_1()
                             .border_color(theme.border_subtle)
                             .cursor_pointer()
-                            .hover(move |s| s.bg(theme.surface_raised).border_color(theme.accent))
+                            .hover(move |s| s.bg(theme.surface_hover))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.map_selection_to(id, title.clone(), window, cx);
                             }))
+                            .child(icon(status_glyph, 14.0, status_tint))
                             .child(
                                 div()
-                                    .text_sm()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .truncate()
+                                    .t_body()
                                     .text_color(theme.text_primary)
                                     .child(task.title.clone()),
                             )
-                            .child(div().text_xs().text_color(theme.accent).child("Map here"))
+                            .child(
+                                div()
+                                    .t_small()
+                                    .t_strong()
+                                    .text_color(theme.accent)
+                                    .invisible()
+                                    .group_hover("map-row", |s| s.visible())
+                                    .child("Map here"),
+                            )
                     })),
             );
         }
@@ -1360,52 +1356,28 @@ impl Render for CommitBrowser {
             .flex_1()
             .size_full()
             .min_h(px(0.0))
-            .bg(theme.surface_solid)
-            .child(
-                // Header: back + title.
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(theme.space_3)
-                    .px(theme.space_4)
-                    .pt(theme.space_3)
-                    .child(
-                        div()
-                            .id("history-back")
-                            .px(theme.space_2)
-                            .rounded(theme.radius_sm)
-                            .text_color(theme.text_secondary)
-                            .cursor_pointer()
-                            .hover(move |s| {
-                                s.bg(theme.surface_raised).text_color(theme.text_primary)
-                            })
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                if let Some(close) = &this.on_close {
-                                    close(window, cx);
-                                }
-                            }))
-                            .child("←"),
-                    )
-                    .child(
-                        div()
-                            .text_xl()
-                            .text_color(theme.text_primary)
-                            .child("Commit history"),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme.text_secondary)
-                            .child(project_name),
-                    ),
-            )
+            .child(page_header(
+                &theme,
+                "Commit history",
+                Some(project_name.into()),
+                Some(
+                    back_button(&theme, "history-back")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            if let Some(close) = &this.on_close {
+                                close(window, cx);
+                            }
+                        }))
+                        .into_any_element(),
+                ),
+                None,
+            ))
             .child(
                 // Toolbar: search + filters.
                 div()
                     .flex()
                     .flex_col()
-                    .gap(theme.space_2)
-                    .px(theme.space_4)
+                    .gap(theme.space_3)
+                    .px(theme.space_6)
                     .py(theme.space_3)
                     .child(self.search_input.clone())
                     .child(
@@ -1461,12 +1433,13 @@ impl Render for CommitBrowser {
                     .child(self.render_filter_bar(cx))
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(theme.text_secondary)
+                            .t_small()
+                            .t_code()
+                            .text_color(theme.text_muted)
                             .child(status_line),
                     )
                     .when(!self.unreadable.is_empty(), |d| {
-                        d.child(div().text_xs().text_color(theme.warning).child(format!(
+                        d.child(div().t_small().text_color(theme.warning).child(format!(
                             "Couldn't read history for: {}",
                             self.unreadable.join(", ")
                         )))
