@@ -4,6 +4,7 @@
 //! the pre-1.0 API).
 
 mod attach_flow;
+mod clipboard_html;
 mod commit_browser;
 mod credentials_panel;
 mod date;
@@ -928,7 +929,7 @@ fn main() -> Result<()> {
                     cx.observe(&run_panel, |_, _, cx| cx.notify()).detach();
                     let root_for_timesheet: Entity<Root> = cx.entity();
                     let timesheet_panel = cx.new(|cx| {
-                        let mut panel = TimesheetPanel::new(cx, state.clone(), theme);
+                        let mut panel = TimesheetPanel::new(cx, state.clone(), settings.clone(), theme);
                         panel.on_close = Some(Box::new(move |_window, cx| {
                             root_for_timesheet.update(cx, |root, cx| {
                                 root.timesheet_open = false;

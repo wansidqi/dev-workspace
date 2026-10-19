@@ -32,6 +32,8 @@ impl AppState {
     }
 
     /// Active (unarchived) projects in sidebar order, each with its repos.
+    /// Projects with no linked git repo have no commits to report, so they
+    /// are left out of the timesheet.
     pub fn timesheet_projects(&self) -> Vec<TimesheetProject> {
         self.projects
             .iter()
@@ -40,6 +42,7 @@ impl AppState {
                 name: p.name.clone(),
                 repos: RepoRepo::list_for_project(&self.conn, p.id).unwrap_or_default(),
             })
+            .filter(|p| !p.repos.is_empty())
             .collect()
     }
 

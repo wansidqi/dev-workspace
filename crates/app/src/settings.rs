@@ -45,6 +45,11 @@ pub struct Settings {
     pub reduce_transparency: bool,
     /// Skip transitions: hover and selection changes are instant.
     pub reduce_motion: bool,
+    /// Ids of projects the user switched off in the timesheet (sorted).
+    pub timesheet_excluded: Vec<i64>,
+    /// Project ids in the order the user arranged them in the timesheet.
+    /// Projects not listed follow in sidebar order.
+    pub timesheet_order: Vec<i64>,
 }
 
 /// Terminal panel width limits and default, in pixels.
@@ -69,6 +74,8 @@ impl Default for Settings {
             theme_mode: ThemeMode::Dark,
             reduce_transparency: false,
             reduce_motion: false,
+            timesheet_excluded: Vec::new(),
+            timesheet_order: Vec::new(),
         }
     }
 }
@@ -120,6 +127,21 @@ impl Settings {
                 "reduce_motion" => {
                     settings.reduce_motion = matches!(value, "true" | "1");
                 }
+                "timesheet_excluded" => {
+                    let mut ids: Vec<i64> = value.split(',').filter_map(|s| parse_id(s.trim())).collect();
+                    ids.sort_unstable();
+                    ids.dedup();
+                    settings.timesheet_excluded = ids;
+                }
+                "timesheet_order" => {
+                    let mut ids: Vec<i64> = Vec::new();
+                    for id in value.split(',').filter_map(|s| parse_id(s.trim())) {
+                        if !ids.contains(&id) {
+                            ids.push(id);
+                        }
+                    }
+                    settings.timesheet_order = ids;
+                }
                 _ => {}
             }
         }
@@ -149,6 +171,14 @@ impl Settings {
             self.reduce_transparency
         ));
         out.push_str(&format!("reduce_motion={}\n", self.reduce_motion));
+        if !self.timesheet_excluded.is_empty() {
+            let ids: Vec<String> = self.timesheet_excluded.iter().map(i64::to_string).collect();
+            out.push_str(&format!("timesheet_excluded={}\n", ids.join(",")));
+        }
+        if !self.timesheet_order.is_empty() {
+            let ids: Vec<String> = self.timesheet_order.iter().map(i64::to_string).collect();
+            out.push_str(&format!("timesheet_order={}\n", ids.join(",")));
+        }
         let command: String = self
             .ide_command
             .chars()
@@ -303,6 +333,8 @@ mod tests {
             theme_mode: ThemeMode::Light,
             reduce_transparency: true,
             reduce_motion: true,
+            timesheet_excluded: vec![2, 5],
+            timesheet_order: vec![5, 2, 9],
         };
         assert_eq!(Settings::parse(&settings.serialize()), settings);
         assert_eq!(

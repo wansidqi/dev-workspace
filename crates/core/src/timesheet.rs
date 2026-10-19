@@ -500,6 +500,133 @@ pub fn clipboard_text(
         .join("\n")
 }
 
+fn html_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('\n', "<br>")
+}
+
+/// The same report as [`clipboard_text`], as one HTML table with borders,
+/// bold headings and centred columns, so a paste into Google Sheets or
+/// Excel keeps the look of the monthly sheet. Five columns (A to E).
+pub fn clipboard_html(
+    settings: &TimesheetSettings,
+    month: &str,
+    remarks: &str,
+    projects: &[(String, Vec<TimesheetRow>)],
+) -> String {
+    const BORDER: &str = "border:1px solid #000000;";
+    let mut out = String::from(
+        "<table style=\"border-collapse:collapse;font-family:Arial;font-size:10pt\">",
+    );
+    let blank = |out: &mut String, n: usize| {
+        for _ in 0..n {
+            out.push_str("<tr><td colspan=\"5\">&nbsp;</td></tr>");
+        }
+    };
+    let cell = |out: &mut String, style: &str, text: &str| {
+        out.push_str(&format!("<td style=\"{style}\">{}</td>", html_escape(text)));
+    };
+
+    out.push_str(&format!(
+        "<tr><td colspan=\"5\" style=\"font-weight:bold;text-align:center\">{}</td></tr>",
+        html_escape(&settings.title)
+    ));
+    blank(&mut out, 1);
+    for (label, value, align) in [
+        ("Resources Name:", settings.name.clone(), "left"),
+        ("Resources Role:", settings.role.clone(), "left"),
+        ("Period:", month_label(month), "right"),
+        ("REMARKS:", remarks.to_string(), "left"),
+    ] {
+        out.push_str("<tr>");
+        cell(&mut out, "font-weight:bold", label);
+        cell(&mut out, &format!("text-align:{align}"), &value);
+        out.push_str("<td></td><td></td><td></td></tr>");
+    }
+    blank(&mut out, 2);
+
+    for (name, rows) in projects {
+        let n = rows.len().max(settings.min_rows);
+        // 1-based sheet row of the column header; data starts below it.
+        // Rows so far = one per `<tr>` written, counted from the table.
+        let header_row = out.matches("<tr>").count() + 2;
+        let (first, last) = (header_row + 1, header_row + n);
+        out.push_str(&format!(
+            "<tr><td colspan=\"5\" style=\"font-weight:bold\">{}</td></tr>",
+            html_escape(name)
+        ));
+        out.push_str("<tr>");
+        for head in ["No.", "Tasks", "Date", "Time Spent (Hours)", "Total"] {
+            cell(
+                &mut out,
+                &format!("{BORDER}font-weight:bold;text-align:center"),
+                head,
+            );
+        }
+        out.push_str("</tr>");
+        for i in 0..n {
+            let row = rows.get(i);
+            out.push_str("<tr>");
+            cell(&mut out, &format!("{BORDER}text-align:center"), &(i + 1).to_string());
+            cell(
+                &mut out,
+                &format!("{BORDER}font-weight:bold"),
+                &row.map(|r| r.title.clone()).unwrap_or_default(),
+            );
+            cell(
+                &mut out,
+                &format!("{BORDER}text-align:center"),
+                &row.map(|r| fmt_range(&r.date_from, &r.date_to))
+                    .unwrap_or_default(),
+            );
+            cell(
+                &mut out,
+                &format!("{BORDER}text-align:center"),
+                &row.and_then(|r| r.hours.map(fmt_hours)).unwrap_or_default(),
+            );
+            cell(
+                &mut out,
+                &format!("{BORDER}text-align:right"),
+                &if i == 0 {
+                    format!("=SUM(D{first}:D{last})")
+                } else {
+                    String::new()
+                },
+            );
+            out.push_str("</tr>");
+        }
+        blank(&mut out, 3);
+    }
+    out.push_str("</table>");
+    out
+}
+
+/// Wraps an HTML fragment in the Windows "HTML Format" clipboard envelope
+/// (a header of byte offsets, then the document). Returns the bytes to put
+/// on the clipboard, without the trailing NUL.
+pub fn cf_html(fragment: &str) -> Vec<u8> {
+    const START: &str = "<html><body><!--StartFragment-->";
+    const END: &str = "<!--EndFragment--></body></html>";
+    let header = |start_html: usize, end_html: usize, start_frag: usize, end_frag: usize| {
+        format!(
+            "Version:0.9\r\nStartHTML:{start_html:010}\r\nEndHTML:{end_html:010}\r\n\
+             StartFragment:{start_frag:010}\r\nEndFragment:{end_frag:010}\r\n"
+        )
+    };
+    // The header has a fixed width, so its length is known up front.
+    let head_len = header(0, 0, 0, 0).len();
+    let start_frag = head_len + START.len();
+    let end_frag = start_frag + fragment.len();
+    let end_html = end_frag + END.len();
+    format!(
+        "{}{START}{fragment}{END}",
+        header(head_len, end_html, start_frag, end_frag)
+    )
+    .into_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,5 +796,23 @@ mod tests {
         );
         assert_eq!(lines[11], "2\t\t\t\t");
         assert_eq!(lines[12], "3\t\t\t\t");
+    }
+
+    #[test]
+    fn html_report_has_borders_and_cf_html_offsets_are_exact() {
+        let settings = TimesheetSettings::default();
+        let html = clipboard_html(&settings, "2026-10", "", &[("A & B".into(), Vec::new())]);
+        assert!(html.contains("border:1px solid"));
+        assert!(html.contains("A &amp; B"));
+        assert!(html.contains("=SUM(D"));
+        let bytes = cf_html(&html);
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        let num = |key: &str| -> usize {
+            let at = text.find(key).unwrap() + key.len();
+            text[at..at + 10].parse().unwrap()
+        };
+        assert!(text[num("StartHTML:")..].starts_with("<html>"));
+        assert_eq!(num("EndHTML:"), bytes.len());
+        assert_eq!(&text[num("StartFragment:")..num("EndFragment:")], html);
     }
 }

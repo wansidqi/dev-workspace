@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use devspace_core::{
-    clipboard_text, date_from_unix, fmt_hours, fmt_range, group_commits, merge_rows, month_bounds,
+    clipboard_html, clipboard_text, date_from_unix, fmt_hours, fmt_range, group_commits, merge_rows, month_bounds,
     month_from_unix, month_label, shift_month, total_hours, Estimate, ProjectId, TimesheetCommit,
     TimesheetRow, TimesheetSettings,
 };
@@ -22,6 +22,7 @@ use gpui::{
     Window,
 };
 
+use crate::settings::SettingsStore;
 use crate::state::{AppState, TimesheetProject};
 use crate::text_input::TextInput;
 use crate::theme::GlassTheme;
@@ -131,6 +132,10 @@ pub struct TimesheetPanel {
     /// `YYYY-MM` being shown.
     month: String,
     settings: TimesheetSettings,
+    settings_store: Entity<SettingsStore>,
+    /// Every project with a linked repo; the chips at the top toggle them.
+    all_projects: Vec<TimesheetProject>,
+    /// The ones switched on, which the tables are built for.
     projects: Vec<TimesheetProject>,
     tables: Vec<(ProjectId, Vec<TimesheetRow>)>,
     remarks: String,
@@ -149,13 +154,20 @@ pub struct TimesheetPanel {
 }
 
 impl TimesheetPanel {
-    pub fn new(cx: &mut Context<Self>, state: Entity<AppState>, theme: GlassTheme) -> Self {
+    pub fn new(
+        cx: &mut Context<Self>,
+        state: Entity<AppState>,
+        settings_store: Entity<SettingsStore>,
+        theme: GlassTheme,
+    ) -> Self {
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
         Self {
             state,
             theme,
             month: month_from_unix(now_unix()),
             settings: TimesheetSettings::default(),
+            settings_store,
+            all_projects: Vec::new(),
             projects: Vec::new(),
             tables: Vec::new(),
             remarks: String::new(),
@@ -174,23 +186,79 @@ impl TimesheetPanel {
         self.notice = Some((message.into(), is_error));
     }
 
+    /// Reads the projects that have a repo and keeps the ones the user has
+    /// not switched off for the timesheet.
+    fn load_projects(&mut self, cx: &mut Context<Self>) {
+        self.all_projects = self.state.read(cx).timesheet_projects();
+        let settings = self.settings_store.read(cx).get();
+        let order = &settings.timesheet_order;
+        // Stable sort: projects the user never arranged keep sidebar order, after the arranged ones.
+        self.all_projects
+            .sort_by_key(|p| order.iter().position(|id| *id == p.id.0).unwrap_or(usize::MAX));
+        let excluded = &settings.timesheet_excluded;
+        self.projects = self
+            .all_projects
+            .iter()
+            .filter(|p| !excluded.contains(&p.id.0))
+            .cloned()
+            .collect();
+    }
+
+    /// Moves a project one place earlier (`-1`) or later (`1`) in the
+    /// timesheet and in the copied report.
+    fn move_project(&mut self, project: ProjectId, delta: i32, cx: &mut Context<Self>) {
+        let mut ids: Vec<i64> = self.all_projects.iter().map(|p| p.id.0).collect();
+        let Some(at) = ids.iter().position(|id| *id == project.0) else {
+            return;
+        };
+        let to = at as i32 + delta;
+        if to < 0 || to as usize >= ids.len() {
+            return;
+        }
+        ids.swap(at, to as usize);
+        self.settings_store
+            .update(cx, |store, cx| store.update(cx, |s| s.timesheet_order = ids));
+        self.load_projects(cx);
+        cx.notify();
+    }
+
+    /// Switches a project in or out of the timesheet and fills it from git.
+    fn toggle_project(&mut self, project: ProjectId, cx: &mut Context<Self>) {
+        self.settings_store.update(cx, |store, cx| {
+            store.update(cx, |s| {
+                if let Some(at) = s.timesheet_excluded.iter().position(|id| *id == project.0) {
+                    s.timesheet_excluded.remove(at);
+                } else {
+                    s.timesheet_excluded.push(project.0);
+                    s.timesheet_excluded.sort_unstable();
+                }
+            });
+        });
+        self.refresh(cx);
+        self.sync(cx);
+    }
+
     /// Reloads settings, projects and the month from the database. A month
     /// that was never saved is filled from git right away.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.editor = None;
-        let (settings, projects, month) = {
+        let (settings, month) = {
             let state = self.state.read(cx);
             (
                 state.timesheet_settings(),
-                state.timesheet_projects(),
                 state.load_timesheet_month(&self.month),
             )
         };
         self.settings = settings;
-        self.projects = projects;
+        self.load_projects(cx);
         match month {
             Ok(month) => {
-                self.tables = month.tables;
+                let shown = &self.projects;
+                self.tables = month
+                    .tables
+                    .into_iter()
+                    .filter(|(id, _)| shown.iter().any(|p| p.id == *id))
+                    .collect();
                 self.remarks = month.remarks;
                 if !month.saved {
                     self.sync(cx);
@@ -241,7 +309,7 @@ impl TimesheetPanel {
             return;
         };
         self.settings = self.state.read(cx).timesheet_settings();
-        self.projects = self.state.read(cx).timesheet_projects();
+        self.load_projects(cx);
         self.syncing = true;
         self.notice = None;
         let epoch = self.sync_epoch;
@@ -500,12 +568,23 @@ impl TimesheetPanel {
             .collect();
         let text = clipboard_text(&self.settings, &self.month, &self.remarks, &tables);
         cx.write_to_clipboard(ClipboardItem::new_string(text));
+        // Second flavour with borders and bold, picked up by Sheets and Excel.
+        let html = clipboard_html(&self.settings, &self.month, &self.remarks, &tables);
+        let styled = crate::clipboard_html::add_html(&html);
         let label = month_label(&self.month);
         self.set_notice(
-            format!(
-                "Copied. In your timesheet add a tab named \"{label}\", click cell A1 and paste \
-                 (Ctrl+V). Values and the SUM formulas come across; fonts and borders do not."
-            ),
+            if styled {
+                format!(
+                    "Copied. In your timesheet add a tab named \"{label}\", click cell A1 and \
+                     paste (Ctrl+V). Borders, bold text and the SUM formulas come across."
+                )
+            } else {
+                format!(
+                    "Copied as plain text. In your timesheet add a tab named \"{label}\", click \
+                     cell A1 and paste (Ctrl+V). Values and the SUM formulas come across; fonts \
+                     and borders do not."
+                )
+            },
             false,
         );
         cx.notify();
@@ -890,6 +969,53 @@ impl TimesheetPanel {
             .into_any_element()
     }
 
+    /// One chip per project with a repo; a lit chip is part of the timesheet.
+    fn render_project_toggles(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let theme = self.theme;
+        let excluded = self.settings_store.read(cx).get().timesheet_excluded.clone();
+        let chips: Vec<AnyElement> = self
+            .all_projects
+            .iter()
+            .map(|p| {
+                let id = p.id;
+                div()
+                    .flex()
+                    .items_center()
+                    .child(
+                        icon_button(&theme, "‹", ("ts-earlier", id.0 as u64))
+                            .on_click(cx.listener(move |this, _, _, cx| this.move_project(id, -1, cx))),
+                    )
+                    .child(
+                        crate::ui::filter_chip(
+                            &theme,
+                            ("ts-include", id.0 as u64),
+                            p.name.clone(),
+                            !excluded.contains(&id.0),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_project(id, cx))),
+                    )
+                    .child(
+                        icon_button(&theme, "›", ("ts-later", id.0 as u64))
+                            .on_click(cx.listener(move |this, _, _, cx| this.move_project(id, 1, cx))),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        div()
+            .flex()
+            .flex_col()
+            .gap(theme.space_2)
+            .child(section_label(&theme, "Include in timesheet (‹ › to reorder)"))
+            .child(if chips.is_empty() {
+                div()
+                    .t_small()
+                    .text_color(theme.text_secondary)
+                    .child("Only projects with a linked git repo can be added.")
+            } else {
+                div().flex().flex_wrap().gap(theme.space_2).children(chips)
+            })
+    }
+
     fn render_project(&self, project: &TimesheetProject, cx: &mut Context<Self>) -> AnyElement {
         let theme = self.theme;
         let rows: &[TimesheetRow] = self
@@ -1123,6 +1249,7 @@ impl Render for TimesheetPanel {
                         el.child(crate::ui::notice(&theme, message, is_error))
                     })
                     .when_some(self.render_settings(cx), |el, form| el.child(form))
+                    .child(self.render_project_toggles(cx))
                     .child(
                         div()
                             .flex()
