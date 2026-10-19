@@ -415,12 +415,12 @@ in SQLite (`app.db`) instead.
   comment in that file) — covers normal shell use, not the full modifier
   matrix zed's `terminal::mappings::keys` implements; expand there if a
   workflow needs e.g. shift-arrow or alt-modified keys.
-- The terminal toggle button almost went in the custom titlebar's top-right
+- A terminal toggle button almost went in the custom titlebar's top-right
   corner — don't do that. On Windows, the OS still paints native
   minimize/maximize/close caption buttons over that corner even with
   `appears_transparent: true` and no native titlebar content, silently
   eating anything GPUI draws underneath. Interactive controls belong
-  elsewhere in the chrome (this one lives in the sidebar).
+  elsewhere in the chrome (the sidebar button that once held it was removed; Ctrl+` and the palette toggle the terminal).
 - Migration 2 (`crates/storage/src/migrations.rs`) added
   `UNIQUE(task_id, repo_id, hash)` plus two triggers
   (`commit_links_same_project_insert/update`) so the project-scope rule holds

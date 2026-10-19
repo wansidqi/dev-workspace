@@ -843,47 +843,6 @@ impl Render for Root {
                 div()
                     .mt(theme.space_1)
                     .child(self.timesheet_sidebar_row(cx)),
-            )
-            .child(
-                div()
-                    .id("toggle-terminal")
-                    .mt(theme.space_3)
-                    .flex()
-                    .items_center()
-                    .gap(theme.space_2)
-                    .px(theme.space_3)
-                    .py(theme.space_2)
-                    .rounded(theme.radius_md)
-                    .cursor_pointer()
-                    .border_1()
-                    .border_color(if self.terminal_open {
-                        theme.border_light
-                    } else {
-                        gpui::transparent_black()
-                    })
-                    .hover(move |s| s.bg(theme.surface_raised).border_color(theme.border_subtle))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.toggle_terminal(window, cx);
-                    }))
-                    .child(
-                        div()
-                            .size(px(6.0))
-                            .rounded_full()
-                            .bg(if self.terminal_open {
-                                theme.accent
-                            } else {
-                                gpui::transparent_black()
-                            }),
-                    )
-                    .child(
-                        div()
-                            .text_color(theme.text_secondary)
-                            .child(if self.terminal_open {
-                                "Hide terminal"
-                            } else {
-                                "Show terminal"
-                            }),
-                    ),
             );
 
         let main_panel = div()
