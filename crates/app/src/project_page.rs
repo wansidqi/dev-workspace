@@ -331,6 +331,10 @@ impl Root {
             repo_count,
             if repo_count == 1 { "" } else { "s" }
         );
+        let folder_path = self.state.read(cx).project_folder_path.clone();
+        let has_folder = folder_path.is_some();
+        let folder_label = folder_path
+            .unwrap_or_else(|| "No project folder: Open in IDE uses the first repo".to_string());
         div()
             .flex()
             .flex_col()
@@ -357,7 +361,45 @@ impl Root {
                                     .truncate()
                                     .child(project.name.clone()),
                             )
-                            .child(div().t_small().text_color(theme.text_secondary).child(meta)),
+                            .child(div().t_small().text_color(theme.text_secondary).child(meta))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(theme.space_1)
+                                    .min_w(px(0.0))
+                                    .child(icon(Icon::FolderOpen, 13.0, theme.text_muted))
+                                    .child(
+                                        div()
+                                            .t_small()
+                                            .t_code()
+                                            .truncate()
+                                            .text_color(if has_folder {
+                                                theme.text_secondary
+                                            } else {
+                                                theme.text_muted
+                                            })
+                                            .child(folder_label),
+                                    )
+                                    .when(has_folder, |d| {
+                                        d.child(
+                                            icon_button(
+                                                &theme,
+                                                Icon::X,
+                                                "project-folder-clear",
+                                                theme.text_muted,
+                                            )
+                                            .on_click(
+                                                cx.listener(|this, _, _, cx| {
+                                                    this.state.update(cx, |state, cx| {
+                                                        state.set_project_folder(None);
+                                                        cx.notify();
+                                                    });
+                                                }),
+                                            ),
+                                        )
+                                    }),
+                            ),
                     )
                     .child(
                         div()
@@ -365,6 +407,18 @@ impl Root {
                             .flex_none()
                             .items_center()
                             .gap(theme.space_2)
+                            .child(
+                                button(
+                                    &theme,
+                                    "browse-project-folder",
+                                    ButtonKind::Secondary,
+                                    Some(Icon::FolderOpen),
+                                    "Set folder",
+                                )
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.browse_project_folder(cx)),
+                                ),
+                            )
                             .child(
                                 button(
                                     &theme,

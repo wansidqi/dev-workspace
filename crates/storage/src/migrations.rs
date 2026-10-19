@@ -194,6 +194,18 @@ const MIGRATIONS: &[(i64, &str)] = &[
         );
         "#,
     ),
+    (
+        5,
+        r#"
+        -- Optional folder "Open in IDE" and new terminals start in, for
+        -- projects whose repos live side by side under one parent. A
+        -- separate table keeps `projects` (and its imports) unchanged.
+        CREATE TABLE project_folders (
+            project_id INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+            path       TEXT NOT NULL
+        );
+        "#,
+    ),
 ];
 
 /// The newest schema version this build knows. Import refuses databases
@@ -300,7 +312,7 @@ mod tests {
         let versions: i64 = conn
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(versions, 4);
+        assert_eq!(versions, 5);
     }
 
     #[test]

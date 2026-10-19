@@ -8,6 +8,7 @@ mod import;
 mod migrations;
 mod notes;
 mod paths;
+mod project_folders;
 mod projects;
 mod repos;
 mod run_commands;
@@ -25,6 +26,7 @@ pub use import::{import_project, import_project_with_limits, ImportLimits, Impor
 pub use migrations::run_migrations;
 pub use notes::NoteRepo;
 pub use paths::WorkspacePaths;
+pub use project_folders::ProjectFolderRepo;
 pub use projects::ProjectRepo;
 pub use repos::RepoRepo;
 pub use run_commands::RunCommandRepo;

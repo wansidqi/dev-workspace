@@ -8,7 +8,8 @@ use devspace_core::{
     TaskPriority, TaskStatus,
 };
 use devspace_storage::{
-    AttachmentRepo, CommitLinkRepo, NoteRepo, ProjectRepo, RepoRepo, TaskRepo, WorkspacePaths,
+    AttachmentRepo, CommitLinkRepo, NoteRepo, ProjectFolderRepo, ProjectRepo, RepoRepo, TaskRepo,
+    WorkspacePaths,
 };
 use rusqlite::Connection;
 
@@ -66,6 +67,9 @@ pub struct AppState {
     pub tasks: Vec<Task>,
     pub notes: Vec<Note>,
     pub repos: Vec<Repo>,
+    /// The selected project's chosen working folder, if any; "Open in IDE"
+    /// and new terminals prefer it over the first repo.
+    pub project_folder_path: Option<String>,
     /// Recent commits across the selected project's linked repos, newest
     /// first. Recomputed on `select_project`/repo link/unlink rather than
     /// per-render, since each refresh opens the repo and walks its history.
@@ -116,6 +120,7 @@ impl AppState {
             tasks: Vec::new(),
             notes: Vec::new(),
             repos: Vec::new(),
+            project_folder_path: None,
             recent_commits: Vec::new(),
             unreadable_repos: Vec::new(),
             commit_links: Vec::new(),
@@ -191,6 +196,7 @@ impl AppState {
         if let Some(max) = self.repos.iter().map(|r| r.id.0).max() {
             self.next_repo_id = self.next_repo_id.max(max + 1);
         }
+        self.project_folder_path = ProjectFolderRepo::get(&self.conn, id).unwrap_or_default();
         self.reload_recent_commits();
         self.reload_commit_links();
         self.reload_attachments();
@@ -742,22 +748,51 @@ impl AppState {
     }
 
     /// Where a terminal opened for the selected project should start
-    /// (CLAUDE.md: "starting in the project folder"): the first linked
-    /// repo's path, or the user's home directory if none is linked yet.
+    /// (CLAUDE.md: "starting in the project folder"): the chosen project
+    /// folder, else the first linked repo's path, else the user's home
+    /// directory.
     pub fn terminal_cwd(&self) -> std::path::PathBuf {
-        self.repos
-            .first()
-            .map(|repo| std::path::PathBuf::from(&repo.path))
+        self.chosen_folder()
+            .or_else(|| {
+                self.repos
+                    .first()
+                    .map(|repo| std::path::PathBuf::from(&repo.path))
+            })
             .or_else(dirs::home_dir)
             .unwrap_or_else(|| self.paths.root().to_path_buf())
     }
 
+    /// The user's chosen project folder, unless it has since been moved or
+    /// deleted (then callers fall back to the first repo).
+    fn chosen_folder(&self) -> Option<std::path::PathBuf> {
+        let path = std::path::PathBuf::from(self.project_folder_path.as_deref()?);
+        path.is_dir().then_some(path)
+    }
+
+    /// Sets (`Some`) or clears (`None`) the selected project's folder.
+    pub fn set_project_folder(&mut self, path: Option<&str>) {
+        let Some(project) = self.selected_project else {
+            return;
+        };
+        let saved = match path {
+            Some(path) => ProjectFolderRepo::set(&self.conn, project, path),
+            None => ProjectFolderRepo::clear(&self.conn, project),
+        };
+        if saved.is_ok() {
+            self.project_folder_path = path.map(str::to_string);
+        }
+    }
+
     // --- hooks for settings.rs / ide.rs / workspace_tools.rs -------------
 
-    /// The folder "Open in IDE" should open: the first linked repo, or the
-    /// project's own data folder when none is linked yet.
+    /// The folder "Open in IDE" should open: the chosen project folder, else
+    /// the first linked repo, or the project's own data folder when none is
+    /// linked yet.
     pub fn project_folder(&self) -> Option<std::path::PathBuf> {
         let project = self.selected_project?;
+        if let Some(folder) = self.chosen_folder() {
+            return Some(folder);
+        }
         match self.repos.first() {
             Some(repo) => Some(std::path::PathBuf::from(&repo.path)),
             None => {

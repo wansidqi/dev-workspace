@@ -484,6 +484,33 @@ impl Root {
         .detach();
     }
 
+    /// Opens the OS folder picker and stores the chosen folder as the
+    /// selected project's working folder (what "Open in IDE" opens).
+    fn browse_project_folder(&mut self, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Project folder".into()),
+        });
+        let state = self.state.clone();
+        cx.spawn(async move |_this, cx| {
+            // Err = picker unavailable, Ok(None) = cancelled.
+            let Ok(Ok(Some(paths))) = picked.await else {
+                return;
+            };
+            let Some(chosen) = paths.into_iter().next() else {
+                return;
+            };
+            let path = chosen.to_string_lossy().to_string();
+            state.update(cx, |state, cx| {
+                state.set_project_folder(Some(&path));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Opens the commit history browser in place of the main content, or
     /// closes it if already open.
     fn toggle_history(&mut self, cx: &mut Context<Self>) {
@@ -929,7 +956,8 @@ fn main() -> Result<()> {
                     cx.observe(&run_panel, |_, _, cx| cx.notify()).detach();
                     let root_for_timesheet: Entity<Root> = cx.entity();
                     let timesheet_panel = cx.new(|cx| {
-                        let mut panel = TimesheetPanel::new(cx, state.clone(), settings.clone(), theme);
+                        let mut panel =
+                            TimesheetPanel::new(cx, state.clone(), settings.clone(), theme);
                         panel.on_close = Some(Box::new(move |_window, cx| {
                             root_for_timesheet.update(cx, |root, cx| {
                                 root.timesheet_open = false;

@@ -47,7 +47,7 @@ Run `fmt`, `clippy` and `test` before every commit.
 cargo build --release
 ```
 
-The optimised executable is `target\release\devspace.exe`. It is a single file: the fonts and icons are embedded, and the Windows application icon is added by `crates/app/build.rs`, so you can copy the `.exe` anywhere and run it.
+The optimised executable is `target\release\devspace.exe` (in this repo: `D:\dev\dev-workspace\target\release\devspace.exe`; the debug build is `target\debug\devspace.exe`). It is a single file: the fonts and icons are embedded, and the Windows application icon is added by `crates/app/build.rs`, so you can copy the `.exe` anywhere and run it.
 
 Production notes:
 
