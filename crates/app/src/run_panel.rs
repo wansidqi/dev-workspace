@@ -19,7 +19,7 @@ use devspace_core::{ProjectId, RunCommandId};
 use devspace_runner::{RunState, RunningCommand};
 use gpui::{
     div, prelude::*, px, uniform_list, AnyElement, App, ClipboardItem, Context, Entity, Hsla,
-    SharedString, UniformListScrollHandle, WeakEntity, Window,
+    PathPromptOptions, SharedString, UniformListScrollHandle, WeakEntity, Window,
 };
 
 use crate::state::AppState;
@@ -332,6 +332,41 @@ impl RunPanel {
         });
     }
 
+    /// Puts `path` in the form's working directory box (empty = default).
+    fn set_cwd(&mut self, path: String, cx: &mut Context<Self>) {
+        if let Some(form) = &self.form {
+            form.cwd.update(cx, |input, cx| {
+                input.set_text_selected(path);
+                cx.notify();
+            });
+        }
+        // Re-render so the chip matching the new path lights up.
+        cx.notify();
+    }
+
+    /// Opens the folder picker and fills the working directory with the choice.
+    fn browse_cwd(&mut self, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose working directory".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            // Err = picker unavailable, Ok(None) = cancelled.
+            let Ok(Ok(Some(paths))) = picked.await else {
+                return;
+            };
+            let Some(chosen) = paths.into_iter().next() else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.set_cwd(chosen.to_string_lossy().to_string(), cx);
+            });
+        })
+        .detach();
+    }
+
     /// Saves the form. `pressed` carries the text of the input Enter was hit
     /// in, since that input has already been cleared by then.
     fn save_form(&mut self, pressed: Option<(Field, String)>, cx: &mut Context<Self>) {
@@ -394,6 +429,44 @@ impl RunPanel {
         )
     }
 
+    /// Click-to-fill choices for the working directory: the project default,
+    /// each linked repo, and a folder picker.
+    fn render_cwd_choices(&self, form: &Form, cx: &mut Context<Self>) -> gpui::Div {
+        let theme = self.theme;
+        let current = form.cwd.read(cx).content.trim().to_string();
+        let repos = self.state.read(cx).repos.clone();
+        let mut chips: Vec<AnyElement> = Vec::new();
+        chips.push(
+            ui::filter_chip(&theme, "run-cwd-default", "Project default", current.is_empty())
+                .on_click(cx.listener(|this, _, _, cx| this.set_cwd(String::new(), cx)))
+                .into_any_element(),
+        );
+        for repo in repos {
+            let path = repo.path.clone();
+            chips.push(
+                ui::filter_chip(
+                    &theme,
+                    ("run-cwd-repo", repo.id.0 as u64),
+                    repo.name.clone(),
+                    current == repo.path,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.set_cwd(path.clone(), cx)))
+                .into_any_element(),
+            );
+        }
+        chips.push(
+            ui::button(&theme, "run-cwd-browse", ButtonKind::Ghost, Some(Icon::FolderOpen), "Browse")
+                .on_click(cx.listener(|this, _, _, cx| this.browse_cwd(cx)))
+                .into_any_element(),
+        );
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(theme.space_2)
+            .children(chips)
+    }
+
     fn render_form(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = self.theme;
         let form = self.form.as_ref()?;
@@ -428,6 +501,7 @@ impl RunPanel {
                 .child(field("Name", &form.name))
                 .child(field("Command", &form.command))
                 .child(field("Working directory", &form.cwd))
+                .child(self.render_cwd_choices(form, cx))
                 .when_some(form.error.clone(), |el, message| {
                     el.child(ui::notice(&theme, message, true))
                 })
