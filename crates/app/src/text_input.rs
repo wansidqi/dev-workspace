@@ -353,6 +353,15 @@ impl TextInput {
             .unwrap_or(self.content.len())
     }
 
+    /// Fills the input with `text` and selects all of it, so typing replaces it
+    /// (used when editing an existing value, e.g. renaming).
+    pub fn set_text_selected(&mut self, text: impl Into<SharedString>) {
+        self.content = text.into();
+        self.selected_range = 0..self.content.len();
+        self.selection_reversed = false;
+        self.marked_range = None;
+    }
+
     pub fn reset(&mut self, window: &Window, cx: &mut Context<Self>) {
         self.content = "".into();
         self.selected_range = 0..0;
@@ -750,6 +759,7 @@ impl Element for TextElement {
 
 impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.theme = crate::theme::current(cx);
         let theme = self.theme;
         div()
             .flex()

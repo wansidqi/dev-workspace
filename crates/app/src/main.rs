@@ -11,6 +11,7 @@ mod external;
 mod ide;
 mod markdown;
 mod markdown_view;
+mod motion;
 mod note_editor;
 mod note_format;
 mod note_page;
@@ -35,8 +36,8 @@ use devspace_core::{Note, NoteId, NoteKind, Project, ProjectId, Repo, Task, Task
 use devspace_storage::{run_migrations, WorkspacePaths};
 use gpui::{
     actions, div, prelude::*, px, size, App, Bounds, Context, Entity, KeyBinding,
-    PathPromptOptions, SharedString, TitlebarOptions, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowControlArea, WindowOptions,
+    PathPromptOptions, SharedString, TitlebarOptions, Window, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowOptions,
 };
 use note_editor::NoteEditor;
 use project_files::ProjectFiles;
@@ -46,7 +47,7 @@ use state::AppState;
 use task_detail::TaskDetail;
 use terminal_panel::TerminalPanel;
 use text_input::TextInput;
-use theme::GlassTheme;
+use theme::{ActiveTheme, GlassTheme};
 use timesheet_panel::TimesheetPanel;
 use workspace_tools::WorkspaceTools;
 
@@ -67,6 +68,11 @@ actions!(
 struct Root {
     state: Entity<AppState>,
     theme: GlassTheme,
+    /// Window backdrop currently applied (blurred, or opaque when transparency
+    /// is reduced).
+    background: WindowBackgroundAppearance,
+    /// Key of the hover-animated row under the pointer (see `set_hover`).
+    hovered: Option<u64>,
     new_project_input: Entity<TextInput>,
     new_task_input: Entity<TextInput>,
     new_note_input: Entity<TextInput>,
@@ -173,6 +179,56 @@ fn titlebar(theme: &GlassTheme) -> impl IntoElement {
                 .text_color(theme.text_secondary)
                 .child("Devspace"),
         )
+}
+
+/// A fixed sidebar navigation row: its element id, its key for hover tracking
+/// (project rows add their id to [`PROJECT_HOVER_KEY_BASE`], so the ranges
+/// never collide) and its label.
+#[derive(Clone, Copy)]
+pub(crate) struct NavItem {
+    pub id: &'static str,
+    pub hover_key: u64,
+    pub label: &'static str,
+}
+
+pub(crate) const NAV_HISTORY: NavItem = NavItem {
+    id: "open-history",
+    hover_key: 1,
+    label: "Commit history",
+};
+pub(crate) const NAV_RUN: NavItem = NavItem {
+    id: "open-run-commands",
+    hover_key: 2,
+    label: "Run commands",
+};
+pub(crate) const NAV_TIMESHEET: NavItem = NavItem {
+    id: "open-timesheet",
+    hover_key: 3,
+    label: "Timesheet",
+};
+pub(crate) const NAV_CREDENTIALS: NavItem = NavItem {
+    id: "open-credentials",
+    hover_key: 4,
+    label: "Credentials",
+};
+const PROJECT_HOVER_KEY_BASE: u64 = 1_000_000;
+
+/// Whether the OS is in a dark appearance.
+fn os_is_dark(appearance: WindowAppearance) -> bool {
+    matches!(
+        appearance,
+        WindowAppearance::Dark | WindowAppearance::VibrantDark
+    )
+}
+
+/// Window backdrop for a transparency setting: blurred normally, opaque when
+/// the user asked to reduce transparency.
+fn background_for(reduce_transparency: bool) -> WindowBackgroundAppearance {
+    if reduce_transparency {
+        WindowBackgroundAppearance::Opaque
+    } else {
+        WindowBackgroundAppearance::MicaBackdrop
+    }
 }
 
 /// A small text-glyph icon button (pencil, trash, ...). GPUI has no icon font
@@ -605,6 +661,97 @@ impl Root {
         cx.notify();
     }
 
+    /// A sidebar navigation row (dot, label, optional badge) whose surface
+    /// fades in while it is open or hovered. `hover_key` identifies it in
+    /// [`Root::set_hover`]; `id` names the element and its transition.
+    pub(crate) fn nav_row(
+        &self,
+        item: NavItem,
+        open: bool,
+        badge: Option<gpui::AnyElement>,
+        on_click: impl Fn(&mut Root, &mut Context<Root>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let NavItem {
+            id,
+            hover_key,
+            label,
+        } = item;
+        let theme = self.theme;
+        let active = open || self.hovered == Some(hover_key);
+        let row = div()
+            .id(id)
+            .flex()
+            .items_center()
+            .gap(theme.space_2)
+            .px(theme.space_3)
+            .py(theme.space_2)
+            .rounded(theme.radius_md)
+            .cursor_pointer()
+            .border_1()
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                this.set_hover(hover_key, *hovered, cx);
+            }))
+            .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
+            .child(div().size(px(6.0)).rounded_full().bg(if open {
+                theme.accent
+            } else {
+                gpui::transparent_black()
+            }))
+            .child(div().text_color(theme.text_secondary).child(label))
+            .children(badge);
+        motion::fade(
+            row,
+            gpui::ElementId::Name(format!("{id}-fade").into()),
+            active,
+            theme.surface_raised,
+            if open {
+                theme.border_light
+            } else {
+                theme.border_subtle
+            },
+        )
+    }
+
+    /// Records that the pointer entered or left the row with this key, so its
+    /// hover transition can run. Only a real change re-renders.
+    pub(crate) fn set_hover(&mut self, key: u64, hovered: bool, cx: &mut Context<Self>) {
+        let next = if hovered {
+            Some(key)
+        } else if self.hovered == Some(key) {
+            None
+        } else {
+            self.hovered
+        };
+        if next != self.hovered {
+            self.hovered = next;
+            cx.notify();
+        }
+    }
+
+    /// Applies the theme settings: picks the palette (following the OS for
+    /// "Follow system"), switches the window backdrop between blurred and
+    /// opaque, and redraws every window when anything changed.
+    fn apply_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let settings = self.settings.read(cx).get().clone();
+        let wanted = GlassTheme::resolve(
+            settings.theme_mode,
+            os_is_dark(window.appearance()),
+            settings.reduce_transparency,
+        );
+        let background = background_for(settings.reduce_transparency);
+        if background != self.background {
+            window.set_background_appearance(background);
+            self.background = background;
+        }
+        cx.set_reduce_motion(settings.reduce_motion);
+        if theme::current(cx) != wanted {
+            cx.set_global(ActiveTheme(wanted));
+            cx.refresh_windows();
+        }
+        cx.notify();
+    }
+
     /// Records what should be restored next launch (selected project, open
     /// task page, terminal visibility). The store only writes when a value
     /// actually changed, and debounces, so calling this per render is cheap.
@@ -637,6 +784,7 @@ impl Root {
 
 impl Render for Root {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.theme = crate::theme::current(cx);
         self.sync_settings(cx);
         let theme = self.theme;
         let state = self.state.read(cx);
@@ -799,66 +947,48 @@ impl Render for Root {
                             ),
                     );
 
-                let row = if selected {
-                    row.bg(theme.surface_raised)
-                        .border_1()
-                        .border_color(theme.border_light)
-                        .shadow_sm()
-                } else {
-                    row.border_1()
-                        .border_color(gpui::transparent_black())
-                        .hover(move |s| {
-                            s.bg(theme.surface_raised).border_color(theme.border_subtle)
-                        })
-                };
-
-                row.on_click(cx.listener(move |this, _, _, cx| {
-                    // The history view belongs to one project: leave it.
-                    this.open_history = None;
-                    this.open_task = None;
-                    this.open_note = None;
-                    this.state.update(cx, |state, _| {
-                        state.select_project(id);
-                    });
-                    cx.notify();
-                }))
+                // Selected or hovered rows fade their surface in and out.
+                let key = PROJECT_HOVER_KEY_BASE + id.0 as u64;
+                let active = selected || self.hovered == Some(key);
+                let row = row
+                    .border_1()
+                    .when(selected, |r| r.shadow_sm())
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        this.set_hover(key, *hovered, cx);
+                    }))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        // The history view belongs to one project: leave it.
+                        this.open_history = None;
+                        this.open_task = None;
+                        this.open_note = None;
+                        this.state.update(cx, |state, _| {
+                            state.select_project(id);
+                        });
+                        cx.notify();
+                    }));
+                motion::fade(
+                    row,
+                    ("project-fade", id.0 as u64),
+                    active,
+                    theme.surface_raised,
+                    if selected {
+                        theme.border_light
+                    } else {
+                        theme.border_subtle
+                    },
+                )
                 .into_any_element()
             }))
             .child(create_row(&theme, &self.new_project_input))
             .when(selected_project.is_some(), |el| {
                 let open = self.open_history.is_some();
-                el.child(
-                    div()
-                        .id("open-history")
-                        .mt(theme.space_3)
-                        .flex()
-                        .items_center()
-                        .gap(theme.space_2)
-                        .px(theme.space_3)
-                        .py(theme.space_2)
-                        .rounded(theme.radius_md)
-                        .cursor_pointer()
-                        .border_1()
-                        .border_color(if open {
-                            theme.border_light
-                        } else {
-                            gpui::transparent_black()
-                        })
-                        .hover(move |s| {
-                            s.bg(theme.surface_raised).border_color(theme.border_subtle)
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_history(cx)))
-                        .child(div().size(px(6.0)).rounded_full().bg(if open {
-                            theme.accent
-                        } else {
-                            gpui::transparent_black()
-                        }))
-                        .child(
-                            div()
-                                .text_color(theme.text_secondary)
-                                .child("Commit history"),
-                        ),
-                )
+                el.child(div().mt(theme.space_3).child(self.nav_row(
+                    NAV_HISTORY,
+                    open,
+                    None,
+                    |this, cx| this.toggle_history(cx),
+                    cx,
+                )))
             })
             .when(selected_project.is_some(), |el| {
                 el.child(div().mt(theme.space_1).child(self.run_sidebar_row(cx)))
@@ -877,9 +1007,14 @@ impl Render for Root {
             });
 
         let main_panel = div()
+            .id("main-panel")
             .flex()
             .flex_col()
             .flex_1()
+            // Without min_w(0) a wide child stops this column shrinking and
+            // pushes the terminal panel off the window; it scrolls instead.
+            .min_w(px(0.0))
+            .overflow_y_scroll()
             .h_full()
             .bg(theme.surface_solid)
             .p(theme.space_4)
@@ -1049,9 +1184,9 @@ impl Render for Root {
                                 div()
                                     .px(theme.space_2)
                                     .rounded(theme.radius_sm)
-                                    .bg(crate::theme::label_color(tag).opacity(0.16))
+                                    .bg(crate::theme::label_color(&theme, tag).opacity(0.16))
                                     .text_xs()
-                                    .text_color(crate::theme::label_color(tag))
+                                    .text_color(crate::theme::label_color(&theme, tag))
                                     .child(tag.clone())
                             }))
                             .when(task.tags.len() > 3, |d| {
@@ -1408,6 +1543,7 @@ impl Render for Root {
                 .flex_1()
                 .h_full()
                 .min_w(px(0.0))
+                .overflow_hidden()
                 .child(history.clone())
                 .into_any_element()
         } else if let (Some(detail), None) = (&self.open_task, &self.open_note) {
@@ -1416,6 +1552,7 @@ impl Render for Root {
                 .flex_1()
                 .h_full()
                 .min_w(px(0.0))
+                .overflow_hidden()
                 .child(detail.clone())
                 .into_any_element()
         } else if let Some(page) = note_page.take() {
@@ -1426,6 +1563,7 @@ impl Render for Root {
                 .flex_1()
                 .h_full()
                 .min_w(px(0.0))
+                .overflow_hidden()
                 .child(self.run_panel.clone())
                 .into_any_element()
         } else if self.timesheet_open {
@@ -1434,6 +1572,7 @@ impl Render for Root {
                 .flex_1()
                 .h_full()
                 .min_w(px(0.0))
+                .overflow_hidden()
                 .child(self.timesheet_panel.clone())
                 .into_any_element()
         } else if self.credentials_open {
@@ -1442,6 +1581,7 @@ impl Render for Root {
                 .flex_1()
                 .h_full()
                 .min_w(px(0.0))
+                .overflow_hidden()
                 .child(self.credentials_panel.clone())
                 .into_any_element()
         } else {
@@ -1467,6 +1607,21 @@ impl Render for Root {
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
                 this.toggle_palette(window, cx);
             }))
+            // Dragging the terminal panel's left edge resizes it; the pointer
+            // can leave the 6px handle, so the drag is tracked up here.
+            .on_drag_move::<terminal_panel::DraggedTerminalEdge>(cx.listener(
+                |this,
+                 event: &gpui::DragMoveEvent<terminal_panel::DraggedTerminalEdge>,
+                 window,
+                 cx| {
+                    let width = terminal_panel::width_for_pointer(
+                        window.viewport_size().width.into(),
+                        event.event.position.x.into(),
+                    );
+                    this.terminal_panel
+                        .update(cx, |panel, cx| panel.set_width(width, cx));
+                },
+            ))
             .on_action(cx.listener(|this, _: &ToggleHistoryView, _, cx| this.toggle_history(cx)))
             .on_action(cx.listener(|this, _: &ToggleRunView, _, cx| this.toggle_run_view(cx)))
             .on_action(
@@ -1480,7 +1635,9 @@ impl Render for Root {
             }))
             .child(titlebar(&theme))
             .child(
-                div().flex().flex_col().flex_1().child(
+                // min_h(0): without it this column grows with its tallest
+                // child and pushes the bottom of the window off-screen.
+                div().flex().flex_col().flex_1().min_h(px(0.0)).child(
                     div()
                         .flex()
                         .flex_1()
@@ -1532,11 +1689,20 @@ fn main() -> Result<()> {
 
         let bounds = Bounds::centered(None, size(px(1000.0), px(640.0)), cx);
         let state = cx.new(|_| AppState::new(conn, paths.clone()));
-        let theme = GlassTheme::dark();
+
         // Restore last project / task / terminal visibility. Stale ids fall
         // back to the defaults silently (see settings::restore_selection).
         let settings = cx.new(|_| SettingsStore::load(settings::settings_path(paths.root())));
         let saved = settings.read(cx).get().clone();
+        // Follow the OS (or the saved choice) from the first frame.
+        let theme = GlassTheme::resolve(
+            saved.theme_mode,
+            os_is_dark(cx.window_appearance()),
+            saved.reduce_transparency,
+        );
+        cx.set_global(ActiveTheme(theme));
+        cx.set_reduce_motion(saved.reduce_motion);
+        let background = background_for(saved.reduce_transparency);
         let restored_task = state.update(cx, |state, _| settings::restore_selection(state, &saved));
 
         cx.open_window(
@@ -1547,7 +1713,7 @@ fn main() -> Result<()> {
                     appears_transparent: true,
                     traffic_light_position: None,
                 }),
-                window_background: WindowBackgroundAppearance::MicaBackdrop,
+                window_background: background,
                 ..Default::default()
             },
             |window, cx| {
@@ -1619,7 +1785,8 @@ fn main() -> Result<()> {
 
                 cx.new(|cx| {
                     cx.observe(&state, |_, _, cx| cx.notify()).detach();
-                    let terminal_panel = cx.new(|cx| TerminalPanel::new(cx, state.clone(), theme));
+                    let terminal_panel =
+                        cx.new(|cx| TerminalPanel::new(cx, state.clone(), settings.clone(), theme));
                     // Re-render the sidebar's per-project terminal badges.
                     cx.observe(&terminal_panel, |_, _, cx| cx.notify()).detach();
                     let root: Entity<Root> = cx.entity();
@@ -1666,6 +1833,8 @@ fn main() -> Result<()> {
                         .new(|cx| WorkspaceTools::new(cx, state.clone(), settings.clone(), theme));
                     let project_files = cx.new(|_| ProjectFiles::new(state.clone(), theme));
                     let mut root = Root {
+                        background,
+                        hovered: None,
                         settings: settings.clone(),
                         workspace_tools,
                         project_files,
@@ -1706,6 +1875,16 @@ fn main() -> Result<()> {
                     if let Some(task) = restored_task {
                         root.open_task_detail(task, cx);
                     }
+                    // Restyle at runtime when the theme or transparency setting
+                    // changes, or the OS switches between light and dark.
+                    cx.observe_in(&settings, window, |this, _, window, cx| {
+                        this.apply_appearance(window, cx);
+                    })
+                    .detach();
+                    cx.observe_window_appearance(window, |this, window, cx| {
+                        this.apply_appearance(window, cx);
+                    })
+                    .detach();
                     root
                 })
             },

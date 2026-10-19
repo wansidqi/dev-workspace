@@ -11,7 +11,7 @@ use devspace_core::ProjectId;
 use gpui::{div, prelude::*, px, Context, Entity, PathPromptOptions, SharedString, Window};
 
 use crate::ide;
-use crate::settings::SettingsStore;
+use crate::settings::{parse_scrollback, SettingsStore};
 use crate::state::AppState;
 use crate::text_input::TextInput;
 use crate::theme::GlassTheme;
@@ -32,6 +32,7 @@ pub struct WorkspaceTools {
     settings: Entity<SettingsStore>,
     theme: GlassTheme,
     ide_input: Entity<TextInput>,
+    scrollback_input: Entity<TextInput>,
     /// Result of the last action: (message, is_error).
     notice: Option<(String, bool)>,
     /// A backup/export/import is running; further ones are refused.
@@ -76,11 +77,21 @@ impl WorkspaceTools {
                 this.update(cx, |tools, cx| tools.save_ide_command(&command, cx));
             }));
         });
+        let scrollback_input =
+            cx.new(|cx| TextInput::new(cx, "Scrollback lines for new terminals, e.g. 5000", theme));
+        let this = cx.entity();
+        scrollback_input.update(cx, |input, _| {
+            input.on_confirm = Some(Box::new(move |text, _window, cx| {
+                let text = text.to_string();
+                this.update(cx, |tools, cx| tools.save_scrollback(&text, cx));
+            }));
+        });
         Self {
             state,
             settings,
             theme,
             ide_input,
+            scrollback_input,
             notice: None,
             busy: false,
         }
@@ -96,6 +107,45 @@ impl WorkspaceTools {
                 ("IDE command saved".to_string(), false)
             }
             Err(e) => (e.to_string(), true),
+        });
+        cx.notify();
+    }
+
+    /// Saves the scrollback length used by terminals opened from now on
+    /// (a running terminal keeps the history size it started with).
+    fn save_scrollback(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.notice = Some(match parse_scrollback(text) {
+            Ok(lines) => {
+                self.settings.update(cx, |store, cx| {
+                    store.update(cx, |s| s.terminal_scrollback = lines)
+                });
+                (
+                    format!("Scrollback set to {lines} lines for new terminals"),
+                    false,
+                )
+            }
+            Err(message) => (message, true),
+        });
+        cx.notify();
+    }
+
+    fn cycle_theme(&mut self, cx: &mut Context<Self>) {
+        self.settings.update(cx, |store, cx| {
+            store.update(cx, |s| s.theme_mode = s.theme_mode.cycle())
+        });
+        cx.notify();
+    }
+
+    fn toggle_reduce_transparency(&mut self, cx: &mut Context<Self>) {
+        self.settings.update(cx, |store, cx| {
+            store.update(cx, |s| s.reduce_transparency = !s.reduce_transparency)
+        });
+        cx.notify();
+    }
+
+    fn toggle_reduce_motion(&mut self, cx: &mut Context<Self>) {
+        self.settings.update(cx, |store, cx| {
+            store.update(cx, |s| s.reduce_motion = !s.reduce_motion)
         });
         cx.notify();
     }
@@ -258,7 +308,7 @@ impl WorkspaceTools {
 fn tool_button(
     theme: &GlassTheme,
     id: &'static str,
-    label: &'static str,
+    label: impl Into<SharedString>,
     enabled: bool,
 ) -> gpui::Stateful<gpui::Div> {
     let theme = *theme;
@@ -280,13 +330,29 @@ fn tool_button(
             d.border_color(theme.border_subtle)
                 .text_color(theme.text_secondary)
         })
-        .child(label)
+        .child(label.into())
 }
 
 impl Render for WorkspaceTools {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.theme = crate::theme::current(cx);
         let theme = self.theme;
-        let command: SharedString = self.settings.read(cx).get().ide_command.clone().into();
+        let (command, theme_mode, reduce_transparency, reduce_motion, scrollback): (
+            SharedString,
+            _,
+            _,
+            _,
+            _,
+        ) = {
+            let settings = self.settings.read(cx).get();
+            (
+                settings.ide_command.clone().into(),
+                settings.theme_mode,
+                settings.reduce_transparency,
+                settings.reduce_motion,
+                settings.terminal_scrollback,
+            )
+        };
         let busy = self.busy;
         div()
             .flex()
@@ -320,6 +386,73 @@ impl Render for WorkspaceTools {
                     ),
             )
             .child(self.ide_input.clone())
+            .child(
+                div()
+                    .mt(theme.space_2)
+                    .text_xs()
+                    .text_color(theme.text_secondary)
+                    .child("APPEARANCE AND TERMINAL"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(theme.space_2)
+                    .child(
+                        tool_button(
+                            &theme,
+                            "cycle-theme",
+                            format!("Theme: {}", theme_mode.label()),
+                            true,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.cycle_theme(cx))),
+                    )
+                    .child(
+                        tool_button(
+                            &theme,
+                            "toggle-transparency",
+                            if reduce_transparency {
+                                "Transparency: reduced"
+                            } else {
+                                "Transparency: normal"
+                            },
+                            true,
+                        )
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.toggle_reduce_transparency(cx)),
+                        ),
+                    )
+                    .child(
+                        tool_button(
+                            &theme,
+                            "toggle-motion",
+                            if reduce_motion {
+                                "Motion: reduced"
+                            } else {
+                                "Motion: normal"
+                            },
+                            true,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_reduce_motion(cx))),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.text_secondary)
+                    .child(format!(
+                        "Terminal scrollback: {scrollback} lines (applies to new terminals)"
+                    )),
+            )
+            .child(self.scrollback_input.clone())
+            .child(
+                div()
+                    .mt(theme.space_2)
+                    .text_xs()
+                    .text_color(theme.text_secondary)
+                    .child("BACKUP AND TRANSFER"),
+            )
             .child(
                 div()
                     .flex()

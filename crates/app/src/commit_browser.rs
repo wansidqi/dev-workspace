@@ -743,9 +743,10 @@ impl CommitBrowser {
                                     .rounded(theme.radius_sm)
                                     .border_1()
                                     .border_color(
-                                        crate::theme::label_color(&entry.repo_name).opacity(0.5),
+                                        crate::theme::label_color(&theme, &entry.repo_name)
+                                            .opacity(0.5),
                                     )
-                                    .text_color(crate::theme::label_color(&entry.repo_name))
+                                    .text_color(crate::theme::label_color(&theme, &entry.repo_name))
                                     .child(entry.repo_name.clone()),
                             )
                             .child(
@@ -1313,6 +1314,7 @@ impl CommitBrowser {
 
 impl Render for CommitBrowser {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.theme = crate::theme::current(cx);
         let theme = self.theme;
         let (repos, project_name) = {
             let state = self.state.read(cx);

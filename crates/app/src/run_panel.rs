@@ -734,6 +734,7 @@ impl RunPanel {
 
 impl Render for RunPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.theme = crate::theme::current(cx);
         let theme = self.theme;
         let commands = self.state.read(cx).run_commands.clone();
         let selected = self.selected_id(cx);
@@ -851,42 +852,24 @@ impl Root {
     /// running commands.
     pub(crate) fn run_sidebar_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
-        let open = self.run_open;
         let running = self.run_panel.read(cx).running_count();
-        div()
-            .id("open-run-commands")
-            .flex()
-            .items_center()
-            .gap(theme.space_2)
-            .px(theme.space_3)
-            .py(theme.space_2)
-            .rounded(theme.radius_md)
-            .cursor_pointer()
-            .border_1()
-            .border_color(if open {
-                theme.border_light
-            } else {
-                gpui::transparent_black()
-            })
-            .hover(move |s| s.bg(theme.surface_raised).border_color(theme.border_subtle))
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_run_view(cx)))
-            .child(div().size(px(6.0)).rounded_full().bg(if open {
-                theme.accent
-            } else {
-                gpui::transparent_black()
-            }))
-            .child(div().text_color(theme.text_secondary).child("Run commands"))
-            .when(running > 0, |el| {
-                el.child(
-                    div()
-                        .px(theme.space_1)
-                        .rounded(theme.radius_sm)
-                        .border_1()
-                        .border_color(theme.accent)
-                        .text_xs()
-                        .text_color(theme.accent)
-                        .child(format!("▶ {running}")),
-                )
-            })
+        let badge = (running > 0).then(|| {
+            div()
+                .px(theme.space_1)
+                .rounded(theme.radius_sm)
+                .border_1()
+                .border_color(theme.accent)
+                .text_xs()
+                .text_color(theme.accent)
+                .child(format!("▶ {running}"))
+                .into_any_element()
+        });
+        self.nav_row(
+            crate::NAV_RUN,
+            self.run_open,
+            badge,
+            |this, cx| this.toggle_run_view(cx),
+            cx,
+        )
     }
 }

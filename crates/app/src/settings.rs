@@ -13,6 +13,7 @@ use devspace_core::TaskId;
 use gpui::{Context, Task};
 
 use crate::state::AppState;
+use crate::theme::ThemeMode;
 
 /// Settings files bigger than this are ignored (corrupt or not ours), so a
 /// bad file can't make startup read unbounded data.
@@ -34,7 +35,27 @@ pub struct Settings {
     pub terminal_open: bool,
     /// Command (program plus optional fixed arguments) used by "Open in IDE".
     pub ide_command: String,
+    /// Width of the terminal panel, in pixels (set by dragging its edge).
+    pub terminal_width: u32,
+    /// Scrollback lines kept by each new terminal tab.
+    pub terminal_scrollback: u32,
+    /// Follow the OS light/dark setting, or force one.
+    pub theme_mode: ThemeMode,
+    /// Draw solid surfaces instead of translucent ones.
+    pub reduce_transparency: bool,
+    /// Skip transitions: hover and selection changes are instant.
+    pub reduce_motion: bool,
 }
+
+/// Terminal panel width limits and default, in pixels.
+pub const MIN_TERMINAL_WIDTH: u32 = 320;
+pub const MAX_TERMINAL_WIDTH: u32 = 1200;
+pub const DEFAULT_TERMINAL_WIDTH: u32 = 520;
+/// Scrollback limits and default, in lines. The cap keeps one terminal's
+/// history from growing without bound.
+pub const MIN_TERMINAL_SCROLLBACK: u32 = 100;
+pub const MAX_TERMINAL_SCROLLBACK: u32 = 100_000;
+pub const DEFAULT_TERMINAL_SCROLLBACK: u32 = 2000;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -43,6 +64,11 @@ impl Default for Settings {
             last_task: None,
             terminal_open: false,
             ide_command: DEFAULT_IDE_COMMAND.to_string(),
+            terminal_width: DEFAULT_TERMINAL_WIDTH,
+            terminal_scrollback: DEFAULT_TERMINAL_SCROLLBACK,
+            theme_mode: ThemeMode::Dark,
+            reduce_transparency: false,
+            reduce_motion: false,
         }
     }
 }
@@ -70,6 +96,30 @@ impl Settings {
                 // A blank command keeps the default rather than breaking
                 // "Open in IDE".
                 "ide_command" if !value.is_empty() => settings.ide_command = value.to_string(),
+                // Numbers are clamped into their range; unparsable ones
+                // keep the default.
+                "terminal_width" => {
+                    if let Ok(n) = value.parse::<u32>() {
+                        settings.terminal_width = n.clamp(MIN_TERMINAL_WIDTH, MAX_TERMINAL_WIDTH);
+                    }
+                }
+                "terminal_scrollback" => {
+                    if let Ok(n) = value.parse::<u32>() {
+                        settings.terminal_scrollback =
+                            n.clamp(MIN_TERMINAL_SCROLLBACK, MAX_TERMINAL_SCROLLBACK);
+                    }
+                }
+                "theme" => {
+                    if let Some(mode) = ThemeMode::parse(value) {
+                        settings.theme_mode = mode;
+                    }
+                }
+                "reduce_transparency" => {
+                    settings.reduce_transparency = matches!(value, "true" | "1");
+                }
+                "reduce_motion" => {
+                    settings.reduce_motion = matches!(value, "true" | "1");
+                }
                 _ => {}
             }
         }
@@ -88,6 +138,17 @@ impl Settings {
             out.push_str(&format!("last_task={id}\n"));
         }
         out.push_str(&format!("terminal_open={}\n", self.terminal_open));
+        out.push_str(&format!("terminal_width={}\n", self.terminal_width));
+        out.push_str(&format!(
+            "terminal_scrollback={}\n",
+            self.terminal_scrollback
+        ));
+        out.push_str(&format!("theme={}\n", self.theme_mode.as_str()));
+        out.push_str(&format!(
+            "reduce_transparency={}\n",
+            self.reduce_transparency
+        ));
+        out.push_str(&format!("reduce_motion={}\n", self.reduce_motion));
         let command: String = self
             .ide_command
             .chars()
@@ -96,6 +157,23 @@ impl Settings {
         out.push_str(&format!("ide_command={}\n", command.trim()));
         out
     }
+}
+
+/// Reads what a user typed into the scrollback box: a whole number of lines
+/// inside [`MIN_TERMINAL_SCROLLBACK`]..=[`MAX_TERMINAL_SCROLLBACK`]. Anything
+/// else is an error message for the user, not silently clamped.
+pub fn parse_scrollback(text: &str) -> Result<u32, String> {
+    let lines: u32 = text
+        .trim()
+        .replace([',', '_'], "")
+        .parse()
+        .map_err(|_| "Enter a whole number of lines, e.g. 5000".to_string())?;
+    if !(MIN_TERMINAL_SCROLLBACK..=MAX_TERMINAL_SCROLLBACK).contains(&lines) {
+        return Err(format!(
+            "Scrollback must be between {MIN_TERMINAL_SCROLLBACK} and {MAX_TERMINAL_SCROLLBACK} lines"
+        ));
+    }
+    Ok(lines)
 }
 
 /// Only positive ids are real (ids start at 1).
@@ -184,6 +262,9 @@ impl SettingsStore {
         let before = self.settings.clone();
         change(&mut self.settings);
         if self.settings != before {
+            // Observers (the window restyles itself on theme changes) hear
+            // about real changes only, so a no-op update stays quiet.
+            cx.notify();
             self.schedule_save(cx);
         }
     }
@@ -217,6 +298,11 @@ mod tests {
             last_task: Some(42),
             terminal_open: true,
             ide_command: "code --reuse-window".to_string(),
+            terminal_width: 640,
+            terminal_scrollback: 5000,
+            theme_mode: ThemeMode::Light,
+            reduce_transparency: true,
+            reduce_motion: true,
         };
         assert_eq!(Settings::parse(&settings.serialize()), settings);
         assert_eq!(
@@ -265,6 +351,47 @@ mod tests {
             s.ide_command, DEFAULT_IDE_COMMAND,
             "blank keeps the default"
         );
+    }
+
+    #[test]
+    fn dark_is_the_default_theme_and_a_missing_key_keeps_it() {
+        assert_eq!(Settings::default().theme_mode, ThemeMode::Dark);
+        assert_eq!(
+            Settings::parse("last_project=1\n").theme_mode,
+            ThemeMode::Dark
+        );
+        assert_eq!(ThemeMode::default(), ThemeMode::Dark);
+    }
+
+    #[test]
+    fn numbers_are_clamped_and_bad_values_keep_the_defaults() {
+        let s = Settings::parse(
+            "terminal_width=99999\nterminal_scrollback=1\ntheme=sepia\nreduce_transparency=maybe\n",
+        );
+        assert_eq!(s.terminal_width, MAX_TERMINAL_WIDTH);
+        assert_eq!(s.terminal_scrollback, MIN_TERMINAL_SCROLLBACK);
+        assert_eq!(s.theme_mode, ThemeMode::Dark);
+        assert!(!s.reduce_transparency);
+
+        let s = Settings::parse("terminal_width=10\nterminal_scrollback=lots\ntheme=LIGHT\n");
+        assert_eq!(s.terminal_width, MIN_TERMINAL_WIDTH);
+        assert_eq!(s.terminal_scrollback, DEFAULT_TERMINAL_SCROLLBACK);
+        assert_eq!(s.theme_mode, ThemeMode::Light);
+
+        let s = Settings::parse("terminal_width=-5\nterminal_scrollback=100000000\n");
+        assert_eq!(s.terminal_width, DEFAULT_TERMINAL_WIDTH);
+        assert_eq!(s.terminal_scrollback, MAX_TERMINAL_SCROLLBACK);
+    }
+
+    #[test]
+    fn scrollback_input_accepts_numbers_in_range_only() {
+        assert_eq!(parse_scrollback(" 5000 "), Ok(5000));
+        assert_eq!(parse_scrollback("10,000"), Ok(10_000));
+        assert_eq!(parse_scrollback("100"), Ok(100));
+        assert_eq!(parse_scrollback("100000"), Ok(100_000));
+        for bad in ["", "abc", "-5", "12.5", "99", "100001", "99999999999999"] {
+            assert!(parse_scrollback(bad).is_err(), "{bad:?} should be refused");
+        }
     }
 
     #[test]

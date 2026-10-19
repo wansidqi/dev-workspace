@@ -796,6 +796,7 @@ impl Element for NoteTextElement {
 
 impl Render for NoteEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.theme = crate::theme::current(cx);
         let theme = self.theme;
         div()
             .flex()

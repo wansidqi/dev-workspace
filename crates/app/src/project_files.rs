@@ -146,6 +146,7 @@ impl ProjectFiles {
 
 impl Render for ProjectFiles {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.theme = crate::theme::current(cx);
         let theme = self.theme;
         let files = self.state.read(cx).project_attachments();
 

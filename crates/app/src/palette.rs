@@ -6,7 +6,7 @@
 //! All of that I/O runs on a background task, debounced, and results are
 //! applied only if the query has not changed since (epoch check).
 //!
-//! The navigation side (`impl Root` below) is kept here rather than in
+//! The navigation side (`impl Root` bow) is kept here rather than in
 //! `main.rs` so the palette stays one self-contained module.
 
 use std::path::PathBuf;
@@ -20,6 +20,7 @@ use gpui::{
     ScrollHandle, SharedString, Window,
 };
 
+use crate::motion;
 use crate::palette_rank::{
     assemble, step_highlight, Command, Group, Item, Sources, Target, MAX_RESULTS,
 };
@@ -337,6 +338,7 @@ impl Focusable for CommandPalette {
 
 impl Render for CommandPalette {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.theme = crate::theme::current(cx);
         let theme = self.theme;
 
         // Wire Enter/Esc on the input to this palette.
@@ -391,47 +393,52 @@ impl Render for CommandPalette {
                 highlight_child = child_ix;
             }
             child_ix += 1;
-            list = list.child(
-                div()
-                    .id(("palette-row", ix))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(theme.space_3)
-                    .px(theme.space_3)
-                    .py(theme.space_2)
-                    .rounded(theme.radius_sm)
-                    .cursor_pointer()
-                    .text_sm()
-                    .text_color(theme.text_primary)
-                    .when(selected, |el| el.bg(theme.accent.opacity(0.22)))
-                    .when(!selected, |el| {
-                        el.hover(move |s| s.bg(theme.surface_raised))
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.run_at(ix, window, cx);
-                    }))
-                    .child(
+            let row = div()
+                .id(("palette-row", ix))
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(theme.space_3)
+                .px(theme.space_3)
+                .py(theme.space_2)
+                .rounded(theme.radius_sm)
+                .cursor_pointer()
+                .text_sm()
+                .text_color(theme.text_primary)
+                .when(!selected, |el| {
+                    el.hover(move |s| s.bg(theme.surface_raised))
+                })
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.run_at(ix, window, cx);
+                }))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .child(SharedString::from(item.title.clone())),
+                )
+                .when(!item.detail.is_empty(), |el| {
+                    el.child(
                         div()
-                            .flex_1()
-                            .min_w(px(0.0))
+                            .flex_shrink_0()
+                            .max_w(px(220.0))
                             .overflow_hidden()
                             .whitespace_nowrap()
-                            .child(SharedString::from(item.title.clone())),
+                            .text_xs()
+                            .text_color(theme.text_secondary)
+                            .child(SharedString::from(item.detail.clone())),
                     )
-                    .when(!item.detail.is_empty(), |el| {
-                        el.child(
-                            div()
-                                .flex_shrink_0()
-                                .max_w(px(220.0))
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_xs()
-                                .text_color(theme.text_secondary)
-                                .child(SharedString::from(item.detail.clone())),
-                        )
-                    }),
-            );
+                });
+            // The highlight slides in as it moves between rows.
+            list = list.child(motion::fade(
+                row,
+                ("palette-row-fade", ix),
+                selected,
+                theme.accent.opacity(0.22),
+                gpui::transparent_black(),
+            ));
         }
         if self.items.is_empty() {
             list = list.child(
@@ -599,6 +606,15 @@ impl Root {
                 let focus = self.new_project_input.read(cx).focus_handle.clone();
                 window.focus(&focus, cx);
             }
+            Command::CycleTheme => self.settings.update(cx, |store, cx| {
+                store.update(cx, |s| s.theme_mode = s.theme_mode.cycle())
+            }),
+            Command::ToggleReduceTransparency => self.settings.update(cx, |store, cx| {
+                store.update(cx, |s| s.reduce_transparency = !s.reduce_transparency)
+            }),
+            Command::ToggleReduceMotion => self.settings.update(cx, |store, cx| {
+                store.update(cx, |s| s.reduce_motion = !s.reduce_motion)
+            }),
         }
     }
 

@@ -14,8 +14,8 @@ remaining gap is visible at a glance.
       CommitLink, RunCommand domain types + validation + unit tests
 - [x] `devspace-storage`: SQLite migrations (WAL, foreign keys),
       `WorkspacePaths` for the on-disk layout
-- [x] GPUI wired up and pinned to a Zed commit, glass theme tokens (dark = neutral black/gray surfaces with a blue accent; tag and repo chips get a stable per-name colour via `theme::label_color`; whole UI in the monospace family, Cascadia Mono on Windows, set per-OS in `theme.rs`;
-      light defined but unused)
+- [x] GPUI wired up and pinned to a Zed commit, glass theme tokens (dark = neutral black/gray surfaces with a blue accent; tag and repo chips get a stable per-name colour via `theme::label_color(&theme, ...)`, lightness follows the theme; whole UI in the monospace family, Cascadia Mono on Windows, set per-OS in `theme.rs`;
+      light theme switchable at runtime, see UI polish)
 - [x] `devspace-core`: Repo domain type (added alongside repo linking)
 - [x] `devspace-runner`: std-only process runner (no dependencies) behind run commands
 - [x] `devspace-terminal`: `PtySession` (portable-pty process + background
@@ -211,10 +211,8 @@ remaining gap is visible at a glance.
       sidebar shows a `>_ N` badge per project, closing a tab kills its
       shell. Ctrl+` toggles the panel, Ctrl+Shift+` opens a new tab
       (same as VS Code).
-- [x] Terminal: scrollback capped (2000 lines default, configurable in the
-      backend; no settings UI yet)
-- [ ] Terminal: tab rename, drag-to-resize panel width, split panes
-- [ ] Terminal: scrollback setting in a settings UI
+- [x] Terminal: scrollback capped (2000 lines default); the length for new terminals is set from the Workspace tools card (100 to 100,000 lines, saved as `terminal_scrollback=`; a running terminal keeps the size it started with)
+- [x] Terminal: double-click a tab to rename it (the old name is selected; empty names are ignored), drag the panel's left edge to resize it (320 to 1200 px, remembered as `terminal_width=`), and "Split" stacks a second shell under the first in the same tab (two panes at most; "Unsplit" closes the focused one). Checked in the running app. Not remembered across restarts: tab names and splits.
 - [x] Per-project run commands + log view (`devspace-runner` crate,
       `run_panel.rs`; sidebar "Run commands"; add/edit/delete, Start/Stop,
       status chip, virtualised auto-scrolling log, Clear, Copy log; verified
@@ -258,10 +256,9 @@ remaining gap is visible at a glance.
 
 - [x] Window-level Mica/acrylic blur on Windows, custom draggable titlebar,
       glass surfaces with borders/shadows on sidebar + cards
-- [ ] Hover/selection transition animation (CLAUDE.md wants ~120-200ms
-      ease-out; current hover states are instant)
-- [ ] Light/dark toggle wired to OS setting (dark only so far)
-- [ ] Reduced-transparency fallback setting (MicaBackdrop always on)
+- [x] Hover/selection transitions: `motion.rs` fades a surface in and out with a critically damped spring (about 150-200 ms, no overshoot; tested not to overshoot and to settle in 60-300 ms). Applied to the sidebar rows (project rows and the History, Run commands, Timesheet and Credentials rows via `Root::nav_row`), the terminal tabs, and the palette highlight. Other hovers (buttons, chips, task rows) are still instant. A "Motion: normal/reduced" setting (and palette command) turns the transitions off through GPUI's reduce-motion flag; GPUI does not read the OS flag, so this is a manual setting.
+- [x] Light/dark theme: dark by default (the user's choice); "Theme: Dark / Light / Follow system" cycles at runtime from the Workspace tools card or the palette and is saved (`theme=` in settings.txt). The theme lives in a GPUI global (`theme::ActiveTheme`) that every view re-reads in `render`, so a change restyles the whole app without a restart; with "Follow system" an OS switch is picked up too. Tag chips and terminal colours adapt to the light palette. Both palettes are tested for WCAG AA contrast on the solid surfaces. Checked in the running app (default dark, switching to light and back).
+- [x] Reduced transparency: "Transparency: normal/reduced" (and a palette command) makes every surface opaque and switches the window backdrop from Mica to opaque; saved as `reduce_transparency=`. It does not yet follow the OS "transparency effects" setting.
 
 ## Timesheet
 
@@ -407,6 +404,9 @@ in SQLite (`app.db`) instead.
   4. Built-in PDF viewer (needs `pdfium-render` approval).
   5. Patch-id re-matching of missing commits; light theme and reduced
      transparency; hover transitions.
+- Layout gotchas found while testing in the running app (more of the same min-height/min-width `auto` default as the note below): the area holding sidebar, content and terminal panel needed `min_h(0)`, otherwise the whole window grew past its bottom edge and a second terminal pane was pushed off-screen; the project page column needed `min_w(0)` (it pushed the terminal panel off the right edge) and `overflow_y_scroll` (the project page could not scroll at all before). Full-content views are wrapped in `overflow_hidden` so a narrow window clips them instead of painting over the terminal panel. Two `flex_1` panes in a column did not split the height reliably; each split pane gets an explicit `relative(1/n)` height instead.
+- `SettingsStore::update` now calls `cx.notify()` when something really changed. Without it nothing observing the store (the window restyling itself on a theme change) ever ran; it showed up only by clicking the theme button in the running app.
+- `GlassTheme` gained `is_light`, `solid()` and `resolve(mode, os_is_dark, reduce_transparency)`. Views refresh `self.theme = theme::current(cx)` at the top of `render`; colours inside closures built during render are therefore always current.
 - GPUI flexbox gotcha hit wiring the terminal panel: a flex child with
   `.flex_1()` but no `.min_h(px(0.0))` won't shrink below its content's
   natural height, so a fixed-size sibling (the terminal panel) after it

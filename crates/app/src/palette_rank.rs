@@ -190,11 +190,14 @@ pub enum Command {
     OpenTimesheet,
     OpenCredentials,
     NewProject,
+    CycleTheme,
+    ToggleReduceTransparency,
+    ToggleReduceMotion,
 }
 
 impl Command {
     /// All commands, in the order shown for an empty query.
-    pub const ALL: [Command; 7] = [
+    pub const ALL: [Command; 10] = [
         Command::ToggleTerminal,
         Command::NewTerminal,
         Command::OpenHistory,
@@ -202,6 +205,9 @@ impl Command {
         Command::OpenTimesheet,
         Command::OpenCredentials,
         Command::NewProject,
+        Command::CycleTheme,
+        Command::ToggleReduceTransparency,
+        Command::ToggleReduceMotion,
     ];
 
     /// Human title, also what the query is matched against.
@@ -214,6 +220,9 @@ impl Command {
             Command::OpenTimesheet => "Open timesheet",
             Command::OpenCredentials => "Open credentials",
             Command::NewProject => "New project",
+            Command::CycleTheme => "Switch theme (system, dark, light)",
+            Command::ToggleReduceTransparency => "Toggle reduced transparency",
+            Command::ToggleReduceMotion => "Toggle reduced motion",
         }
     }
 
@@ -227,6 +236,9 @@ impl Command {
             Command::OpenTimesheet => "Ctrl+Shift+M",
             Command::OpenCredentials => "Ctrl+Shift+L",
             Command::NewProject => "Ctrl+Shift+N",
+            Command::CycleTheme
+            | Command::ToggleReduceTransparency
+            | Command::ToggleReduceMotion => "",
         }
     }
 }
@@ -563,8 +575,11 @@ mod tests {
         let mut hints = std::collections::HashSet::new();
         for command in Command::ALL {
             assert!(titles.insert(command.title()), "duplicate title");
-            assert!(!command.hint().is_empty(), "{:?} has no hint", command);
-            assert!(hints.insert(command.hint()), "duplicate shortcut hint");
+            // Commands without a shortcut have an empty hint; real ones
+            // must not share a key.
+            if !command.hint().is_empty() {
+                assert!(hints.insert(command.hint()), "duplicate shortcut hint");
+            }
         }
         // All of them fit in the commands group on a blank query.
         assert!(Command::ALL.len() <= Group::Commands.cap(true));

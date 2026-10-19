@@ -288,11 +288,11 @@ impl TaskDetail {
                     .pr(theme.space_2)
                     .py(theme.space_1)
                     .rounded(theme.radius_sm)
-                    .bg(crate::theme::label_color(tag).opacity(0.16))
+                    .bg(crate::theme::label_color(&theme, tag).opacity(0.16))
                     .border_1()
-                    .border_color(crate::theme::label_color(tag).opacity(0.5))
+                    .border_color(crate::theme::label_color(&theme, tag).opacity(0.5))
                     .text_sm()
-                    .text_color(crate::theme::label_color(tag))
+                    .text_color(crate::theme::label_color(&theme, tag))
                     .child(tag.clone())
                     .child(
                         div()
@@ -1361,6 +1361,7 @@ impl TaskDetail {
 
 impl Render for TaskDetail {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.theme = crate::theme::current(cx);
         let theme = self.theme;
         // Kick off the git lookup the first time the commits tab is needed
         // (and whenever the mapped set changes, via the state observer).

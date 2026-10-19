@@ -115,7 +115,12 @@ pub struct TerminalView {
 }
 
 impl TerminalView {
-    pub fn new(cx: &mut Context<Self>, cwd: PathBuf, theme: GlassTheme) -> Self {
+    pub fn new(
+        cx: &mut Context<Self>,
+        cwd: PathBuf,
+        scrollback_lines: usize,
+        theme: GlassTheme,
+    ) -> Self {
         let size = TerminalSize {
             cols: INITIAL_COLS,
             rows: INITIAL_ROWS,
@@ -133,7 +138,7 @@ impl TerminalView {
             focus_handle: cx.focus_handle(),
             cwd,
             session: None,
-            emulator: TerminalEmulator::new(size),
+            emulator: TerminalEmulator::with_scrollback(size, scrollback_lines),
             theme,
             exited: false,
             scroll_remainder: 0.0,
@@ -350,7 +355,7 @@ impl TerminalView {
 
     fn render_run(&self, run: &StyledRun, focused: bool) -> gpui::AnyElement {
         let theme = self.theme;
-        let mut fg = to_hsla(run.fg, theme.text_primary);
+        let mut fg = crate::theme::terminal_fg(&theme, to_hsla(run.fg, theme.text_primary));
         let mut bg = to_hsla(run.bg, gpui::transparent_black());
         if run.inverse {
             let (new_fg, new_bg) = (
@@ -401,6 +406,7 @@ impl Focusable for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.theme = crate::theme::current(cx);
         let theme = self.theme;
         let focused = self.focus_handle.is_focused(window);
         let snapshot = self.emulator.snapshot();
@@ -439,7 +445,7 @@ impl Render for TerminalView {
             .flex_col()
             .flex_1()
             .w_full()
-            .h_full()
+            .min_h(px(0.0))
             .p(theme.space_2)
             .rounded(theme.radius_md)
             .bg(theme.surface_solid)

@@ -951,6 +951,7 @@ impl TimesheetPanel {
 
 impl Render for TimesheetPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.theme = crate::theme::current(cx);
         let theme = self.theme;
         let tasks: usize = self.tables.iter().map(|(_, rows)| rows.len()).sum();
         let commits: usize = self
@@ -1133,30 +1134,12 @@ impl crate::Root {
 
     /// Sidebar row that opens the timesheet.
     pub(crate) fn timesheet_sidebar_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = self.theme;
-        let open = self.timesheet_open;
-        div()
-            .id("open-timesheet")
-            .flex()
-            .items_center()
-            .gap(theme.space_2)
-            .px(theme.space_3)
-            .py(theme.space_2)
-            .rounded(theme.radius_md)
-            .cursor_pointer()
-            .border_1()
-            .border_color(if open {
-                theme.border_light
-            } else {
-                gpui::transparent_black()
-            })
-            .hover(move |s| s.bg(theme.surface_raised).border_color(theme.border_subtle))
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_timesheet_view(cx)))
-            .child(div().size(px(6.0)).rounded_full().bg(if open {
-                theme.accent
-            } else {
-                gpui::transparent_black()
-            }))
-            .child(div().text_color(theme.text_secondary).child("Timesheet"))
+        self.nav_row(
+            crate::NAV_TIMESHEET,
+            self.timesheet_open,
+            None,
+            |this, cx| this.toggle_timesheet_view(cx),
+            cx,
+        )
     }
 }
