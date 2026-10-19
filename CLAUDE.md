@@ -216,6 +216,7 @@ Translucency and shadows cost GPU time and memory, which conflicts with this pro
 - Commit history browser: a full-content view opened from the sidebar, with a mapping side panel. Credentials: collapsible panel (not built yet).
 - Command palette (Ctrl+K or Ctrl+Shift+P) as a centered floating glass popover with a soft shadow; searches commands, projects, tasks, note titles and commits.
 - Run commands: a sidebar row opens a full-content view with saved commands and a live log. Project page carries a "Workspace tools" card (Open in IDE, backup, export, import).
+- Timesheet: a sidebar view with a per-month table per project, built from the author's git commits (stored in SQLite, migration 4); copies as tab-separated text.
 - Settings live in `settings.txt` (key=value) in the data directory: last project and task, terminal visibility, IDE command.
 - Empty states have a short message and one primary action.
 

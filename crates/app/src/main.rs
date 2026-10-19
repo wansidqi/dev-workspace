@@ -22,6 +22,7 @@ mod terminal_panel;
 mod terminal_view;
 mod text_input;
 mod theme;
+mod timesheet_panel;
 mod workspace_tools;
 
 use anyhow::Result;
@@ -41,6 +42,7 @@ use task_detail::TaskDetail;
 use terminal_panel::TerminalPanel;
 use text_input::TextInput;
 use theme::GlassTheme;
+use timesheet_panel::TimesheetPanel;
 use workspace_tools::WorkspaceTools;
 
 actions!(devspace, [ToggleTerminal, NewTerminal, OpenPalette]);
@@ -86,6 +88,10 @@ struct Root {
     /// app so commands keep running while the view is closed.
     run_panel: Entity<RunPanel>,
     run_open: bool,
+    /// Timesheet view (see `timesheet_panel.rs`), shown in place of the main
+    /// content like the run-commands view.
+    timesheet_panel: Entity<TimesheetPanel>,
+    timesheet_open: bool,
     // --- settings / IDE / backup hooks (settings.rs, workspace_tools.rs) ---
     /// Persisted per-user settings (last project/task, terminal panel, IDE).
     settings: Entity<SettingsStore>,
@@ -570,6 +576,7 @@ impl Root {
         self.open_note = None;
         self.open_task = None;
         self.run_open = false;
+        self.timesheet_open = false;
         self.open_history = Some(browser);
         cx.notify();
     }
@@ -831,6 +838,11 @@ impl Render for Root {
             .when(selected_project.is_some(), |el| {
                 el.child(div().mt(theme.space_1).child(self.run_sidebar_row(cx)))
             })
+            .child(
+                div()
+                    .mt(theme.space_1)
+                    .child(self.timesheet_sidebar_row(cx)),
+            )
             .child(
                 div()
                     .id("toggle-terminal")
@@ -1373,6 +1385,14 @@ impl Render for Root {
                 .min_w(px(0.0))
                 .child(self.run_panel.clone())
                 .into_any_element()
+        } else if self.timesheet_open {
+            div()
+                .flex()
+                .flex_1()
+                .h_full()
+                .min_w(px(0.0))
+                .child(self.timesheet_panel.clone())
+                .into_any_element()
         } else {
             main_panel.into_any_element()
         };
@@ -1548,6 +1568,17 @@ fn main() -> Result<()> {
                     });
                     // Re-render the sidebar's running-commands badge.
                     cx.observe(&run_panel, |_, _, cx| cx.notify()).detach();
+                    let root_for_timesheet: Entity<Root> = cx.entity();
+                    let timesheet_panel = cx.new(|cx| {
+                        let mut panel = TimesheetPanel::new(cx, state.clone(), theme);
+                        panel.on_close = Some(Box::new(move |_window, cx| {
+                            root_for_timesheet.update(cx, |root, cx| {
+                                root.timesheet_open = false;
+                                cx.notify();
+                            });
+                        }));
+                        panel
+                    });
                     // Global shortcuts (toggle terminal, ...) are actions
                     // dispatched along the focused element's ancestors, so
                     // the root needs focus whenever nothing else has it.
@@ -1581,6 +1612,8 @@ fn main() -> Result<()> {
                         palette_prev_focus: None,
                         run_panel,
                         run_open: false,
+                        timesheet_panel,
+                        timesheet_open: false,
                     };
                     // A visible terminal panel needs its first tab, exactly
                     // as when the user opens it; a hidden one spawns nothing.

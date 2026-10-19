@@ -138,6 +138,62 @@ const MIGRATIONS: &[(i64, &str)] = &[
         CREATE INDEX idx_task_tags_tag ON task_tags(tag);
         "#,
     ),
+    (
+        4,
+        r#"
+        -- Monthly timesheet (replaces the old standalone git-sheet JSON files).
+        -- One settings row for the whole workspace.
+        CREATE TABLE timesheet_settings (
+            id                   INTEGER PRIMARY KEY CHECK (id = 1),
+            name                 TEXT NOT NULL,
+            role                 TEXT NOT NULL,
+            title                TEXT NOT NULL,
+            authors              TEXT NOT NULL,
+            min_rows             INTEGER NOT NULL,
+            est_base             REAL NOT NULL,
+            est_line_factor      REAL NOT NULL,
+            est_per_extra_commit REAL NOT NULL,
+            est_per_extra_day    REAL NOT NULL,
+            est_max_per_day      REAL NOT NULL
+        );
+
+        -- A month has a row here once it has been saved; remarks are free text.
+        CREATE TABLE timesheet_reports (
+            month   TEXT PRIMARY KEY,
+            remarks TEXT NOT NULL
+        );
+
+        -- One task line per (project, month, key). Deleting a project removes
+        -- its lines.
+        CREATE TABLE timesheet_rows (
+            id         INTEGER PRIMARY KEY,
+            project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            month      TEXT NOT NULL,
+            key        TEXT NOT NULL,
+            title      TEXT NOT NULL,
+            date_from  TEXT NOT NULL,
+            date_to    TEXT NOT NULL,
+            hours      REAL,
+            auto       INTEGER NOT NULL,
+            source     TEXT NOT NULL,
+            position   INTEGER NOT NULL,
+            UNIQUE (project_id, month, key)
+        );
+
+        -- Snapshot of the commits behind a git row (not a commit link: it must
+        -- survive rebases and repo unlinking). A hash is only unique within a
+        -- repo, so the repo name is part of the key.
+        CREATE TABLE timesheet_commits (
+            row_id   INTEGER NOT NULL REFERENCES timesheet_rows(id) ON DELETE CASCADE,
+            repo     TEXT NOT NULL,
+            hash     TEXT NOT NULL,
+            subject  TEXT NOT NULL,
+            date     TEXT NOT NULL,
+            lines    INTEGER NOT NULL,
+            PRIMARY KEY (row_id, repo, hash)
+        );
+        "#,
+    ),
 ];
 
 /// The newest schema version this build knows. Import refuses databases
@@ -244,7 +300,7 @@ mod tests {
         let versions: i64 = conn
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(versions, 3);
+        assert_eq!(versions, 4);
     }
 
     #[test]

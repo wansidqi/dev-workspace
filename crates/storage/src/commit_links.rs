@@ -461,6 +461,6 @@ mod tests {
         let versions: i64 = conn
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(versions, 3);
+        assert_eq!(versions, 4);
     }
 }

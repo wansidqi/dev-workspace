@@ -12,6 +12,7 @@ mod project;
 mod repo;
 mod run_command;
 mod task;
+mod timesheet;
 
 pub use attachment::*;
 pub use commit_link::*;
@@ -22,3 +23,4 @@ pub use project::*;
 pub use repo::*;
 pub use run_command::*;
 pub use task::*;
+pub use timesheet::*;

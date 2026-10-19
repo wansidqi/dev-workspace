@@ -13,7 +13,9 @@ use devspace_storage::{
 use rusqlite::Connection;
 
 mod run_commands; // run-command helpers (state/run_commands.rs)
+mod timesheet; // timesheet helpers (state/timesheet.rs)
 use std::time::{SystemTime, UNIX_EPOCH};
+pub use timesheet::TimesheetProject;
 
 /// How many commits the dashboard's "recent commits" section shows. Paged
 /// rather than loading full history (CLAUDE.md performance rule).

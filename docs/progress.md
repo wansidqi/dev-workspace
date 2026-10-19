@@ -7,7 +7,9 @@ remaining gap is visible at a glance.
 
 ## Foundation
 
-- [x] Cargo workspace: core, storage, git, terminal, app crates
+- [x] Cargo workspace: core, storage, git, terminal, runner, app crates
+      (`cargo fmt`, `clippy -D warnings` and `cargo test --workspace` all
+      pass as of the Timesheet commit; the app builds and launches)
 - [x] `devspace-core`: Project, Task, Note, Attachment, CredentialMeta,
       CommitLink, RunCommand domain types + validation + unit tests
 - [x] `devspace-storage`: SQLite migrations (WAL, foreign keys),
@@ -257,6 +259,44 @@ remaining gap is visible at a glance.
 - [ ] Light/dark toggle wired to OS setting (dark only so far)
 - [ ] Reduced-transparency fallback setting (MicaBackdrop always on)
 
+## Timesheet
+
+Ported from the standalone "git sheet" tool (which kept JSON files); data is
+in SQLite (`app.db`) instead.
+
+- [x] Migration 4 (approved): `timesheet_settings` (single row),
+      `timesheet_reports` (month + remarks; a row exists once a month is
+      saved), `timesheet_rows` (per project and month, unique on key,
+      cascade on project delete) and `timesheet_commits` (commit snapshots
+      per row, keyed by repo name + hash)
+- [x] `devspace-core::timesheet`: ticket parsing (`7267:`, `#7267 -`,
+      `[7267]`), grouping commits into one row per ticket, hours estimate,
+      merge on re-sync (typed hours, edited titles and manual rows survive;
+      estimated hours are recalculated), month helpers, tab-separated
+      clipboard layout with `=SUM` formulas
+- [x] `devspace-git::timesheet_commits`: a month of one author's commits
+      across all local and remote branches, merges skipped, changed lines
+      without lockfiles and generated output; the day is the author date in
+      the author's own timezone
+- [x] `devspace-storage::TimesheetRepo` and `AppState` helpers
+      (`state/timesheet.rs`)
+- [x] Sidebar "Timesheet" view (`timesheet_panel.rs`): month picker, one
+      table per active project (reads that project's linked repos), click to
+      edit title or hours, -/+ half-hour steppers, add or remove manual
+      tasks, expandable commit list, remarks, Settings form (name, role,
+      title, git authors, blank-row padding, estimate constants), "Sync from
+      git" (background task) and "Copy all"; an unsaved month syncs on first
+      open; every edit saves immediately
+- Copy is plain text only (gpui's clipboard has no HTML), so values and SUM
+  formulas paste into the sheet but fonts and borders do not. There is no
+  Google Sheets push and no .xlsx export by decision.
+- A repo that cannot be read leaves its project's table untouched on sync
+  (with a message) rather than wiping saved rows.
+- Timesheet tables are not part of project export/import or backup-by-project
+  (workspace backup copies the whole database, so it is covered).
+- The app launches with the Timesheet code in it; the screen itself still
+  needs a hand test (month picker, "Sync from git", edits, "Copy all").
+
 ## Decisions / notes for future sessions
 
 - GPUI pinned at rev `56934ec0560bce8929025497411de7f5322fb6ca`. Current API uses
@@ -348,13 +388,15 @@ remaining gap is visible at a glance.
   project, and a project can have multiple git repos. Delivered: the commit
   browser merges all repos' history; links key on (repo_id, hash) with the
   project-scope check in core, storage and DB triggers.
-- Next most valuable slices (everything from the previous list — task rows,
-  repo-unlink warning, suggestions, cherry-pick export, due date/branch/tags
-  — is done): the command palette and global search (unblocked by
-  `TextInput`), a credentials vault (needs the keyring + AEAD decisions
-  CLAUDE.md calls out), restore last project/task/layout on startup,
-  project backup/export, IDE launcher and per-project run commands, the
-  built-in PDF viewer, and markdown preview/syntax highlighting.
+- Next slices (palette, global search, startup restore, backup/export,
+  IDE launcher, run commands, markdown preview and Timesheet are done):
+  1. Hand-test the screens that only compile-checked so far (Timesheet,
+     palette, run commands, backup/import, history filters, note page).
+  2. Credentials vault (needs the keyring + AEAD crate approvals below).
+  3. Note kinds (Script/SQL) and syntax highlighting.
+  4. Built-in PDF viewer, project-level attachments.
+  5. Patch-id re-matching of missing commits; light theme and reduced
+     transparency; hover transitions.
 - GPUI flexbox gotcha hit wiring the terminal panel: a flex child with
   `.flex_1()` but no `.min_h(px(0.0))` won't shrink below its content's
   natural height, so a fixed-size sibling (the terminal panel) after it
