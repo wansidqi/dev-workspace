@@ -520,12 +520,13 @@ pub fn clipboard_html(
     // Everything outside the tables is set borderless explicitly, so pasting over a
     // sheet that already has borders clears them instead of leaving them behind.
     const NONE: &str = "border:none;";
-    let mut out = String::from(
-        "<table style=\"border-collapse:collapse;font-family:Arial;font-size:10pt\">",
-    );
+    let mut out =
+        String::from("<table style=\"border-collapse:collapse;font-family:Arial;font-size:10pt\">");
     let blank = |out: &mut String, n: usize| {
         for _ in 0..n {
-            out.push_str(&format!("<tr><td colspan=\"5\" style=\"{NONE}\">&nbsp;</td></tr>"));
+            out.push_str(&format!(
+                "<tr><td colspan=\"5\" style=\"{NONE}\">&nbsp;</td></tr>"
+            ));
         }
     };
     let cell = |out: &mut String, style: &str, text: &str| {
@@ -582,7 +583,11 @@ pub fn clipboard_html(
                 }
             );
             out.push_str("<tr>");
-            cell(&mut out, &format!("{edge}text-align:center"), &(i + 1).to_string());
+            cell(
+                &mut out,
+                &format!("{edge}text-align:center"),
+                &(i + 1).to_string(),
+            );
             cell(
                 &mut out,
                 &format!("{edge}font-weight:bold"),

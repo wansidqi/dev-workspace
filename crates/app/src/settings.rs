@@ -128,7 +128,10 @@ impl Settings {
                     settings.reduce_motion = matches!(value, "true" | "1");
                 }
                 "timesheet_excluded" => {
-                    let mut ids: Vec<i64> = value.split(',').filter_map(|s| parse_id(s.trim())).collect();
+                    let mut ids: Vec<i64> = value
+                        .split(',')
+                        .filter_map(|s| parse_id(s.trim()))
+                        .collect();
                     ids.sort_unstable();
                     ids.dedup();
                     settings.timesheet_excluded = ids;

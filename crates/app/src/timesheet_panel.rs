@@ -13,9 +13,9 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use devspace_core::{
-    clipboard_html, clipboard_text, date_from_unix, fmt_hours, fmt_range, group_commits, merge_rows, month_bounds,
-    month_from_unix, month_label, shift_month, total_hours, Estimate, ProjectId, TimesheetCommit,
-    TimesheetRow, TimesheetSettings,
+    clipboard_html, clipboard_text, date_from_unix, fmt_hours, fmt_range, group_commits,
+    merge_rows, month_bounds, month_from_unix, month_label, shift_month, total_hours, Estimate,
+    ProjectId, TimesheetCommit, TimesheetRow, TimesheetSettings,
 };
 use gpui::{
     div, prelude::*, px, AnyElement, App, ClipboardItem, Context, Entity, SharedString, WeakEntity,
@@ -193,8 +193,12 @@ impl TimesheetPanel {
         let settings = self.settings_store.read(cx).get();
         let order = &settings.timesheet_order;
         // Stable sort: projects the user never arranged keep sidebar order, after the arranged ones.
-        self.all_projects
-            .sort_by_key(|p| order.iter().position(|id| *id == p.id.0).unwrap_or(usize::MAX));
+        self.all_projects.sort_by_key(|p| {
+            order
+                .iter()
+                .position(|id| *id == p.id.0)
+                .unwrap_or(usize::MAX)
+        });
         let excluded = &settings.timesheet_excluded;
         self.projects = self
             .all_projects
@@ -216,8 +220,9 @@ impl TimesheetPanel {
             return;
         }
         ids.swap(at, to as usize);
-        self.settings_store
-            .update(cx, |store, cx| store.update(cx, |s| s.timesheet_order = ids));
+        self.settings_store.update(cx, |store, cx| {
+            store.update(cx, |s| s.timesheet_order = ids)
+        });
         self.load_projects(cx);
         cx.notify();
     }
@@ -972,7 +977,12 @@ impl TimesheetPanel {
     /// One chip per project with a repo; a lit chip is part of the timesheet.
     fn render_project_toggles(&self, cx: &mut Context<Self>) -> gpui::Div {
         let theme = self.theme;
-        let excluded = self.settings_store.read(cx).get().timesheet_excluded.clone();
+        let excluded = self
+            .settings_store
+            .read(cx)
+            .get()
+            .timesheet_excluded
+            .clone();
         let chips: Vec<AnyElement> = self
             .all_projects
             .iter()
@@ -982,8 +992,9 @@ impl TimesheetPanel {
                     .flex()
                     .items_center()
                     .child(
-                        icon_button(&theme, "‹", ("ts-earlier", id.0 as u64))
-                            .on_click(cx.listener(move |this, _, _, cx| this.move_project(id, -1, cx))),
+                        icon_button(&theme, "‹", ("ts-earlier", id.0 as u64)).on_click(
+                            cx.listener(move |this, _, _, cx| this.move_project(id, -1, cx)),
+                        ),
                     )
                     .child(
                         crate::ui::filter_chip(
@@ -995,8 +1006,9 @@ impl TimesheetPanel {
                         .on_click(cx.listener(move |this, _, _, cx| this.toggle_project(id, cx))),
                     )
                     .child(
-                        icon_button(&theme, "›", ("ts-later", id.0 as u64))
-                            .on_click(cx.listener(move |this, _, _, cx| this.move_project(id, 1, cx))),
+                        icon_button(&theme, "›", ("ts-later", id.0 as u64)).on_click(
+                            cx.listener(move |this, _, _, cx| this.move_project(id, 1, cx)),
+                        ),
                     )
                     .into_any_element()
             })
@@ -1005,7 +1017,10 @@ impl TimesheetPanel {
             .flex()
             .flex_col()
             .gap(theme.space_2)
-            .child(section_label(&theme, "Include in timesheet (‹ › to reorder)"))
+            .child(section_label(
+                &theme,
+                "Include in timesheet (‹ › to reorder)",
+            ))
             .child(if chips.is_empty() {
                 div()
                     .t_small()

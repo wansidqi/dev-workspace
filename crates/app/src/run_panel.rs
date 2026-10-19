@@ -437,9 +437,14 @@ impl RunPanel {
         let repos = self.state.read(cx).repos.clone();
         let mut chips: Vec<AnyElement> = Vec::new();
         chips.push(
-            ui::filter_chip(&theme, "run-cwd-default", "Project default", current.is_empty())
-                .on_click(cx.listener(|this, _, _, cx| this.set_cwd(String::new(), cx)))
-                .into_any_element(),
+            ui::filter_chip(
+                &theme,
+                "run-cwd-default",
+                "Project default",
+                current.is_empty(),
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.set_cwd(String::new(), cx)))
+            .into_any_element(),
         );
         for repo in repos {
             let path = repo.path.clone();
@@ -455,9 +460,15 @@ impl RunPanel {
             );
         }
         chips.push(
-            ui::button(&theme, "run-cwd-browse", ButtonKind::Ghost, Some(Icon::FolderOpen), "Browse")
-                .on_click(cx.listener(|this, _, _, cx| this.browse_cwd(cx)))
-                .into_any_element(),
+            ui::button(
+                &theme,
+                "run-cwd-browse",
+                ButtonKind::Ghost,
+                Some(Icon::FolderOpen),
+                "Browse",
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.browse_cwd(cx)))
+            .into_any_element(),
         );
         div()
             .flex()
