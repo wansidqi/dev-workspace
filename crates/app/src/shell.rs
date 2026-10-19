@@ -278,11 +278,16 @@ impl Root {
                     }))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         // Views that belong to one project (history, task,
-                        // note) and the global settings page give way to it.
+                        // note) and the Workspace pages (run commands,
+                        // timesheet, credentials, settings) give way to it,
+                        // which also clears their sidebar highlight.
                         this.open_history = None;
                         this.open_task = None;
                         this.open_note = None;
                         this.settings_open = false;
+                        this.run_open = false;
+                        this.timesheet_open = false;
+                        this.credentials_open = false;
                         this.state.update(cx, |state, _| {
                             state.select_project(id);
                         });
