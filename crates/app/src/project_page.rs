@@ -27,6 +27,98 @@ const NOTE_HOVER_KEY_BASE: u64 = 3_000_000;
 const TWO_COLUMN_MIN_WIDTH: f32 = 960.0;
 const RAIL_WIDTH: f32 = 340.0;
 
+/// Horizontal step per nesting level, and the geometry of a task row the tree
+/// guides must line up with (status icon width, row height).
+const TREE_INDENT: f32 = 22.0;
+const TREE_ICON: f32 = 24.0;
+const TREE_ROW_HEIGHT: f32 = 40.0;
+
+/// What a row needs to draw its branch of the task tree.
+#[derive(Default)]
+struct TreeGuides {
+    /// One entry per ancestor level 1..=depth: whether the task at that level
+    /// has a later sibling, so the trunk keeps running past this row. The last
+    /// entry is the row's own level (false means it is the last child).
+    continues: Vec<bool>,
+    /// The next row is nested under this one.
+    has_children: bool,
+    /// The last row of a top-level task and its subtasks: only these carry a
+    /// hairline, so the lines inside a branch are not cut by row dividers.
+    group_end: bool,
+}
+
+/// Guides for row `ix` of a depth-first list of `depths`.
+fn tree_guides(depths: &[usize], ix: usize) -> TreeGuides {
+    let depth = depths[ix];
+    let continues = (1..=depth)
+        .map(|level| {
+            depths[ix + 1..]
+                .iter()
+                .find(|d| **d <= level)
+                .is_some_and(|d| *d == level)
+        })
+        .collect();
+    TreeGuides {
+        continues,
+        has_children: depths.get(ix + 1).is_some_and(|d| *d > depth),
+        group_end: depths.get(ix + 1).is_none_or(|d| *d == 0),
+    }
+}
+
+/// The trunk, elbow and stub lines for one row, positioned under the parent's
+/// status icon so the tree reads as hanging off it.
+fn tree_guide_lines(theme: &GlassTheme, guides: &TreeGuides) -> Vec<Div> {
+    let colour = theme.border_strong;
+    let line = || div().absolute().bg(colour);
+    // Centre of the status icon for a given depth.
+    let icon_centre =
+        |depth: usize| theme.space_1 + px(depth as f32 * TREE_INDENT + TREE_ICON / 2.0);
+    let mid = px(TREE_ROW_HEIGHT / 2.0);
+    let depth = guides.continues.len();
+    let mut out = Vec::new();
+
+    for (ix, continues) in guides.continues.iter().enumerate() {
+        let level = ix + 1;
+        let x = icon_centre(level - 1);
+        if level < depth {
+            // An ancestor's trunk passing through this row.
+            if *continues {
+                out.push(line().left(x).top(px(0.0)).bottom(px(-1.0)).w(px(1.0)));
+            }
+        } else {
+            // This row's own branch: an L with a rounded corner from the
+            // parent's trunk into the status icon, and the trunk carrying on
+            // below the corner when a later sibling follows.
+            out.push(
+                div()
+                    .absolute()
+                    .left(x)
+                    .top(px(0.0))
+                    .h(mid + px(1.0))
+                    .w(px(TREE_INDENT - TREE_ICON / 2.0 - 2.0))
+                    .border_l_1()
+                    .border_b_1()
+                    .border_color(colour)
+                    .rounded_bl(px(6.0)),
+            );
+            if *continues {
+                out.push(line().left(x).top(mid).bottom(px(-1.0)).w(px(1.0)));
+            }
+        }
+    }
+    if guides.has_children {
+        // From under this row's icon down to the first child's trunk.
+        out.push(
+            line()
+                .left(icon_centre(depth))
+                .top(mid + px(TREE_ICON / 2.0))
+                .bottom(px(-1.0))
+                .w(px(1.0)),
+        );
+    }
+    out
+}
+
 /// Colour for each task status, shared by the strip, rows and chips.
 fn status_color(theme: &GlassTheme, status: TaskStatus) -> Hsla {
     status_style(theme, status).1
@@ -515,9 +607,14 @@ impl Root {
                 }))
         });
 
+        let depths: Vec<usize> = tasks.iter().map(|(_, d)| *d).collect();
         let rows: Vec<AnyElement> = tasks
             .iter()
-            .map(|(task, depth)| self.task_row(task, *depth, task_counts, editing_task_id, cx))
+            .enumerate()
+            .map(|(ix, (task, depth))| {
+                let guides = tree_guides(&depths, ix);
+                self.task_row(task, *depth, &guides, task_counts, editing_task_id, cx)
+            })
             .collect();
 
         div()
@@ -577,13 +674,14 @@ impl Root {
         &mut self,
         task: &Task,
         depth: usize,
+        guides: &TreeGuides,
         task_counts: &HashMap<TaskId, (usize, usize, usize)>,
         editing_task_id: Option<TaskId>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = self.theme;
         let id = task.id;
-        let indent = px(depth as f32 * 22.0);
+        let indent = px(depth as f32 * TREE_INDENT);
 
         if editing_task_id == Some(id) {
             if let Some((_, input)) = self.editing_task.as_ref() {
@@ -610,11 +708,12 @@ impl Root {
             .flex()
             .items_center()
             .gap(theme.space_3)
-            .h(px(40.0))
+            .h(px(TREE_ROW_HEIGHT))
             .pl(indent + theme.space_1)
             .pr(theme.space_2)
-            .border_b_1()
-            .border_color(theme.border_subtle)
+            .when(guides.group_end, |d| {
+                d.border_b_1().border_color(theme.border_subtle)
+            })
             .cursor_pointer()
             .when(hovered, |d| d.bg(theme.surface_hover))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
@@ -623,6 +722,7 @@ impl Root {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.open_task_detail(id, cx);
             }))
+            .children(tree_guide_lines(&theme, guides))
             .child(
                 div()
                     .id(("task-status", id.0 as u64))
@@ -1075,5 +1175,23 @@ impl Root {
                 Some(repo_count),
                 repos_content,
             ))
+    }
+}
+
+#[cfg(test)]
+mod tree_guide_tests {
+    use super::tree_guides;
+
+    #[test]
+    fn marks_trunks_last_children_and_parents() {
+        // A / (A1 / A1a, A2) / B
+        let depths = [0, 1, 2, 1, 0];
+        assert!(tree_guides(&depths, 0).has_children);
+        // A1 has a later sibling (A2); A1a is last under A1, which continues.
+        assert_eq!(tree_guides(&depths, 1).continues, vec![true]);
+        assert_eq!(tree_guides(&depths, 2).continues, vec![true, false]);
+        // A2 is the last child of A; B is a root.
+        assert_eq!(tree_guides(&depths, 3).continues, vec![false]);
+        assert!(tree_guides(&depths, 4).continues.is_empty());
     }
 }
