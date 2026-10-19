@@ -39,6 +39,11 @@ remaining gap is visible at a glance.
 ## Tasks and subtasks
 
 - [x] Unlimited nesting (depth-indented, parent/child via `parent_id`)
+- [x] Tree view on the project page: rounded L connectors from each parent's
+      status icon to its subtasks, trunk continues past later siblings, row
+      hairlines only between top-level groups. Line placement is pure logic
+      (`tree_guides`, unit-tested) in `project_page.rs`; not shown under a tag
+      filter (that list is flat).
 - [x] Status cycling: Todo -> In Progress -> Done -> Blocked -> Todo (Blocked
       sits after Done so the common path stays two clicks). Click the status icon on a task row or the status pill on the task page; clicking the rest of a row opens the task
 - [x] Create, rename, delete (delete cascades to subtasks)
