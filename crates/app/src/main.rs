@@ -3,6 +3,10 @@
 //! (see CLAUDE.md "GPUI guidelines" — pin an exact revision, don't guess
 //! the pre-1.0 API).
 
+// Release builds are a GUI app on Windows: no console window behind them.
+// Debug builds keep the console so tracing output stays visible.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod attach_flow;
 mod changes_model;
 mod changes_view;
