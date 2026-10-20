@@ -956,7 +956,7 @@ impl CommitBrowser {
                             .child("No matching branches"),
                     )
                 });
-            gpui::deferred(
+            gpui::deferred(crate::motion::enter_by(
                 div()
                     .absolute()
                     .top(px(30.0))
@@ -978,7 +978,10 @@ impl CommitBrowser {
                     }))
                     .child(self.branch_search.clone())
                     .child(list),
-            )
+                "branch-popover-enter",
+                crate::motion::FAST,
+                0.0,
+            ))
             .with_priority(10)
         });
 

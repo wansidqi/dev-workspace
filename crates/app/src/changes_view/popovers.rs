@@ -7,6 +7,7 @@ use gpui::{div, px, AnyElement};
 
 use super::*;
 use crate::commit_browser::PICKER_TREE;
+use crate::motion;
 use crate::task_tree::{filter_tree, tree_guide_lines, tree_guides};
 use crate::theme::TypeScale;
 /// Recently used branches listed above the rest.
@@ -36,7 +37,7 @@ impl ChangesView {
             Popover::Tasks => self.tasks_popover(cx),
         };
         Some(
-            gpui::deferred(
+            gpui::deferred(motion::enter_by(
                 div()
                     .absolute()
                     .top(px(8.0))
@@ -55,7 +56,10 @@ impl ChangesView {
                     // A click anywhere else closes it.
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_popover(cx)))
                     .child(content),
-            )
+                "changes-popover-enter",
+                motion::FAST,
+                0.0,
+            ))
             .with_priority(10)
             .into_any_element(),
         )

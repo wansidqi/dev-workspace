@@ -465,7 +465,7 @@ impl Render for CommandPalette {
 
         // Backdrop: dims the app and closes on an outside click. The panel
         // stops mouse-down propagation so clicks inside don't reach it.
-        div()
+        let backdrop = div()
             .id("palette-backdrop")
             .absolute()
             .top_0()
@@ -482,7 +482,7 @@ impl Render for CommandPalette {
                 cx.listener(|this, _, window, cx| this.close(window, cx)),
             )
             .on_key_down(cx.listener(Self::on_key_down))
-            .child(
+            .child(motion::enter(
                 div()
                     .id("palette-panel")
                     .flex()
@@ -552,7 +552,13 @@ impl Render for CommandPalette {
                                     .child("close"),
                             ),
                     ),
-            )
+                "palette-panel-enter",
+                motion::STANDARD,
+            ));
+        // The scrim only fades (shifting it would open a gap at the top); the
+        // panel on it also rises. Closing is instant: nothing invisible is
+        // left holding the keyboard or the pointer.
+        motion::enter_by(backdrop, "palette-enter", motion::FAST, 0.0)
     }
 }
 

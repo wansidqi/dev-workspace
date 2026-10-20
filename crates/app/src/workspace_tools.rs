@@ -11,6 +11,7 @@ use devspace_core::ProjectId;
 use gpui::{div, prelude::*, px, Context, Entity, PathPromptOptions, SharedString, Window};
 
 use crate::ide;
+use crate::motion;
 use crate::settings::{parse_scrollback, SettingsStore};
 use crate::state::AppState;
 use crate::text_input::TextInput;
@@ -450,7 +451,7 @@ impl Render for WorkspaceTools {
                 setting_row(
                     &theme,
                     "Reduce motion",
-                    "Turn off hover and selection transitions.",
+                    "Turn off animations and transitions. Controls still change state, just without the movement.",
                     switch(&theme, "toggle-motion", reduce_motion)
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_reduce_motion(cx))),
                 ),
@@ -573,9 +574,25 @@ impl Render for WorkspaceTools {
                             .px(theme.space_6)
                             .py(theme.space_6)
                             .gap(theme.space_8)
-                            .child(appearance)
-                            .child(tools)
-                            .child(data),
+                            // The three groups cascade in, 45 ms apart.
+                            .child(motion::enter_after(
+                                appearance,
+                                "settings-group-0",
+                                0,
+                                motion::STANDARD,
+                            ))
+                            .child(motion::enter_after(
+                                tools,
+                                "settings-group-1",
+                                1,
+                                motion::STANDARD,
+                            ))
+                            .child(motion::enter_after(
+                                data,
+                                "settings-group-2",
+                                2,
+                                motion::STANDARD,
+                            )),
                     ),
             )
     }

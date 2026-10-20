@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 
+use crate::motion;
 use crate::task_tree::{tree_guide_lines, tree_guides, TreeGeometry, TreeGuides};
 use crate::theme::{GlassTheme, TypeScale};
 use crate::ui::{
@@ -66,6 +67,9 @@ fn status_strip(theme: &GlassTheme, tasks: &[Task]) -> Div {
     let theme = *theme;
     let counts = status_counts(tasks);
     let total: usize = counts.iter().map(|(_, n)| n).sum();
+    // Keyed by project so switching projects shows the new split at once; only
+    // a change within the same project moves.
+    let project = tasks.first().map_or(0, |t| t.project_id.0 as u64);
     let bar = div()
         .flex()
         .h(px(6.0))
@@ -73,11 +77,20 @@ fn status_strip(theme: &GlassTheme, tasks: &[Task]) -> Div {
         .rounded_full()
         .overflow_hidden()
         .bg(theme.surface_sunken)
-        .children(counts.iter().filter(|(_, n)| *n > 0).map(|(status, n)| {
-            div()
-                .h_full()
-                .w(relative(*n as f32 / total as f32))
-                .bg(status_color(&theme, *status))
+        .children(counts.iter().enumerate().map(|(i, (status, n))| {
+            // Every status keeps a segment (zero-width when empty) so a count
+            // changing slides the boundaries instead of popping segments in.
+            let share = if total == 0 {
+                0.0
+            } else {
+                *n as f32 / total as f32
+            };
+            motion::follow(
+                div().h_full().bg(status_color(&theme, *status)),
+                ("status-segment", project * 8 + i as u64),
+                share,
+                |seg, w| seg.w(relative(w)),
+            )
         }));
     let legend = div()
         .flex()

@@ -150,6 +150,8 @@ struct Root {
     /// counter so only the newest toast's timer dismisses it.
     toast_seen: Option<(String, bool)>,
     toast_epoch: u64,
+    /// The toast is fading out (its last moments) and no longer takes clicks.
+    toast_leaving: bool,
     // --- settings / IDE / backup hooks (settings.rs, workspace_tools.rs) ---
     /// Persisted per-user settings (last project/task, terminal panel, IDE).
     settings: Entity<SettingsStore>,
@@ -772,15 +774,22 @@ impl Render for Root {
 
         /// A full-content view fills the canvas and clips to it, so a narrow
         /// window cuts it off instead of painting over the terminal panel.
-        fn fill(view: impl IntoElement) -> gpui::AnyElement {
-            div()
-                .flex()
-                .flex_1()
-                .h_full()
-                .min_w(px(0.0))
-                .overflow_hidden()
-                .child(view)
-                .into_any_element()
+        /// It fades and rises into place when `key` is new (a different view,
+        /// project, task or note), so switching reads as moving somewhere;
+        /// re-rendering the same view does not replay it.
+        fn fill(key: impl Into<gpui::ElementId>, view: impl IntoElement) -> gpui::AnyElement {
+            motion::enter(
+                div()
+                    .flex()
+                    .flex_1()
+                    .h_full()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .child(view),
+                key,
+                motion::FAST,
+            )
+            .into_any_element()
         }
 
         let mut note_page = (self.open_note.is_some()
@@ -788,27 +797,42 @@ impl Render for Root {
             && self.open_changes.is_none())
         .then(|| self.note_page(cx));
         let view = if let Some(history) = &self.open_history {
-            fill(history.clone())
+            fill(("view-history", history.entity_id()), history.clone())
         } else if let Some(changes) = &self.open_changes {
-            fill(changes.clone())
+            fill(("view-changes", changes.entity_id()), changes.clone())
         } else if let (Some(detail), None) = (&self.open_task, &self.open_note) {
-            fill(detail.clone())
+            fill(("view-task", detail.entity_id()), detail.clone())
         } else if let Some(page) = note_page.take() {
-            page
+            let note = self.open_note.as_ref().map_or(0, |(id, ..)| id.0 as u64);
+            fill(("view-note", note), page)
         } else if self.run_open {
-            fill(self.run_panel.clone())
+            fill("view-run", self.run_panel.clone())
         } else if self.timesheet_open {
-            fill(self.timesheet_panel.clone())
+            fill("view-timesheet", self.timesheet_panel.clone())
         } else if self.credentials_open {
-            fill(self.credentials_panel.clone())
+            fill("view-credentials", self.credentials_panel.clone())
         } else if self.settings_open {
-            fill(self.workspace_tools.clone())
+            fill("view-settings", self.workspace_tools.clone())
         } else {
-            self.project_page(window, cx)
+            let project = self
+                .state
+                .read(cx)
+                .selected_project
+                .map_or(0, |id| id.0 as u64);
+            let page = self.project_page(window, cx);
+            fill(("view-project", project), page)
         };
-        let terminal = self
-            .terminal_open
-            .then(|| self.terminal_panel.clone().into_any_element());
+        let terminal = self.terminal_open.then(|| {
+            // Fades in when opened; closing is instant (the shells keep
+            // running underneath either way).
+            motion::enter_by(
+                div().flex().flex_none().child(self.terminal_panel.clone()),
+                "terminal-panel-enter",
+                motion::LAYOUT,
+                0.0,
+            )
+            .into_any_element()
+        });
         let canvas = self.canvas(view, terminal);
         let toast = self.toast(cx);
 
@@ -1104,6 +1128,7 @@ fn main() -> Result<()> {
                         settings_open: false,
                         toast_seen: None,
                         toast_epoch: 0,
+                        toast_leaving: false,
                     };
                     // A visible terminal panel needs its first tab, exactly
                     // as when the user opens it; a hidden one spawns nothing.

@@ -470,13 +470,29 @@ impl Root {
         let notice = self.workspace_tools.read(cx).notice().cloned();
         if notice != self.toast_seen {
             self.toast_seen = notice.clone();
+            self.toast_leaving = false;
             if notice.is_some() {
                 self.toast_epoch += 1;
                 let epoch = self.toast_epoch;
                 cx.spawn(async move |this, cx| {
+                    // Start leaving FAST before the six seconds are up, so the
+                    // fade ends exactly when the toast is removed.
                     cx.background_executor()
-                        .timer(std::time::Duration::from_secs(6))
+                        .timer(std::time::Duration::from_secs(6) - motion::FAST)
                         .await;
+                    let animate = this
+                        .update(cx, |this, cx| {
+                            let animate = !cx.reduce_motion();
+                            if this.toast_epoch == epoch && animate {
+                                this.toast_leaving = true;
+                                cx.notify();
+                            }
+                            animate
+                        })
+                        .unwrap_or(false);
+                    if animate {
+                        cx.background_executor().timer(motion::FAST).await;
+                    }
                     let _ = this.update(cx, |this, cx| {
                         if this.toast_epoch == epoch {
                             this.workspace_tools
@@ -494,51 +510,60 @@ impl Root {
         } else {
             theme.success
         };
+        let leaving = self.toast_leaving;
+        let epoch = self.toast_epoch;
+        let card = div()
+            .id("toast")
+            // A leaving toast no longer takes clicks, so nothing
+            // invisible is left under it.
+            .when(!leaving, |d| d.occlude())
+            .flex()
+            .items_start()
+            .gap(theme.space_3)
+            .max_w(px(420.0))
+            .px(theme.space_4)
+            .py(theme.space_3)
+            .rounded(theme.radius_md)
+            .bg(theme.surface_raised)
+            .border_1()
+            .border_color(theme.border_strong)
+            .shadow_lg()
+            .child(div().mt(px(2.0)).child(icon(
+                if is_error {
+                    Icon::Alert
+                } else {
+                    Icon::CircleCheck
+                },
+                16.0,
+                tint,
+            )))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .t_body()
+                    .text_color(theme.text_primary)
+                    .child(message),
+            )
+            .child(
+                icon_button(&theme, Icon::X, "toast-dismiss", theme.text_primary).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.workspace_tools
+                            .update(cx, |tools, cx| tools.clear_notice(cx));
+                    }),
+                ),
+            );
+        let card = if leaving {
+            motion::leave(card, ("toast-leave", epoch), motion::FAST).into_any_element()
+        } else {
+            motion::enter(card, ("toast-enter", epoch), motion::STANDARD).into_any_element()
+        };
         Some(
             div()
                 .absolute()
                 .bottom(px(24.0))
                 .right(px(24.0))
-                .child(
-                    div()
-                        .id("toast")
-                        .occlude()
-                        .flex()
-                        .items_start()
-                        .gap(theme.space_3)
-                        .max_w(px(420.0))
-                        .px(theme.space_4)
-                        .py(theme.space_3)
-                        .rounded(theme.radius_md)
-                        .bg(theme.surface_raised)
-                        .border_1()
-                        .border_color(theme.border_strong)
-                        .shadow_lg()
-                        .child(div().mt(px(2.0)).child(icon(
-                            if is_error {
-                                Icon::Alert
-                            } else {
-                                Icon::CircleCheck
-                            },
-                            16.0,
-                            tint,
-                        )))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .t_body()
-                                .text_color(theme.text_primary)
-                                .child(message),
-                        )
-                        .child(
-                            icon_button(&theme, Icon::X, "toast-dismiss", theme.text_primary)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.workspace_tools
-                                        .update(cx, |tools, cx| tools.clear_notice(cx));
-                                })),
-                        ),
-                )
+                .child(card)
                 .into_any_element(),
         )
     }

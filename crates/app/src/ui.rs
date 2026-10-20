@@ -2,6 +2,7 @@
 //! empty states. Every screen builds from these so controls look and behave
 //! the same everywhere; colours, radii and type all come from the theme.
 
+use crate::motion;
 use crate::theme::{GlassTheme, TypeScale, CODE_FONT};
 use devspace_core::TaskStatus;
 use gpui::{
@@ -534,29 +535,37 @@ pub fn notice(theme: &GlassTheme, message: impl Into<SharedString>, is_error: bo
 /// An on/off switch. Attach `.on_click(..)` at the call site.
 pub fn switch(theme: &GlassTheme, id: impl Into<ElementId>, on: bool) -> Stateful<Div> {
     let theme = *theme;
+    let id: ElementId = id.into();
+    // The outer element keeps the id and the hit area so the caller's
+    // `.on_click` lands on it; the inner track is what animates.
+    let motion_id = ElementId::from((id.clone(), "motion"));
+    let track = div()
+        .flex()
+        .items_center()
+        .justify_start()
+        .size_full()
+        .p(px(2.0))
+        .rounded_full()
+        .border_1();
     div()
         .id(id)
         .flex()
         .flex_none()
-        .items_center()
         .w(px(34.0))
         .h(px(20.0))
-        .p(px(2.0))
-        .rounded_full()
-        .border_1()
         .cursor_pointer()
-        .when(on, |d| {
-            d.bg(theme.accent).border_color(theme.accent).justify_end()
-        })
-        .when(!on, |d| {
-            d.bg(theme.surface_sunken)
-                .border_color(theme.border_strong)
-                .justify_start()
-        })
-        .child(div().size(px(14.0)).rounded_full().bg(if on {
-            theme.accent_fg
-        } else {
-            theme.text_secondary
+        .child(motion::phase(track, motion_id, on, move |track, p| {
+            // The thumb travels the track's inner width minus its own.
+            let thumb = div()
+                .relative()
+                .left(px(14.0 * p))
+                .size(px(14.0))
+                .rounded_full()
+                .bg(theme.text_secondary.blend(theme.accent_fg.opacity(p)));
+            track
+                .bg(theme.surface_sunken.blend(theme.accent.opacity(p)))
+                .border_color(theme.border_strong.blend(theme.accent.opacity(p)))
+                .child(thumb)
         }))
 }
 
@@ -581,25 +590,44 @@ pub fn tab(
     active: bool,
 ) -> Stateful<Div> {
     let theme = *theme;
+    let id: ElementId = id.into();
+    // The 2px underline is an overlay on the (transparent) border row that
+    // grows out from the centre when the tab becomes active.
+    let underline_id = ElementId::from((id.clone(), "underline"));
+    let underline = motion::phase(
+        div()
+            .absolute()
+            .bottom(px(-2.0))
+            .left_0()
+            .w_full()
+            .h(px(2.0)),
+        underline_id,
+        active,
+        move |bar, p| {
+            bar.left(gpui::relative((1.0 - p) / 2.0))
+                .w(gpui::relative(p))
+                .bg(theme.accent)
+        },
+    );
     div()
         .id(id)
+        .relative()
         .flex()
         .items_center()
         .gap(px(6.0))
         .h(px(36.0))
         .mb(px(-1.0))
         .border_b_2()
+        .border_color(gpui::transparent_black())
         .t_body()
         .t_strong()
         .cursor_pointer()
-        .when(active, |d| {
-            d.border_color(theme.accent).text_color(theme.text_primary)
-        })
+        .when(active, |d| d.text_color(theme.text_primary))
         .when(!active, |d| {
-            d.border_color(gpui::transparent_black())
-                .text_color(theme.text_secondary)
+            d.text_color(theme.text_secondary)
                 .hover(move |s| s.text_color(theme.text_primary))
         })
+        .child(underline)
         .child(label.into())
         .children(count.filter(|n| *n > 0).map(|n| {
             div()
@@ -664,29 +692,42 @@ fn checkbox_inner(
     state: CheckState,
 ) -> Stateful<Div> {
     let theme = *theme;
+    let id: ElementId = id.into();
+    let motion_id = ElementId::from((id.clone(), "motion"));
     let filled = state != CheckState::Off;
+    // The mark stays in place while the box empties so it fades out rather
+    // than vanishing.
+    let mark = if state == CheckState::Mixed {
+        Icon::Minus
+    } else {
+        Icon::Check
+    };
+    let boxed = div()
+        .group("checkbox")
+        .flex()
+        .items_center()
+        .justify_center()
+        .size_full()
+        .rounded(px(4.0))
+        .border_1()
+        .when(!filled, |d| {
+            d.group_hover("checkbox", move |s| s.border_color(theme.accent))
+        });
     div()
         .id(id)
         .flex()
         .flex_none()
-        .items_center()
-        .justify_center()
         .size(px(16.0))
-        .rounded(px(4.0))
-        .border_1()
         .cursor_pointer()
-        .when(filled, |d| d.bg(theme.accent).border_color(theme.accent))
-        .when(!filled, |d| {
-            d.bg(theme.surface_sunken)
-                .border_color(theme.border_strong)
-                .hover(move |s| s.border_color(theme.accent))
-        })
-        .when(state == CheckState::On, |d| {
-            d.child(icon(Icon::Check, 12.0, theme.accent_fg))
-        })
-        .when(state == CheckState::Mixed, |d| {
-            d.child(icon(Icon::Minus, 12.0, theme.accent_fg))
-        })
+        .child(motion::phase(boxed, motion_id, filled, move |boxed, p| {
+            boxed
+                .bg(theme.surface_sunken.blend(theme.accent.opacity(p)))
+                .when(filled, |d| d.border_color(theme.accent))
+                .when(!filled, |d| {
+                    d.border_color(theme.border_strong.blend(theme.accent.opacity(p)))
+                })
+                .child(icon(mark, 12.0, theme.accent_fg.opacity(p)))
+        }))
 }
 
 // ---- tooltips -------------------------------------------------------------
@@ -713,36 +754,37 @@ impl gpui::Render for TooltipView {
         // pointer near the window edge), which would cover the control
         // being pointed at (and its neighbours). The transparent margin pushes
         // the visible box below and to the right of it (or above, when flipped).
-        div()
-            .pt(px(TOOLTIP_CLEARANCE))
-            .pb(px(TOOLTIP_CLEARANCE))
-            .pl(px(8.0))
-            .child(
-                div()
-                    .max_w(px(260.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .px(theme.space_3)
-                    .py(theme.space_2)
-                    .rounded(theme.radius_md)
-                    .border_1()
-                    .border_color(theme.border_light)
-                    .bg(theme.surface_solid)
-                    .shadow_lg()
-                    .child(
-                        div()
-                            .t_small()
-                            .t_strong()
-                            .text_color(theme.text_primary)
-                            .child(self.title.clone()),
-                    )
-                    .children(
-                        self.hint.clone().map(|hint| {
+        let card =
+            div()
+                .pt(px(TOOLTIP_CLEARANCE))
+                .pb(px(TOOLTIP_CLEARANCE))
+                .pl(px(8.0))
+                .child(
+                    div()
+                        .max_w(px(260.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .px(theme.space_3)
+                        .py(theme.space_2)
+                        .rounded(theme.radius_md)
+                        .border_1()
+                        .border_color(theme.border_light)
+                        .bg(theme.surface_solid)
+                        .shadow_lg()
+                        .child(
+                            div()
+                                .t_small()
+                                .t_strong()
+                                .text_color(theme.text_primary)
+                                .child(self.title.clone()),
+                        )
+                        .children(self.hint.clone().map(|hint| {
                             div().t_small().text_color(theme.text_secondary).child(hint)
-                        }),
-                    ),
-            )
+                        })),
+                );
+        // A pure fade: a tooltip that also moved would seem to chase the pointer.
+        motion::enter_by(card, "tooltip-enter", motion::MICRO, 0.0)
     }
 }
 
