@@ -205,7 +205,23 @@ history-rewriting operations — the same split GitHub Desktop uses (it bundles
 git rather than using libgit2 for writes). See CLAUDE.md "Tech stack" and
 "Security rules".
 
+Multi-repo (applies to every phase): GitHub Desktop shows one repo at a
+time; here each view covers all repos linked to the project, grouped and
+labeled by repo, with a repo filter (like the history browser's chips) to
+narrow to one. Git has no cross-repo commit, so multi-repo actions run once
+per repo and report per-repo results; one repo failing never stops the rest.
+
 Phase 1 — local working copy (git2 only)
+- [ ] Repos overview: one row per linked repo with current branch, changed
+      file count, ahead/behind (once Phase 2 lands) and a dirty marker
+- [ ] Multi-repo Changes view: changed files from all repos in one list,
+      grouped under repo headers, collapsible, each repo's status loaded on
+      its own background task
+- [ ] Multi-repo commit: one summary/description, commits in every repo that
+      has staged files (or the ticked repos), result per repo
+- [ ] Branch switch/create across repos: apply the same branch name to the
+      selected repos (e.g. a task branch spanning frontend + backend), with
+      per-repo results; repos where it is missing are listed, not failed
 - [ ] `devspace-git`: working-copy status per repo (staged, unstaged,
       untracked, conflicted, renamed)
 - [ ] File diff (workdir vs index, index vs HEAD, and commit diffs for the
@@ -222,6 +238,9 @@ Phase 1 — local working copy (git2 only)
       auto-link new commits to the active task
 
 Phase 2 — remotes (git CLI)
+- [ ] "Fetch all" / "Pull all" / "Push all" across the project's repos,
+      run in parallel with a small concurrency cap, per-repo progress and
+      errors
 - [ ] Resolve the git executable once; clear error when it is missing
 - [ ] Fetch, pull (fast-forward / merge per config), push (set upstream on
       first push), ahead/behind counts, one "sync" button, periodic background
