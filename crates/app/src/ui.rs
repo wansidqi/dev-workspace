@@ -699,6 +699,9 @@ pub struct TooltipView {
     theme: GlassTheme,
 }
 
+/// Transparent space above a tooltip so it clears the 24px controls it points at.
+const TOOLTIP_CLEARANCE: f32 = 22.0;
+
 impl gpui::Render for TooltipView {
     fn render(
         &mut self,
@@ -706,29 +709,39 @@ impl gpui::Render for TooltipView {
         _cx: &mut gpui::Context<Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
+        // GPUI puts a tooltip's corner at the pointer (flipping it above the
+        // pointer near the window edge), which would cover the control
+        // being pointed at (and its neighbours). The transparent margin pushes
+        // the visible box below and to the right of it (or above, when flipped).
         div()
-            .max_w(px(300.0))
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .px(theme.space_3)
-            .py(theme.space_2)
-            .rounded(theme.radius_md)
-            .border_1()
-            .border_color(theme.border_light)
-            .bg(theme.surface_solid)
-            .shadow_lg()
+            .pt(px(TOOLTIP_CLEARANCE))
+            .pb(px(TOOLTIP_CLEARANCE))
+            .pl(px(8.0))
             .child(
                 div()
-                    .t_small()
-                    .t_strong()
-                    .text_color(theme.text_primary)
-                    .child(self.title.clone()),
-            )
-            .children(
-                self.hint
-                    .clone()
-                    .map(|hint| div().t_small().text_color(theme.text_secondary).child(hint)),
+                    .max_w(px(260.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .px(theme.space_3)
+                    .py(theme.space_2)
+                    .rounded(theme.radius_md)
+                    .border_1()
+                    .border_color(theme.border_light)
+                    .bg(theme.surface_solid)
+                    .shadow_lg()
+                    .child(
+                        div()
+                            .t_small()
+                            .t_strong()
+                            .text_color(theme.text_primary)
+                            .child(self.title.clone()),
+                    )
+                    .children(
+                        self.hint.clone().map(|hint| {
+                            div().t_small().text_color(theme.text_secondary).child(hint)
+                        }),
+                    ),
             )
     }
 }

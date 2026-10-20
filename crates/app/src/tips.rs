@@ -5,6 +5,8 @@
 //! a whole screen lives in one place and a newcomer can learn the screen by
 //! pointing at things. Ids with a number suffix (`("file-check", 7)`) match by
 //! their name. Add a line here to give a control a tooltip.
+//!
+//! Keep them short: a title of a few words and at most one plain sentence.
 
 /// `(title, what-it-does)` for the control with this id name.
 pub fn lookup(name: &str) -> Option<(&'static str, Option<&'static str>)> {
@@ -13,148 +15,124 @@ pub fn lookup(name: &str) -> Option<(&'static str, Option<&'static str>)> {
         // ---- Changes: header ---------------------------------------------
         "changes-back" => Some(("Back to the project", None)),
         "changes-all-branches" => tip(
-            "Switch or create a branch in every repo",
-            "Applies to all the project's repos at once. To change just one repo, use the branch button on its row.",
+            "Branches for all repos",
+            "Switch or create a branch in every repo at once.",
         ),
         "changes-refresh" => tip(
-            "Re-read the repositories",
-            "This also happens by itself whenever you come back to this window.",
+            "Refresh",
+            "Re-reads every repo; this also happens when you return here.",
         ),
-        "changes-notice-dismiss" => Some(("Dismiss this message", None)),
-        "changes-repo-all" => Some(("Show the changes of every linked repo", None)),
+        "changes-notice-dismiss" => Some(("Dismiss", None)),
+        "changes-repo-all" => Some(("Show every repo", None)),
         "changes-repo-filter" => tip(
             "Show only this repo",
-            "Narrows the list, and a commit then goes only to this repo.",
+            "A commit then goes to this repo only.",
         ),
 
         // ---- Changes: a repo's row and its files -----------------------------
-        "repo-collapse" => Some(("Collapse or expand this repo's files", None)),
+        "repo-collapse" => Some(("Collapse or expand", None)),
         "repo-check" => tip(
-            "Stage or unstage every file in this repo",
-            "Staged files go into the next commit. A dash means only some files are staged.",
+            "Stage or unstage all",
+            "Staged files go into the next commit.",
         ),
         "repo-branch" => tip(
-            "This repo's branch",
-            "Click to switch, create, rename or delete branches in this repo. ↑ means commits not pushed yet, ↓ commits you don't have yet.",
+            "Change branch",
+            "Switch, create, rename or delete branches in this repo.",
         ),
         "repo-stash-now" => tip(
-            "Stash all changes in this repo",
-            "Moves every change, new files included, into this branch's stash and cleans the working copy. Bring them back later from the Stashed section.",
+            "Stash all changes",
+            "Sets every change aside for this branch; restore from Stashed.",
         ),
         "repo-discard" => tip(
-            "Discard all changes in this repo",
-            "Throws away every uncommitted change. You are asked first, and a backup copy is kept in .git/devspace-discarded.",
+            "Discard all changes",
+            "Throws away every change in this repo; you are asked first.",
         ),
         "file-check" => tip(
-            "Include in the next commit",
-            "Tick to stage the file. A dash means only part of it is staged.",
+            "Include in the commit",
+            "A dash means only part of the file is staged.",
         ),
         "file-stash" => tip(
             "Stash this file",
-            "Moves just this file's changes into the branch's stash so the rest of your work stays.",
+            "Set just this file aside; the rest stays.",
         ),
-        "file-open" => tip(
-            "Open in your IDE",
-            "Double-clicking the row does the same. The IDE command is in Settings.",
-        ),
-        "file-discard" => tip(
-            "Discard changes to this file",
-            "You are asked first, and a backup copy is kept.",
-        ),
+        "file-open" => tip("Open in IDE", "Double-clicking the file does the same."),
+        "file-discard" => tip("Discard this file's changes", "You are asked first."),
 
         // ---- Changes: the stash ------------------------------------------------
-        "stash-collapse" => Some(("Collapse or expand the stashed files", None)),
+        "stash-collapse" => Some(("Collapse or expand", None)),
         "stash-restore" => tip(
-            "Put stashed files back",
-            "Restores the ticked files, or all of them if none is ticked. Edits you made since are kept; a file that would conflict stays in the stash.",
+            "Restore stashed files",
+            "Puts back the ticked files (all if none), keeping newer edits.",
         ),
         "stash-discard" => tip(
-            "Delete stashed files",
-            "Permanently removes the ticked files from the stash, or all of them if none is ticked. You are asked first.",
+            "Delete from the stash",
+            "Removes the ticked files (all if none); you are asked first.",
         ),
-        "stash-check" => tip(
-            "Select to restore or delete only some files",
-            "Then use Restore or the bin on the Stashed row.",
-        ),
+        "stash-check" => tip("Select", "Pick the files to restore or delete."),
         "stash-restore-one" => tip(
             "Restore this file",
-            "Puts it back in your working copy and removes it from the stash.",
+            "Puts it back and removes it from the stash.",
         ),
         "stash-diff-restore" => tip(
             "Restore this file",
-            "Puts it back in your working copy and removes it from the stash.",
+            "Puts it back and removes it from the stash.",
         ),
-        "stash-diff-discard" => tip(
-            "Delete this file from the stash",
-            "You are asked first.",
-        ),
+        "stash-diff-discard" => tip("Delete from the stash", "You are asked first."),
 
         // ---- Changes: reading and staging a diff -------------------------------
         "side-unstaged" => tip(
-            "Changes not staged yet",
-            "What you edited since the last stage. Staging moves it to the other tab.",
+            "Not staged yet",
+            "Edits that won't be committed until you stage them.",
         ),
-        "side-staged" => tip(
-            "Changes that will be committed",
-            "These go into the next commit.",
-        ),
+        "side-staged" => tip("Staged", "These go into the next commit."),
         "hunk-stage" => tip(
             "Stage or unstage this block",
-            "A block is one run of nearby changes. Only this block moves.",
+            "Moves only this group of changes.",
         ),
-        "hunk-discard" => tip(
-            "Discard this block",
-            "Throws away just this block of changes. You are asked first.",
-        ),
-        "line-check" => tip(
-            "Select this line",
-            "Shift-click another line to select everything between. Then stage, unstage or discard the selection.",
-        ),
+        "hunk-discard" => tip("Discard this block", "You are asked first."),
+        "line-check" => tip("Select line", "Shift-click to select a range."),
         "lines-stage" => tip(
-            "Stage or unstage the selected lines",
-            "Only the lines you ticked, so one file can go into two commits.",
+            "Stage or unstage the lines",
+            "Only the selected lines move.",
         ),
-        "lines-discard" => tip(
-            "Discard the selected lines",
-            "Throws away only those lines. You are asked first.",
-        ),
-        "lines-clear" => Some(("Clear the selection", None)),
+        "lines-discard" => tip("Discard the selected lines", "You are asked first."),
+        "lines-clear" => Some(("Clear selection", None)),
 
         // ---- Changes: commit box ------------------------------------------------
         "changes-task-link" => tip(
-            "Link new commits to a task",
-            "Commits you make now are attached to this task in every repo, so they show on its Commits tab.",
+            "Link to a task",
+            "New commits show on the task's Commits tab.",
         ),
         "changes-amend" => tip(
-            "Amend the last commit",
-            "Replaces the previous commit instead of adding a new one. Don't amend a commit you already pushed.",
+            "Amend last commit",
+            "Replaces the previous commit; not for ones already pushed.",
         ),
         "changes-commit" => tip(
-            "Commit the staged files",
-            "Makes one commit in each repo that has staged files, all with the same message. Tick files on the left to stage them.",
+            "Commit staged files",
+            "One commit in each repo that has staged files.",
         ),
 
         // ---- Changes: popovers ---------------------------------------------------
         "popover-close" => Some(("Close", None)),
         "mode-bring" => tip(
-            "Bring your changes along",
-            "Your uncommitted edits move to the new branch. If one would be overwritten, nothing happens and you are told.",
+            "Bring your changes",
+            "They move to the new branch, unless one would be overwritten.",
         ),
         "mode-stash" => tip(
-            "Stash your changes first",
-            "They are saved in the current branch's stash, then the branch is switched. Restore them when you come back.",
+            "Stash them first",
+            "They wait in this branch's stash until you come back.",
         ),
-        "branch-rename" => Some(("Rename this branch", None)),
+        "branch-rename" => Some(("Rename", None)),
         "branch-delete" => tip(
-            "Delete this branch",
-            "If it has commits that aren't in your current branch, you are asked to confirm.",
+            "Delete branch",
+            "Asks first if it has commits that aren't merged.",
         ),
         "use-task-branch" => tip(
-            "Switch every repo to the task's branch",
-            "Creates it in the repos that don't have it yet.",
+            "Use the task's branch",
+            "Switches every repo, creating it where missing.",
         ),
         "confirm-yes" => Some(("Do it", None)),
-        "confirm-no" => Some(("Cancel, nothing is changed", None)),
+        "confirm-no" => Some(("Cancel", None)),
         _ => None,
     }
 }
@@ -170,22 +148,41 @@ mod tests {
     }
 
     #[test]
-    fn every_tip_has_a_short_title() {
-        // The tooltip is a glance, not a paragraph.
+    fn tips_stay_short() {
+        // A tooltip is a glance: a few words, and at most one short sentence.
         for name in [
-            "changes-back",
+            "changes-all-branches",
+            "changes-refresh",
+            "changes-repo-filter",
+            "repo-check",
             "repo-branch",
+            "repo-stash-now",
+            "repo-discard",
+            "file-check",
             "file-stash",
+            "file-open",
+            "file-discard",
             "stash-restore",
+            "stash-discard",
+            "stash-restore-one",
+            "side-unstaged",
+            "hunk-stage",
             "line-check",
+            "lines-stage",
+            "changes-task-link",
+            "changes-amend",
             "changes-commit",
+            "mode-bring",
             "mode-stash",
+            "branch-delete",
+            "use-task-branch",
         ] {
             let (title, hint) = lookup(name).unwrap();
-            assert!(title.len() <= 50, "{name}: {title}");
-            if let Some(h) = hint {
-                assert!(h.len() <= 190, "{name}: hint is {} chars", h.len());
-            }
+            assert!(title.len() <= 32, "{name}: title `{title}`");
+            let hint = hint.unwrap_or_else(|| panic!("{name} has no hint"));
+            assert!(hint.len() <= 80, "{name}: hint is {} chars", hint.len());
+            assert!(!hint.contains('/'), "{name}: no paths in tooltips");
+            assert_eq!(hint.matches('.').count(), 1, "{name}: one sentence");
         }
     }
 }
