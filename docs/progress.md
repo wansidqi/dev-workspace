@@ -271,6 +271,12 @@ screenshot (see "Not verified by hand" below).
         switches every repo to it, creating it where missing
   - [x] Refreshes after every action, on Refresh, and when the window regains
         focus (edits made in the IDE or terminal)
+  - [x] Open a changed file in the IDE: double-click the row or the `<>` icon
+        (uses the Settings IDE command; the path is checked to be inside the
+        repo and passed as one argument, never through a shell)
+  - [x] Popovers close on a click anywhere outside them (also the history
+        browser's branch dropdown); the task picker is the same tree as the
+        commit browser's, without status icons
 - Not done / known gaps in Phase 1:
   - [ ] Syntax highlighting in the diff (colouring is +/- only)
   - [ ] Multi-line commit description (the input is single-line)

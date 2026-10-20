@@ -38,7 +38,7 @@ const ROW_HEIGHT: f32 = 56.0;
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
 const SIDE_PANEL_WIDTH: f32 = 360.0;
 /// Task picker rows: the "icon" is an empty slot the tree lines hang from.
-const PICKER_TREE: TreeGeometry = TreeGeometry {
+pub(crate) const PICKER_TREE: TreeGeometry = TreeGeometry {
     indent: 16.0,
     icon: 8.0,
     row_height: 32.0,
@@ -972,6 +972,10 @@ impl CommitBrowser {
                     .bg(theme.surface_solid)
                     .shadow_lg()
                     .occlude()
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.branches_open = false;
+                        cx.notify();
+                    }))
                     .child(self.branch_search.clone())
                     .child(list),
             )

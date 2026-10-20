@@ -6,11 +6,12 @@ use std::collections::BTreeMap;
 use gpui::{div, px, AnyElement};
 
 use super::*;
+use crate::commit_browser::PICKER_TREE;
 use crate::date::format_date;
+use crate::task_tree::{filter_tree, tree_guide_lines, tree_guides};
 use crate::theme::TypeScale;
 use crate::ui::{
-    button, chip, icon, icon_button, section_label, segment, segmented, status_style, ButtonKind,
-    Icon,
+    button, chip, icon, icon_button, section_label, segment, segmented, ButtonKind, Icon,
 };
 
 const POPOVER_WIDTH: f32 = 372.0;
@@ -40,6 +41,8 @@ impl ChangesView {
                     .bg(theme.surface_solid)
                     .shadow_lg()
                     .occlude()
+                    // A click anywhere else closes it.
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_popover(cx)))
                     .child(content),
             )
             .with_priority(10)
@@ -451,37 +454,57 @@ impl ChangesView {
 
     fn tasks_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = self.theme;
-        let query = self.task_filter.read(cx).content.to_lowercase();
+        let query = self.task_filter.read(cx).content.to_string();
         let tasks = crate::flatten_tasks(&self.state.read(cx).tasks);
         let current = self.task_link;
 
-        let rows = tasks
+        // The same tree the commit browser's picker draws: connector lines
+        // hang each subtask off its parent, and a search keeps the parents of
+        // every match so the result is still a tree.
+        let rows = filter_tree(tasks, &query);
+        let depths: Vec<usize> = rows.iter().map(|(_, depth, _)| *depth).collect();
+        let empty = rows.is_empty();
+        let rows = rows
             .into_iter()
-            .filter(|(t, _)| query.is_empty() || t.title.to_lowercase().contains(&query))
-            .map(|(task, depth)| {
+            .enumerate()
+            .map(|(ix, (task, depth, matched))| {
                 let id = task.id;
-                let (glyph, color) = status_style(&theme, task.status);
+                let guides = tree_guides(&depths, ix);
                 div()
                     .id(("task-pick", id.0 as u64))
+                    .relative()
                     .flex()
+                    .flex_none()
                     .items_center()
-                    .gap(theme.space_2)
-                    .w_full()
-                    .h(px(30.0))
-                    .pl(px(8.0 + depth as f32 * 16.0))
+                    .gap(theme.space_1)
+                    .h(px(PICKER_TREE.row_height))
+                    .pl(theme.space_2 + px(PICKER_TREE.indent * depth as f32))
                     .pr(theme.space_2)
                     .rounded(theme.radius_sm)
                     .cursor_pointer()
                     .when(current == Some(id), |d| d.bg(theme.accent.opacity(0.10)))
                     .hover(move |s| s.bg(theme.surface_hover))
-                    .child(icon(glyph, 13.0, color))
+                    .children(tree_guide_lines(
+                        &theme,
+                        &guides,
+                        PICKER_TREE,
+                        theme.space_2,
+                    ))
+                    // Empty slot the tree lines hang from, instead of a status icon.
+                    .child(div().flex_none().w(px(PICKER_TREE.icon)))
                     .child(
                         div()
                             .flex_1()
                             .min_w(px(0.0))
                             .truncate()
                             .t_body()
-                            .text_color(theme.text_primary)
+                            .when(depth == 0, |d| d.t_strong())
+                            .text_color(if matched {
+                                theme.text_primary
+                            } else {
+                                // Shown only as the parent of a match.
+                                theme.text_muted
+                            })
                             .child(task.title.clone()),
                     )
                     .when_some(task.branch.clone(), |d, b| {
@@ -523,12 +546,20 @@ impl ChangesView {
                     .child("No task")
                     .on_click(cx.listener(|this, _, _, cx| this.set_task_link(None, cx))),
             )
+            .when(empty, |d| {
+                d.child(
+                    div()
+                        .px(theme.space_2)
+                        .t_small()
+                        .text_color(theme.text_secondary)
+                        .child("No tasks match."),
+                )
+            })
             .child(
                 div()
                     .id("task-list")
                     .flex()
                     .flex_col()
-                    .gap(px(2.0))
                     .max_h(px(300.0))
                     .overflow_y_scroll()
                     .children(rows),

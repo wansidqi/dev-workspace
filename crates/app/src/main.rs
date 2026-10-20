@@ -567,8 +567,9 @@ impl Root {
         let theme = self.theme;
         let state = self.state.clone();
         let root = cx.entity();
+        let settings = self.settings.clone();
         let view = cx.new(|cx| {
-            let mut view = ChangesView::new(cx, state, theme);
+            let mut view = ChangesView::new(cx, state, settings, theme);
             view.on_close = Some(Box::new(move |_window, cx| {
                 root.update(cx, |root, cx| {
                     root.open_changes = None;

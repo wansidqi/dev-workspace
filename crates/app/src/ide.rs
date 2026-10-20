@@ -130,26 +130,60 @@ pub fn plan_launch(
     search_dirs: &[PathBuf],
     extensions: &[String],
 ) -> Result<IdeLaunch, String> {
-    let mut words = split_command(command).map_err(|e| e.to_string())?;
     if !folder.is_dir() {
         return Err(format!(
             "The project folder does not exist: {}",
             folder.display()
         ));
     }
+    plan_target(command, folder, search_dirs, extensions)
+}
+
+/// Builds the launch that opens one file of `root` (a path relative to it,
+/// as git reports changed files). The path must stay inside `root` and name
+/// an existing file, and it reaches the editor as one discrete argument.
+pub fn plan_open_file(
+    command: &str,
+    root: &Path,
+    relative: &str,
+    search_dirs: &[PathBuf],
+    extensions: &[String],
+) -> Result<IdeLaunch, String> {
+    let inside = !relative.is_empty()
+        && Path::new(relative)
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)));
+    if !inside {
+        return Err(format!("Not a path inside the repository: {relative}"));
+    }
+    let target = root.join(relative);
+    if !target.is_file() {
+        return Err(format!(
+            "{relative} doesn't exist on disk (was it deleted?)"
+        ));
+    }
+    plan_target(command, &target, search_dirs, extensions)
+}
+
+/// The IDE command with `target` appended as its final argument.
+fn plan_target(
+    command: &str,
+    target: &Path,
+    search_dirs: &[PathBuf],
+    extensions: &[String],
+) -> Result<IdeLaunch, String> {
+    let mut words = split_command(command).map_err(|e| e.to_string())?;
     let program_word = words.remove(0);
     let program = resolve_program(&program_word, search_dirs, extensions).ok_or_else(|| {
         format!("Couldn't find \"{program_word}\" — check the IDE command and your PATH")
     })?;
-    if is_batch_file(&program) && has_cmd_metacharacters(&folder.to_string_lossy()) {
-        return Err(
-            "This folder's name can't be passed safely through a .cmd launcher; \
+    if is_batch_file(&program) && has_cmd_metacharacters(&target.to_string_lossy()) {
+        return Err("This path can't be passed safely through a .cmd launcher; \
              set the IDE command to the editor's .exe instead"
-                .to_string(),
-        );
+            .to_string());
     }
     let mut args: Vec<OsString> = words.into_iter().map(OsString::from).collect();
-    args.push(folder.as_os_str().to_owned());
+    args.push(target.as_os_str().to_owned());
     Ok(IdeLaunch { program, args })
 }
 
@@ -193,6 +227,17 @@ fn environment_lookup() -> (Vec<PathBuf>, Vec<String>) {
 pub fn open_in_ide(command: &str, folder: &Path) -> Result<(), String> {
     let (dirs, extensions) = environment_lookup();
     let launch = plan_launch(command, folder, &dirs, &extensions)?;
+    spawn_detached(launch)
+}
+
+/// Opens one file of `root` in the IDE (see [`plan_open_file`]).
+pub fn open_file_in_ide(command: &str, root: &Path, relative: &str) -> Result<(), String> {
+    let (dirs, extensions) = environment_lookup();
+    let launch = plan_open_file(command, root, relative, &dirs, &extensions)?;
+    spawn_detached(launch)
+}
+
+fn spawn_detached(launch: IdeLaunch) -> Result<(), String> {
     let mut process = std::process::Command::new(&launch.program);
     process
         .args(&launch.args)
@@ -362,6 +407,40 @@ mod tests {
         assert!(unknown.contains("Couldn't find"), "{unknown}");
         let quote = plan_launch("fakeide \"x", &d.0, &dirs, &[]).unwrap_err();
         assert!(quote.contains("quote"), "{quote}");
+    }
+
+    #[test]
+    fn a_file_is_one_discrete_final_argument_and_must_stay_inside_the_repo() {
+        let d = Dirs::new("openfile");
+        std::fs::write(d.0.join("fakeide"), "").unwrap();
+        let repo = d.0.join("repo");
+        std::fs::create_dir_all(repo.join("src dir")).unwrap();
+        std::fs::write(repo.join("src dir").join("a b; rm -rf.ts"), "x").unwrap();
+        let dirs = std::slice::from_ref(&d.0);
+
+        let plan = plan_open_file(
+            "fakeide --reuse-window",
+            &repo,
+            "src dir/a b; rm -rf.ts",
+            dirs,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            plan.args,
+            vec![
+                OsString::from("--reuse-window"),
+                repo.join("src dir/a b; rm -rf.ts").as_os_str().to_owned()
+            ]
+        );
+        for bad in ["", "../fakeide", "/etc/passwd", "src dir/../../fakeide"] {
+            assert!(
+                plan_open_file("fakeide", &repo, bad, dirs, &[]).is_err(),
+                "{bad:?}"
+            );
+        }
+        let gone = plan_open_file("fakeide", &repo, "src dir/deleted.ts", dirs, &[]).unwrap_err();
+        assert!(gone.contains("doesn't exist"), "{gone}");
     }
 
     #[test]

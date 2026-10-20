@@ -503,7 +503,15 @@ impl ChangesView {
             })
             .on_click({
                 let path = path.clone();
-                cx.listener(move |this, _, _, cx| this.select_file(repo, path.clone(), cx))
+                cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                    // A double-click opens the file in the IDE; the first click of it
+                    // has already selected the file.
+                    if event.click_count() >= 2 {
+                        this.open_file(repo, path.clone(), cx);
+                    } else {
+                        this.select_file(repo, path.clone(), cx);
+                    }
+                })
             })
             .child(checkbox(&theme, ("file-check", key), check).on_click({
                 let path = path.clone();
@@ -548,6 +556,15 @@ impl ChangesView {
                                 .child(format!("← {old}")),
                         )
                     }),
+            )
+            .child(
+                icon_button(&theme, Icon::Code, ("file-open", key), theme.text_primary).on_click({
+                    let path = path.clone();
+                    cx.listener(move |this, _, _, cx| {
+                        this.open_file(repo, path.clone(), cx);
+                        cx.stop_propagation();
+                    })
+                }),
             )
             .child(
                 icon_button(&theme, Icon::Trash, ("file-discard", key), theme.danger).on_click({

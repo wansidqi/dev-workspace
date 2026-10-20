@@ -17,6 +17,7 @@ use devspace_git::{
 use gpui::{prelude::*, App, Context, Entity, UniformListScrollHandle, WeakEntity, Window};
 
 use crate::changes_model::{self, DiffRow};
+use crate::settings::SettingsStore;
 use crate::state::AppState;
 use crate::text_input::TextInput;
 use crate::theme::GlassTheme;
@@ -139,6 +140,7 @@ pub(crate) enum LineOp {
 
 pub struct ChangesView {
     state: Entity<AppState>,
+    settings: Entity<SettingsStore>,
     theme: GlassTheme,
     pub on_close: Option<CloseHandler>,
 
@@ -180,7 +182,12 @@ pub struct ChangesView {
 }
 
 impl ChangesView {
-    pub fn new(cx: &mut Context<Self>, state: Entity<AppState>, theme: GlassTheme) -> Self {
+    pub fn new(
+        cx: &mut Context<Self>,
+        state: Entity<AppState>,
+        settings: Entity<SettingsStore>,
+        theme: GlassTheme,
+    ) -> Self {
         let summary = cx.new(|cx| TextInput::new(cx, "Summary (required)", theme));
         let description = cx.new(|cx| TextInput::new(cx, "Description", theme));
         let co_authors = cx.new(|cx| TextInput::new(cx, "Co-authors: Name <email>, …", theme));
@@ -232,6 +239,7 @@ impl ChangesView {
 
         let mut view = Self {
             state,
+            settings,
             theme,
             on_close: None,
             repos: Vec::new(),
@@ -528,6 +536,23 @@ impl ChangesView {
                     this.error_notice(&name, e, cx);
                 }
                 this.refresh_repo(repo, cx);
+            },
+        );
+    }
+
+    /// Opens a changed file in the configured IDE (Settings → IDE command).
+    fn open_file(&mut self, repo: RepoId, file: String, cx: &mut Context<Self>) {
+        let Some(pane) = self.pane(repo) else { return };
+        let root = pane.path();
+        let name = pane.repo.name.clone();
+        let command = self.settings.read(cx).get().ide_command.clone();
+        self.run(
+            cx,
+            move || crate::ide::open_file_in_ide(&command, &root, &file),
+            move |this, result, cx| {
+                if let Err(message) = result {
+                    this.error_notice(&name, message, cx);
+                }
             },
         );
     }
