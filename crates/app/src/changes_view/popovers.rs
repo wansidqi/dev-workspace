@@ -332,94 +332,131 @@ impl ChangesView {
 
     // ---- stashes -------------------------------------------------------
 
+    /// One stash: message, date, and Pop / Apply / drop. `from` names the
+    /// branch it was made on when that isn't the current one.
+    fn stash_row(
+        &self,
+        repo: RepoId,
+        entry: &StashEntry,
+        from: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = self.theme;
+        let index = entry.index;
+        div()
+            .flex()
+            .items_center()
+            .gap(theme.space_2)
+            .py(theme.space_1)
+            .border_b_1()
+            .border_color(theme.border_subtle)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(
+                        div()
+                            .t_small()
+                            .truncate()
+                            .text_color(theme.text_primary)
+                            .child(entry.message.clone()),
+                    )
+                    .child(
+                        div()
+                            .t_micro()
+                            .text_color(theme.text_muted)
+                            .child(match from {
+                                Some(branch) => {
+                                    format!("{} · from {branch}", format_date(entry.time))
+                                }
+                                None => format_date(entry.time),
+                            }),
+                    ),
+            )
+            .child(
+                button(
+                    &theme,
+                    ("stash-pop", index as u64),
+                    ButtonKind::Ghost,
+                    None,
+                    "Pop",
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.stash_apply(repo, index, true, cx);
+                })),
+            )
+            .child(
+                button(
+                    &theme,
+                    ("stash-apply", index as u64),
+                    ButtonKind::Ghost,
+                    None,
+                    "Apply",
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.stash_apply(repo, index, false, cx);
+                })),
+            )
+            .child(
+                icon_button(
+                    &theme,
+                    Icon::Trash,
+                    ("stash-drop", index as u64),
+                    theme.danger,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.popover = None;
+                    this.confirm = Some(Confirm::DropStash { repo, index });
+                    cx.notify();
+                })),
+            )
+            .into_any_element()
+    }
+
     fn stashes_popover(&mut self, repo: RepoId, cx: &mut Context<Self>) -> AnyElement {
         let theme = self.theme;
         let name = self.repo_name(repo);
-        let stashes = self
-            .pane(repo)
-            .map(|p| p.stashes.clone())
-            .unwrap_or_default();
-        let dirty = self
-            .pane(repo)
-            .and_then(|p| p.status.as_ref())
-            .is_some_and(|s| !s.files.is_empty());
+        let Some(pane) = self.pane(repo) else {
+            return div().into_any_element();
+        };
+        let branch = pane.status.as_ref().and_then(|s| s.branch.clone());
+        let dirty = pane.status.as_ref().is_some_and(|s| !s.files.is_empty());
+        let (here, other_count) = pane.stashes_here();
+        let here: Vec<StashEntry> = here.into_iter().cloned().collect();
+        let others: Vec<StashEntry> = if self.show_other_stashes {
+            pane.stashes
+                .iter()
+                .filter(|s| !here.iter().any(|h| h.index == s.index))
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
 
-        let rows = stashes
-            .into_iter()
+        let title = match &branch {
+            Some(b) => format!("Stashes · {name} · {b}"),
+            None => format!("Stashes · {name}"),
+        };
+        let here_rows: Vec<AnyElement> = here
+            .iter()
+            .map(|entry| self.stash_row(repo, entry, None, cx))
+            .collect();
+        let other_rows: Vec<AnyElement> = others
+            .iter()
             .map(|entry| {
-                let index = entry.index;
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(theme.space_2)
-                    .py(theme.space_1)
-                    .border_b_1()
-                    .border_color(theme.border_subtle)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .child(
-                                div()
-                                    .t_small()
-                                    .truncate()
-                                    .text_color(theme.text_primary)
-                                    .child(entry.message.clone()),
-                            )
-                            .child(
-                                div()
-                                    .t_micro()
-                                    .text_color(theme.text_muted)
-                                    .child(format_date(entry.time)),
-                            ),
-                    )
-                    .child(
-                        button(
-                            &theme,
-                            ("stash-pop", index as u64),
-                            ButtonKind::Ghost,
-                            None,
-                            "Pop",
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.stash_apply(repo, index, true, cx);
-                        })),
-                    )
-                    .child(
-                        button(
-                            &theme,
-                            ("stash-apply", index as u64),
-                            ButtonKind::Ghost,
-                            None,
-                            "Apply",
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.stash_apply(repo, index, false, cx);
-                        })),
-                    )
-                    .child(
-                        icon_button(
-                            &theme,
-                            Icon::Trash,
-                            ("stash-drop", index as u64),
-                            theme.danger,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.popover = None;
-                            this.confirm = Some(Confirm::DropStash { repo, index });
-                            cx.notify();
-                        })),
-                    )
+                let from = entry.branch.clone().unwrap_or_else(|| "unknown".into());
+                self.stash_row(repo, entry, Some(from), cx)
             })
-            .collect::<Vec<_>>();
+            .collect();
+        let show_others = self.show_other_stashes;
 
         div()
             .flex()
             .flex_col()
             .gap(theme.space_2)
-            .child(self.popover_title(format!("Stashes · {name}"), cx))
+            .child(self.popover_title(title, cx))
             .child(self.stash_message.clone())
             .child(
                 button(
@@ -438,6 +475,14 @@ impl ChangesView {
                     this.stash_save(message, cx);
                 })),
             )
+            .when(here.is_empty(), |d| {
+                d.child(
+                    div()
+                        .t_small()
+                        .text_color(theme.text_muted)
+                        .child("No stashes on this branch."),
+                )
+            })
             .child(
                 div()
                     .id("stash-list")
@@ -445,8 +490,37 @@ impl ChangesView {
                     .flex_col()
                     .max_h(px(260.0))
                     .overflow_y_scroll()
-                    .children(rows),
+                    .children(here_rows)
+                    .when(show_others && !other_rows.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .pt(theme.space_2)
+                                .child(section_label(&theme, "Other branches")),
+                        )
+                    })
+                    .children(other_rows),
             )
+            .when(other_count > 0, |d| {
+                d.child(
+                    div()
+                        .id("stash-others-toggle")
+                        .t_small()
+                        .text_color(theme.accent)
+                        .cursor_pointer()
+                        .child(if show_others {
+                            "Hide stashes from other branches".to_string()
+                        } else {
+                            format!(
+                                "Show {other_count} stash{} from other branches",
+                                if other_count == 1 { "" } else { "es" }
+                            )
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.show_other_stashes = !this.show_other_stashes;
+                            cx.notify();
+                        })),
+                )
+            })
             .into_any_element()
     }
 

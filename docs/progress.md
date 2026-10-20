@@ -263,6 +263,10 @@ screenshot (see "Not verified by hand" below).
   - [x] Branches popover for one repo or for all repos at once: switch,
         create, rename, delete, "bring / stash my changes" toggle; repos
         without the branch are reported as skipped, not failed
+  - [x] Stashes are scoped to the checked-out branch (read from the stash
+        message: `WIP on <b>:` / `On <b>:`); the header count and the popover
+        show only those, with a link to reveal other branches' stashes.
+        A direct "stash all changes" icon sits beside the repo's bin
   - [x] Stash popover per repo; discard confirmation bar (files, lines,
         branch delete, stash drop)
   - [x] Task tie-in: "Link commit to a task" picker (the project's task

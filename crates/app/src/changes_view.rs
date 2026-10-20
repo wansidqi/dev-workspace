@@ -43,6 +43,24 @@ struct RepoPane {
 }
 
 impl RepoPane {
+    /// The stashes made on the checked-out branch, and how many belong to
+    /// other branches. Git keeps stashes repo-wide; scoping them to the branch
+    /// avoids popping another branch's work by mistake. Detached HEAD (no
+    /// branch) shows them all.
+    fn stashes_here(&self) -> (Vec<&StashEntry>, usize) {
+        let branch = self.status.as_ref().and_then(|s| s.branch.as_deref());
+        match branch {
+            Some(b) => {
+                let (here, other): (Vec<_>, Vec<_>) = self
+                    .stashes
+                    .iter()
+                    .partition(|s| s.branch.as_deref() == Some(b));
+                (here, other.len())
+            }
+            None => (self.stashes.iter().collect(), 0),
+        }
+    }
+
     fn new(repo: Repo) -> Self {
         Self {
             repo,
@@ -177,6 +195,8 @@ pub struct ChangesView {
     stash_message: Entity<TextInput>,
     task_filter: Entity<TextInput>,
     switch_mode: SwitchMode,
+    /// The stash popover also lists stashes from other branches.
+    show_other_stashes: bool,
     confirm: Option<Confirm>,
     notice: Vec<NoticeLine>,
 }
@@ -269,6 +289,7 @@ impl ChangesView {
             stash_message,
             task_filter,
             switch_mode: SwitchMode::Bring,
+            show_other_stashes: false,
             confirm: None,
             notice: Vec::new(),
         };
@@ -1105,6 +1126,7 @@ impl ChangesView {
     // ---- stash ---------------------------------------------------------
 
     pub(crate) fn open_stashes(&mut self, repo: RepoId, cx: &mut Context<Self>) {
+        self.show_other_stashes = false;
         self.popover = Some(Popover::Stashes(repo));
         self.confirm = None;
         self.stash_message.update(cx, |i, cx| {
@@ -1118,6 +1140,12 @@ impl ChangesView {
         let Some(Popover::Stashes(repo)) = self.popover else {
             return;
         };
+        self.stash_repo(repo, message, cx);
+    }
+
+    /// Stashes a repo's changes (new files too). An empty message gets git's
+    /// default one.
+    pub(crate) fn stash_repo(&mut self, repo: RepoId, message: String, cx: &mut Context<Self>) {
         let Some(pane) = self.pane(repo) else { return };
         let path = pane.path();
         let name = pane.repo.name.clone();

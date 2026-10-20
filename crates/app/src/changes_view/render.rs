@@ -433,16 +433,29 @@ impl ChangesView {
                     theme.text_primary,
                 )
                 .on_click(cx.listener(move |this, _, _, cx| this.open_stashes(id, cx)))
-                .when(!pane.stashes.is_empty(), |d| {
+                .when(pane.stashes_here().0.len() > 0, |d| {
                     d.child(
                         div()
                             .t_micro()
                             .t_code()
                             .text_color(theme.accent)
-                            .child(pane.stashes.len().to_string()),
+                            .child(pane.stashes_here().0.len().to_string()),
                     )
                 }),
             )
+            .when(files > 0, |d| {
+                d.child(
+                    icon_button(
+                        &theme,
+                        Icon::Download,
+                        ("repo-stash-now", id.0 as u64),
+                        theme.accent,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.stash_repo(id, String::new(), cx);
+                    })),
+                )
+            })
             .when(files > 0, |d| {
                 d.child(
                     icon_button(

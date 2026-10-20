@@ -13,6 +13,20 @@ pub struct StashEntry {
     pub index: usize,
     pub message: String,
     pub time: i64,
+    /// Branch the stash was made on, read from its message (`WIP on <branch>:`
+    /// or `On <branch>:`, which git and GitHub Desktop both write). `None`
+    /// when the message doesn't say.
+    pub branch: Option<String>,
+}
+
+/// The branch named at the start of a stash message.
+fn parse_stash_branch(message: &str) -> Option<String> {
+    let rest = message
+        .strip_prefix("WIP on ")
+        .or_else(|| message.strip_prefix("On "))?;
+    let (branch, _) = rest.split_once(':')?;
+    let branch = branch.trim();
+    (!branch.is_empty() && !branch.contains(' ')).then(|| branch.to_owned())
 }
 
 /// Stashes tracked changes (and untracked files when asked), leaving a clean
@@ -46,6 +60,7 @@ pub fn stash_list(path: &Path) -> Result<Vec<StashEntry>, GitError> {
         .into_iter()
         .map(|(index, message, oid)| StashEntry {
             index,
+            branch: parse_stash_branch(&message),
             message,
             time: repo
                 .find_commit(oid)
@@ -89,6 +104,50 @@ mod tests {
     use super::*;
     use crate::repo_status;
     use crate::testutil::Fixture;
+
+    #[test]
+    fn the_branch_is_read_from_the_message() {
+        let b = |m: &str| parse_stash_branch(m);
+        assert_eq!(
+            b("WIP on src-preprod-test: 104a1e7 msg").as_deref(),
+            Some("src-preprod-test")
+        );
+        assert_eq!(
+            b("On master: !!GitHub_Desktop<master>").as_deref(),
+            Some("master")
+        );
+        assert_eq!(
+            b("On feature/a-b: my note: with colon").as_deref(),
+            Some("feature/a-b")
+        );
+        assert_eq!(b("On (no branch): x"), None);
+        assert_eq!(b("custom message"), None);
+        assert_eq!(b("On : x"), None);
+    }
+
+    #[test]
+    fn listed_stashes_know_their_branch() {
+        let f = Fixture::with_files(&[(
+            "a.txt", "1
+",
+        )]);
+        let branch = f.branch_name().unwrap();
+        f.write(
+            "a.txt", "2
+",
+        );
+        stash_save(f.path(), Some("note"), false).unwrap();
+        f.write(
+            "a.txt", "3
+",
+        );
+        stash_save(f.path(), None, false).unwrap();
+        let list = stash_list(f.path()).unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(list
+            .iter()
+            .all(|s| s.branch.as_deref() == Some(branch.as_str())));
+    }
 
     #[test]
     fn save_list_pop_round_trip() {
