@@ -127,11 +127,7 @@ impl FileDiff {
     }
 }
 
-fn raw_diff<'r>(
-    repo: &'r Repository,
-    file: &str,
-    side: DiffSide,
-) -> Result<Diff<'r>, GitError> {
+fn raw_diff<'r>(repo: &'r Repository, file: &str, side: DiffSide) -> Result<Diff<'r>, GitError> {
     let mut opts = DiffOptions::new();
     opts.pathspec(file)
         .disable_pathspec_match(true)
@@ -178,9 +174,7 @@ pub fn file_diff(repo_path: &Path, file: &str, side: DiffSide) -> Result<FileDif
     'hunks: for h in 0..patch.num_hunks() {
         let (hunk, line_count) = patch.hunk(h)?;
         let mut parsed = DiffHunk {
-            header: String::from_utf8_lossy(hunk.header())
-                .trim_end()
-                .to_owned(),
+            header: String::from_utf8_lossy(hunk.header()).trim_end().to_owned(),
             old_start: hunk.old_start(),
             old_lines: hunk.old_lines(),
             new_start: hunk.new_start(),
@@ -526,7 +520,10 @@ mod tests {
         assert_eq!(added.text, "THREE");
         assert_eq!(added.new_lineno, Some(3));
         // Nothing is staged yet.
-        assert!(file_diff(f.path(), "a.txt", DiffSide::Staged).unwrap().hunks.is_empty());
+        assert!(file_diff(f.path(), "a.txt", DiffSide::Staged)
+            .unwrap()
+            .hunks
+            .is_empty());
     }
 
     #[test]
@@ -582,7 +579,10 @@ mod tests {
 
         // Take the 2 -> TWO change only.
         stage_lines(f.path(), &d, &pick(&d, &["2", "TWO"])).unwrap();
-        assert_eq!(f.index_content("a.txt").unwrap(), "1\nTWO\n3\n4\n5\n6\n7\n8\n9\n10\n");
+        assert_eq!(
+            f.index_content("a.txt").unwrap(),
+            "1\nTWO\n3\n4\n5\n6\n7\n8\n9\n10\n"
+        );
         assert_eq!(f.read("a.txt"), "1\nTWO\n3\n4\nFIVE\n6\n7\n8\n9\n10\n");
     }
 
@@ -602,7 +602,10 @@ mod tests {
         f.write("a.txt", "1\n2\n3\n4\n5\n6\n7\n8\n");
         let d = file_diff(f.path(), "a.txt", DiffSide::Unstaged).unwrap();
         stage_lines(f.path(), &d, &pick(&d, &["9"])).unwrap();
-        assert_eq!(f.index_content("a.txt").unwrap(), "1\n2\n3\n4\n5\n6\n7\n8\n10\n");
+        assert_eq!(
+            f.index_content("a.txt").unwrap(),
+            "1\n2\n3\n4\n5\n6\n7\n8\n10\n"
+        );
     }
 
     #[test]
@@ -631,7 +634,10 @@ mod tests {
         stage_files(f.path(), &["a.txt".into()]).unwrap();
         let d = file_diff(f.path(), "a.txt", DiffSide::Staged).unwrap();
         unstage_lines(f.path(), &d, &pick(&d, &["5", "FIVE"])).unwrap();
-        assert_eq!(f.index_content("a.txt").unwrap(), "1\nTWO\n3\n4\n5\n6\n7\n8\n9\n10\n");
+        assert_eq!(
+            f.index_content("a.txt").unwrap(),
+            "1\nTWO\n3\n4\n5\n6\n7\n8\n9\n10\n"
+        );
         // Working tree untouched.
         assert_eq!(f.read("a.txt"), "1\nTWO\n3\n4\nFIVE\n6\n7\n8\n9\n10\n");
     }

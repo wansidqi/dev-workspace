@@ -621,6 +621,7 @@ impl Root {
     /// destination shows.
     fn palette_switch_project(&mut self, project: ProjectId, cx: &mut Context<Self>) {
         self.open_history = None;
+        self.open_changes = None;
         self.open_task = None;
         self.open_note = None;
         self.settings_open = false;
@@ -644,6 +645,11 @@ impl Root {
                 self.terminal_open = true;
                 self.terminal_panel
                     .update(cx, |panel, cx| panel.new_tab(window, cx));
+            }
+            Command::OpenChanges => {
+                if self.open_changes.is_none() {
+                    self.toggle_changes(cx);
+                }
             }
             Command::OpenHistory => {
                 if self.open_history.is_none() {

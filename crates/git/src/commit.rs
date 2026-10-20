@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use git2::{RepositoryState, Repository, Signature};
+use git2::{Repository, RepositoryState, Signature};
 
 use crate::{CommitInfo, GitError};
 
@@ -237,7 +237,12 @@ mod tests {
 
     #[test]
     fn bad_co_authors_are_refused() {
-        for bad in ["Ann", "<a@b.c>", "Ann <a@b.c> trailing", "Ann <a@b.c>\nInjected: x"] {
+        for bad in [
+            "Ann",
+            "<a@b.c>",
+            "Ann <a@b.c> trailing",
+            "Ann <a@b.c>\nInjected: x",
+        ] {
             let r = build_message(&CommitRequest {
                 summary: "s",
                 description: "",
@@ -254,7 +259,14 @@ mod tests {
         f.write("a.txt", "2\n");
         stage_files(f.path(), &["a.txt".into()]).unwrap();
         commit_staged(f.path(), &req("First try")).unwrap();
-        let before = f.repo.head().unwrap().peel_to_commit().unwrap().parent_id(0).unwrap();
+        let before = f
+            .repo
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .parent_id(0)
+            .unwrap();
 
         f.write("b.txt", "2\n");
         stage_files(f.path(), &["b.txt".into()]).unwrap();
@@ -267,7 +279,11 @@ mod tests {
         )
         .unwrap();
         let head = f.repo.head().unwrap().peel_to_commit().unwrap();
-        assert_eq!(head.parent_id(0).unwrap(), before, "still one commit on top");
+        assert_eq!(
+            head.parent_id(0).unwrap(),
+            before,
+            "still one commit on top"
+        );
         assert_eq!(head.summary(), Some("Better message"));
         assert!(repo_status(f.path()).unwrap().files.is_empty());
     }
@@ -315,13 +331,24 @@ mod tests {
         f.stage_all();
         f.commit("main change");
         f.repo.set_head("refs/heads/other").unwrap();
-        f.repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force())).unwrap();
+        f.repo
+            .checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+            .unwrap();
         f.write("a.txt", "other side\n");
         f.stage_all();
         f.commit("other change");
-        let theirs = f.repo.find_annotated_commit(
-            f.repo.find_branch(&base, git2::BranchType::Local).unwrap().get().peel_to_commit().unwrap().id(),
-        ).unwrap();
+        let theirs = f
+            .repo
+            .find_annotated_commit(
+                f.repo
+                    .find_branch(&base, git2::BranchType::Local)
+                    .unwrap()
+                    .get()
+                    .peel_to_commit()
+                    .unwrap()
+                    .id(),
+            )
+            .unwrap();
         f.repo.merge(&[&theirs], None, None).unwrap();
         assert_eq!(repo_status(f.path()).unwrap().in_progress, Some("merge"));
         assert!(commit_staged(f.path(), &req("merge")).is_err());

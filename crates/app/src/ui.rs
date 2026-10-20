@@ -647,3 +647,40 @@ pub fn filter_chip(
         })
         .child(label.into())
 }
+
+/// State of a [`checkbox`]; `Mixed` is "some of it" (a partly staged file, a
+/// repo with some files staged).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckState {
+    Off,
+    On,
+    Mixed,
+}
+
+/// A 16px checkbox. Attach `.on_click(..)` at the call site.
+pub fn checkbox(theme: &GlassTheme, id: impl Into<ElementId>, state: CheckState) -> Stateful<Div> {
+    let theme = *theme;
+    let filled = state != CheckState::Off;
+    div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(px(16.0))
+        .rounded(px(4.0))
+        .border_1()
+        .cursor_pointer()
+        .when(filled, |d| d.bg(theme.accent).border_color(theme.accent))
+        .when(!filled, |d| {
+            d.bg(theme.surface_sunken)
+                .border_color(theme.border_strong)
+                .hover(move |s| s.border_color(theme.accent))
+        })
+        .when(state == CheckState::On, |d| {
+            d.child(icon(Icon::Check, 12.0, theme.accent_fg))
+        })
+        .when(state == CheckState::Mixed, |d| {
+            d.child(icon(Icon::Minus, 12.0, theme.accent_fg))
+        })
+}

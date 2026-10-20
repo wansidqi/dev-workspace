@@ -211,31 +211,79 @@ labeled by repo, with a repo filter (like the history browser's chips) to
 narrow to one. Git has no cross-repo commit, so multi-repo actions run once
 per repo and report per-repo results; one repo failing never stops the rest.
 
-Phase 1 — local working copy (git2 only)
-- [ ] Repos overview: one row per linked repo with current branch, changed
-      file count, ahead/behind (once Phase 2 lands) and a dirty marker
-- [ ] Multi-repo Changes view: changed files from all repos in one list,
-      grouped under repo headers, collapsible, each repo's status loaded on
-      its own background task
-- [ ] Multi-repo commit: one summary/description, commits in every repo that
-      has staged files (or the ticked repos), result per repo
-- [ ] Branch switch/create across repos: apply the same branch name to the
-      selected repos (e.g. a task branch spanning frontend + backend), with
-      per-repo results; repos where it is missing are listed, not failed
-- [ ] `devspace-git`: working-copy status per repo (staged, unstaged,
-      untracked, conflicted, renamed)
-- [ ] File diff (workdir vs index, index vs HEAD, and commit diffs for the
-      history browser's missing detail view)
-- [ ] Stage / unstage / discard by file, hunk and line (build partial patches
-      and apply to the index); discard asks for confirmation
-- [ ] Commit: summary + description, co-authors trailer, amend last commit
-- [ ] Branches: create, switch, rename, delete; switching with changes offers
-      "stash and switch" or "bring changes"
-- [ ] Stash: save, list, apply, pop, drop
-- [ ] UI: "Changes" view (file list with checkboxes, virtualized diff with
-      highlighting, commit box), current-branch dropdown in the header
-- [ ] Task tie-in: commit from a task, create/check out the task's branch,
-      auto-link new commits to the active task
+Phase 1 — local working copy (git2 only). Built 2026-10-20 on
+`feature/git-client`; the logic is unit tested, the screen was checked by
+screenshot (see "Not verified by hand" below).
+- [x] `devspace-git` working-copy client (`changes.rs`, `diff.rs`,
+      `commit.rs`, `branches.rs`, `stash.rs`), 52 tests on temp repos built
+      with git2 (no git executable needed):
+  - [x] Status per repo: staged / unstaged / untracked / conflicted / renamed
+        (git2's `path()` is the *old* name for a rename; the new one is read
+        from the delta), branch, detached HEAD, unborn repo, upstream
+        ahead/behind, merge/rebase-in-progress label
+  - [x] File diff, unstaged (index → workdir, untracked as all-added) and
+        staged (HEAD → index); binary, non-UTF-8 and over-long (20k lines)
+        files are flagged
+  - [x] Stage / unstage / discard by file, hunk and line: a patch with only
+        the selected lines is built and applied to the index (or workdir for
+        discard). CRLF and missing-final-newline files round-trip. The
+        selection must come from the diff that was shown: if the file
+        changed since, the call fails rather than staging the wrong lines
+  - [x] Discard copies the files to `.git/devspace-discarded/<unix time>/`
+        first (CLAUDE.md: prefer recoverable destructive actions); nothing
+        prunes that folder yet
+  - [x] Commit: summary + description + `Co-authored-by` trailers (validated
+        `Name <email>`), amend, first commit in an empty repo; refuses with a
+        readable message when nothing is staged, conflicts remain, or a
+        merge/rebase is half done
+  - [x] Branches: create (from the current commit or another branch), switch
+        (also creates a tracking branch from `origin/<name>`), rename, delete
+        (unmerged needs an explicit force); switching with changes either
+        brings them (fails without touching anything if they'd be
+        overwritten) or stashes them first
+  - [x] Stash: save (with untracked files), list, apply, pop, drop
+- [x] Changes view (`changes_view.rs`, `changes_view/`, pure logic in
+      `changes_model.rs` with tests; sidebar "Changes", Ctrl+Shift+G, palette
+      "Open git changes"):
+  - [x] Multi-repo list: every linked repo's files in one virtualized list
+        under collapsible repo headers; each repo's status loads on its own
+        background task; repo filter chips narrow to one repo
+  - [x] Repo header = the "repos overview": colour dot, name, changed-file
+        count, current branch with ahead/behind, stash count, merge/rebase
+        chip, a tri-state checkbox that stages or unstages the whole repo
+        (not a separate overview screen)
+  - [x] Diff viewer (virtualized): line numbers, +/- colouring, per-line
+        checkboxes with Shift-click ranges, "Stage/Unstage hunk", a
+        selection bar (Stage/Unstage/Discard lines), Unstaged/Staged switch
+        for partly staged files
+  - [x] Multi-repo commit: one message, one commit in each repo that has
+        staged files; per-repo result lines; one repo failing doesn't stop
+        the others. Co-authors box. Amend is single-repo (the filtered repo,
+        or the only repo) and pre-fills the last message
+  - [x] Branches popover for one repo or for all repos at once: switch,
+        create, rename, delete, "bring / stash my changes" toggle; repos
+        without the branch are reported as skipped, not failed
+  - [x] Stash popover per repo; discard confirmation bar (files, lines,
+        branch delete, stash drop)
+  - [x] Task tie-in: "Link commit to a task" picker (the project's task
+        tree); commits made while a task is chosen are linked to it for every
+        repo; if the task has a branch, "Use task branch in all repos"
+        switches every repo to it, creating it where missing
+  - [x] Refreshes after every action, on Refresh, and when the window regains
+        focus (edits made in the IDE or terminal)
+- Not done / known gaps in Phase 1:
+  - [ ] Syntax highlighting in the diff (colouring is +/- only)
+  - [ ] Multi-line commit description (the input is single-line)
+  - [ ] Git hooks do not run on commit (libgit2 doesn't run them; GitHub
+        Desktop does). Phase 2 can route commits through the CLI if wanted
+  - [ ] Keyboard navigation in the file list and diff
+  - [ ] Commit-detail diff in the history browser (the diff code is reusable)
+- Not verified by hand: clicks. The environment forbids synthetic input on
+  the live desktop, so the click handlers are wired to tested git functions
+  but not exercised in the running app. Screenshots checked: file list, diff,
+  line selection, branch / stash / task popovers, discard confirm bar.
+  `DEVSPACE_VIEW=changes[:select|branches|repo-branches|stash|tasks|confirm|lines]`
+  with `DEVSPACE_QA_REPOS=<path>;<path>` reproduces them (debug builds).
 
 Phase 2 — remotes (git CLI)
 - [ ] "Fetch all" / "Pull all" / "Push all" across the project's repos,

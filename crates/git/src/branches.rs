@@ -72,9 +72,9 @@ fn checkout_ref(
 ) -> Result<bool, GitError> {
     let mut stashed = false;
     if mode == SwitchMode::Stash && is_dirty(repo)? {
-        let sig = repo.signature().map_err(|_| {
-            invalid("git doesn't know who you are: set user.name and user.email")
-        })?;
+        let sig = repo
+            .signature()
+            .map_err(|_| invalid("git doesn't know who you are: set user.name and user.email"))?;
         let from = current_branch(repo).unwrap_or_else(|| "(detached)".into());
         let message = format!("devspace: changes on {from} before switching to {short}");
         repo.stash_save2(&sig, Some(&message), Some(StashFlags::INCLUDE_UNTRACKED))?;
@@ -106,11 +106,7 @@ fn checkout_ref(
 
 /// Checks out a local branch, or makes a tracking branch from `origin/<name>`
 /// when only that exists.
-pub fn switch_branch(
-    path: &Path,
-    name: &str,
-    mode: SwitchMode,
-) -> Result<SwitchOutcome, GitError> {
+pub fn switch_branch(path: &Path, name: &str, mode: SwitchMode) -> Result<SwitchOutcome, GitError> {
     if !is_safe_ref_name(name) {
         return Err(invalid(format!("`{name}` isn't a valid branch name")));
     }
@@ -173,8 +169,7 @@ pub fn create_branch(
         .and_then(|h| h.peel_to_commit().ok())
         .map(|c| c.id());
     let start_id = match from {
-        None => head_id
-            .ok_or_else(|| invalid("make a first commit before creating branches"))?,
+        None => head_id.ok_or_else(|| invalid("make a first commit before creating branches"))?,
         Some(from) => {
             if !is_safe_ref_name(from) {
                 return Err(invalid(format!("`{from}` isn't a valid starting point")));
@@ -193,7 +188,9 @@ pub fn create_branch(
     let refname = format!("refs/heads/{name}");
     let result = if head_id == Some(start_id) {
         // Same commit: only HEAD moves, the working tree stays as it is.
-        repo.set_head(&refname).map(|_| false).map_err(GitError::from)
+        repo.set_head(&refname)
+            .map(|_| false)
+            .map_err(GitError::from)
     } else {
         checkout_ref(&mut repo, &refname, name, mode)
     };
@@ -290,7 +287,10 @@ mod tests {
     fn invalid_and_duplicate_names_are_refused() {
         let f = Fixture::with_files(&[("a.txt", "1\n")]);
         for bad in ["", "-x", "has space", "a..b", "x.lock", "bad~name"] {
-            assert!(create_branch(f.path(), bad, None, SwitchMode::Bring).is_err(), "{bad:?}");
+            assert!(
+                create_branch(f.path(), bad, None, SwitchMode::Bring).is_err(),
+                "{bad:?}"
+            );
         }
         create_branch(f.path(), "dup", None, SwitchMode::Bring).unwrap();
         assert!(create_branch(f.path(), "dup", None, SwitchMode::Bring).is_err());
@@ -353,11 +353,16 @@ mod tests {
         f.repo
             .reference("refs/remotes/origin/remote-only", tip.id(), true, "test")
             .unwrap();
-        f.repo.remote("origin", "https://example.invalid/x.git").unwrap();
+        f.repo
+            .remote("origin", "https://example.invalid/x.git")
+            .unwrap();
         let out = switch_branch(f.path(), "remote-only", SwitchMode::Bring).unwrap();
         assert!(out.created_from_remote);
         assert_eq!(f.branch_name().as_deref(), Some("remote-only"));
-        let b = f.repo.find_branch("remote-only", BranchType::Local).unwrap();
+        let b = f
+            .repo
+            .find_branch("remote-only", BranchType::Local)
+            .unwrap();
         assert!(b.upstream().is_ok());
         let _ = main;
     }

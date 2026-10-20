@@ -282,6 +282,7 @@ impl Root {
                         // timesheet, credentials, settings) give way to it,
                         // which also clears their sidebar highlight.
                         this.open_history = None;
+                        this.open_changes = None;
                         this.open_task = None;
                         this.open_note = None;
                         this.settings_open = false;
@@ -315,6 +316,16 @@ impl Root {
                 self.open_history.is_some(),
                 None,
                 |this, cx| this.toggle_history(cx),
+                cx,
+            )
+            .into_any_element()
+        });
+        let changes = has_project.then(|| {
+            self.nav_row(
+                crate::NAV_CHANGES,
+                self.open_changes.is_some(),
+                None,
+                |this, cx| this.toggle_changes(cx),
                 cx,
             )
             .into_any_element()
@@ -381,6 +392,7 @@ impl Root {
                             .pl(theme.space_3)
                             .child(section_label(&theme, "Workspace")),
                     )
+                    .children(changes)
                     .children(history)
                     .children(run)
                     .child(timesheet)
@@ -438,6 +450,7 @@ impl Root {
             self.settings_open = false;
         } else {
             self.open_history = None;
+            self.open_changes = None;
             self.open_task = None;
             self.open_note = None;
             self.run_open = false;

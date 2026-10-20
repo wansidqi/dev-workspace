@@ -169,9 +169,7 @@ pub fn repo_status(path: &Path) -> Result<RepoStatus, GitError> {
         if let Ok(branch) = repo.find_branch(name, BranchType::Local) {
             if let Ok(up) = branch.upstream() {
                 status.upstream = up.name().ok().flatten().map(str::to_owned);
-                if let (Some(local), Some(remote)) =
-                    (branch.get().target(), up.get().target())
-                {
+                if let (Some(local), Some(remote)) = (branch.get().target(), up.get().target()) {
                     if let Ok((ahead, behind)) = repo.graph_ahead_behind(local, remote) {
                         status.ahead = ahead;
                         status.behind = behind;
@@ -198,7 +196,9 @@ pub fn repo_status(path: &Path) -> Result<RepoStatus, GitError> {
         if flags.contains(Status::IGNORED) || flags.is_empty() {
             continue;
         }
-        let Some(reported) = entry.path() else { continue };
+        let Some(reported) = entry.path() else {
+            continue;
+        };
         // For a rename git2's `path()` is the *old* name; the file as it is
         // now is the new side of the rename delta.
         let renamed_to = if flags.contains(Status::INDEX_RENAMED) {
@@ -222,9 +222,7 @@ pub fn repo_status(path: &Path) -> Result<RepoStatus, GitError> {
             unstaged: kind_of_workdir(flags),
         });
     }
-    status
-        .files
-        .sort_by_cached_key(|f| f.path.to_lowercase());
+    status.files.sort_by_cached_key(|f| f.path.to_lowercase());
     Ok(status)
 }
 
@@ -359,7 +357,10 @@ mod tests {
         assert!(st.unborn);
         assert_eq!(st.files.len(), 1);
         stage_files(f.path(), &["x.txt".into()]).unwrap();
-        assert_eq!(repo_status(f.path()).unwrap().files[0].staged, Some(ChangeKind::Added));
+        assert_eq!(
+            repo_status(f.path()).unwrap().files[0].staged,
+            Some(ChangeKind::Added)
+        );
         unstage_files(f.path(), &["x.txt".into()]).unwrap();
         assert_eq!(repo_status(f.path()).unwrap().files[0].staged, None);
     }
@@ -410,8 +411,14 @@ mod tests {
         assert_eq!(f.read("a.txt"), "one\n");
         assert!(!f.exists("new.txt"));
         assert!(repo_status(f.path()).unwrap().files.is_empty());
-        assert_eq!(std::fs::read_to_string(backup.join("a.txt")).unwrap(), "edited\n");
-        assert_eq!(std::fs::read_to_string(backup.join("new.txt")).unwrap(), "brand new\n");
+        assert_eq!(
+            std::fs::read_to_string(backup.join("a.txt")).unwrap(),
+            "edited\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(backup.join("new.txt")).unwrap(),
+            "brand new\n"
+        );
     }
 
     #[test]

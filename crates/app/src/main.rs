@@ -4,6 +4,8 @@
 //! the pre-1.0 API).
 
 mod attach_flow;
+mod changes_model;
+mod changes_view;
 mod clipboard_html;
 mod commit_browser;
 mod credentials_panel;
@@ -39,6 +41,7 @@ mod workspace_tools;
 
 use crate::theme::TypeScale;
 use anyhow::Result;
+use changes_view::ChangesView;
 use commit_browser::CommitBrowser;
 use credentials_panel::CredentialsPanel;
 use devspace_core::{NoteId, ProjectId, Task, TaskId, TaskStatus};
@@ -67,6 +70,7 @@ actions!(
         NewTerminal,
         OpenPalette,
         ToggleHistoryView,
+        ToggleChangesView,
         ToggleRunView,
         ToggleTimesheetView,
         ToggleCredentialsView,
@@ -107,6 +111,9 @@ struct Root {
     /// The commit history browser, replacing the main content while open
     /// (like `open_note`).
     open_history: Option<Entity<CommitBrowser>>,
+    /// The git Changes view (working copy of every linked repo), replacing the
+    /// main content while open.
+    open_changes: Option<Entity<ChangesView>>,
     /// The task/subtask detail page (notes, attachments, commits). Stays
     /// open underneath the note editor so closing a note returns to it.
     open_task: Option<Entity<TaskDetail>>,
@@ -189,6 +196,13 @@ pub(crate) const NAV_HISTORY: NavItem = NavItem {
     icon: ui::Icon::GitCommit,
     label: "Commit history",
     shortcut: "Ctrl+Shift+H",
+};
+pub(crate) const NAV_CHANGES: NavItem = NavItem {
+    id: "open-changes",
+    hover_key: 6,
+    icon: ui::Icon::GitMerge,
+    label: "Changes",
+    shortcut: "Ctrl+Shift+G",
 };
 pub(crate) const NAV_RUN: NavItem = NavItem {
     id: "open-run-commands",
@@ -538,7 +552,39 @@ impl Root {
         self.run_open = false;
         self.timesheet_open = false;
         self.credentials_open = false;
+        self.open_changes = None;
         self.open_history = Some(browser);
+        cx.notify();
+    }
+
+    /// Opens the git Changes view in place of the main content, or closes it
+    /// if already open.
+    pub(crate) fn toggle_changes(&mut self, cx: &mut Context<Self>) {
+        if self.open_changes.take().is_some() {
+            cx.notify();
+            return;
+        }
+        let theme = self.theme;
+        let state = self.state.clone();
+        let root = cx.entity();
+        let view = cx.new(|cx| {
+            let mut view = ChangesView::new(cx, state, theme);
+            view.on_close = Some(Box::new(move |_window, cx| {
+                root.update(cx, |root, cx| {
+                    root.open_changes = None;
+                    cx.notify();
+                });
+            }));
+            view
+        });
+        self.open_note = None;
+        self.settings_open = false;
+        self.open_task = None;
+        self.run_open = false;
+        self.timesheet_open = false;
+        self.credentials_open = false;
+        self.open_history = None;
+        self.open_changes = Some(view);
         cx.notify();
     }
 
@@ -731,10 +777,14 @@ impl Render for Root {
                 .into_any_element()
         }
 
-        let mut note_page =
-            (self.open_note.is_some() && self.open_history.is_none()).then(|| self.note_page(cx));
+        let mut note_page = (self.open_note.is_some()
+            && self.open_history.is_none()
+            && self.open_changes.is_none())
+        .then(|| self.note_page(cx));
         let view = if let Some(history) = &self.open_history {
             fill(history.clone())
+        } else if let Some(changes) = &self.open_changes {
+            fill(changes.clone())
         } else if let (Some(detail), None) = (&self.open_task, &self.open_note) {
             fill(detail.clone())
         } else if let Some(page) = note_page.take() {
@@ -794,6 +844,7 @@ impl Render for Root {
                 },
             ))
             .on_action(cx.listener(|this, _: &ToggleHistoryView, _, cx| this.toggle_history(cx)))
+            .on_action(cx.listener(|this, _: &ToggleChangesView, _, cx| this.toggle_changes(cx)))
             .on_action(cx.listener(|this, _: &ToggleRunView, _, cx| this.toggle_run_view(cx)))
             .on_action(
                 cx.listener(|this, _: &ToggleTimesheetView, _, cx| this.toggle_timesheet_view(cx)),
@@ -854,6 +905,7 @@ fn main() -> Result<()> {
             KeyBinding::new("ctrl-k", OpenPalette, None),
             KeyBinding::new("ctrl-shift-p", OpenPalette, None),
             KeyBinding::new("ctrl-shift-h", ToggleHistoryView, None),
+            KeyBinding::new("ctrl-shift-g", ToggleChangesView, None),
             KeyBinding::new("ctrl-shift-r", ToggleRunView, None),
             KeyBinding::new("ctrl-shift-m", ToggleTimesheetView, None),
             KeyBinding::new("ctrl-shift-l", ToggleCredentialsView, None),
@@ -1031,6 +1083,7 @@ fn main() -> Result<()> {
                         terminal_open: saved.terminal_open,
                         focus_handle,
                         open_history: None,
+                        open_changes: None,
                         open_task: None,
                         confirm_unlink_repo: None,
                         tag_filter: None,
@@ -1064,6 +1117,16 @@ fn main() -> Result<()> {
                     .detach();
                     cx.observe_window_appearance(window, |this, window, cx| {
                         this.apply_appearance(window, cx);
+                    })
+                    .detach();
+                    // The Changes view re-reads git when the window regains
+                    // focus (edits made in the IDE or a terminal meanwhile).
+                    cx.observe_window_activation(window, |this, window, cx| {
+                        if window.is_window_active() {
+                            if let Some(changes) = this.open_changes.clone() {
+                                changes.update(cx, |changes, cx| changes.refresh_all(cx));
+                            }
+                        }
                     })
                     .detach();
                     root

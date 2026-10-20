@@ -274,7 +274,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 ```
 
-Debug builds read `DEVSPACE_DATA_DIR`, `DEVSPACE_SIZE` (`1280x760`) and `DEVSPACE_VIEW` (`settings`, `history`, `run`, `timesheet`, `credentials`, `palette`, `terminal`, `task:<id>[:notes|attachments|commits]`, `note:<id>[:edit]`) so a screenshot run can start on a given screen against a copy of the data without synthetic input (see `qa.rs`). They compile to nothing in release. GPUI is very slow unoptimised, so judge typing and scrolling responsiveness on `cargo run --release -p app`, not on the debug build.
+Debug builds read `DEVSPACE_DATA_DIR`, `DEVSPACE_SIZE` (`1280x760`) and `DEVSPACE_VIEW` (`settings`, `changes[:select|branches|repo-branches|stash|tasks|confirm|lines]` with `DEVSPACE_QA_REPOS=<path>;<path>` to link throwaway repos, `history`, `run`, `timesheet`, `credentials`, `palette`, `terminal`, `task:<id>[:notes|attachments|commits]`, `note:<id>[:edit]`) so a screenshot run can start on a given screen against a copy of the data without synthetic input (see `qa.rs`). They compile to nothing in release. GPUI is very slow unoptimised, so judge typing and scrolling responsiveness on `cargo run --release -p app`, not on the debug build.
 
 ## Testing
 

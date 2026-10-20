@@ -185,6 +185,7 @@ impl Group {
 pub enum Command {
     ToggleTerminal,
     NewTerminal,
+    OpenChanges,
     OpenHistory,
     OpenRunCommands,
     OpenTimesheet,
@@ -198,9 +199,10 @@ pub enum Command {
 
 impl Command {
     /// All commands, in the order shown for an empty query.
-    pub const ALL: [Command; 11] = [
+    pub const ALL: [Command; 12] = [
         Command::ToggleTerminal,
         Command::NewTerminal,
+        Command::OpenChanges,
         Command::OpenHistory,
         Command::OpenRunCommands,
         Command::OpenTimesheet,
@@ -217,6 +219,7 @@ impl Command {
         match self {
             Command::ToggleTerminal => "Show/Hide terminal",
             Command::NewTerminal => "New terminal",
+            Command::OpenChanges => "Open git changes",
             Command::OpenHistory => "Open commit history",
             Command::OpenRunCommands => "Open run commands",
             Command::OpenTimesheet => "Open timesheet",
@@ -234,6 +237,7 @@ impl Command {
         match self {
             Command::ToggleTerminal => "Ctrl+`",
             Command::NewTerminal => "Ctrl+Shift+`",
+            Command::OpenChanges => "Ctrl+Shift+G",
             Command::OpenHistory => "Ctrl+Shift+H",
             Command::OpenRunCommands => "Ctrl+Shift+R",
             Command::OpenTimesheet => "Ctrl+Shift+M",

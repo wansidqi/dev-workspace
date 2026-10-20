@@ -45,6 +45,28 @@ pub fn open_view(root: &mut Root, window: &mut Window, cx: &mut Context<Root>) {
     match view.as_str() {
         "settings" => root.toggle_settings_view(cx),
         "history" => root.toggle_history(cx),
+        v if v == "changes" || v.starts_with("changes:") => {
+            // `DEVSPACE_QA_REPOS` (`;`-separated paths) links throwaway repos
+            // into the project so the screen has something to show.
+            if let Ok(paths) = std::env::var("DEVSPACE_QA_REPOS") {
+                root.state.update(cx, |state, _| {
+                    for path in paths.split(';').filter(|p| !p.is_empty()) {
+                        let name = std::path::Path::new(path)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| path.to_string());
+                        state.link_repo(path, &name);
+                    }
+                });
+            }
+            root.toggle_changes(cx);
+            let extra = view.strip_prefix("changes:").unwrap_or("").to_string();
+            if !extra.is_empty() {
+                if let Some(changes) = root.open_changes.clone() {
+                    changes.update(cx, |changes, _| changes.qa = Some(extra));
+                }
+            }
+        }
         "run" => root.toggle_run_view(cx),
         "timesheet" => root.toggle_timesheet_view(cx),
         "credentials" => root.toggle_credentials_view(cx),

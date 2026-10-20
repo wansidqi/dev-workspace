@@ -1308,6 +1308,7 @@ impl crate::Root {
             self.timesheet_open = false;
         } else {
             self.open_history = None;
+            self.open_changes = None;
             self.open_task = None;
             self.open_note = None;
             self.settings_open = false;
