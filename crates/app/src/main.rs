@@ -36,6 +36,7 @@ mod text_input;
 mod text_nav;
 mod theme;
 mod timesheet_panel;
+mod tips;
 mod ui;
 mod workspace_tools;
 

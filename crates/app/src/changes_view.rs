@@ -27,6 +27,9 @@ mod popovers;
 mod render;
 mod stash;
 
+/// Recently used branches kept per repo (the picker shows the newest five).
+const RECENT_LIMIT: usize = 8;
+
 pub type CloseHandler = Box<dyn Fn(&mut Window, &mut App)>;
 
 /// A repo's column in the view: its status and the little bit of UI state
@@ -42,6 +45,9 @@ struct RepoPane {
     shelf_collapsed: bool,
     /// Branch names, loaded when a branch popover opens.
     branches: Vec<String>,
+    /// Branches checked out recently (git's reflog), newest first; loaded with
+    /// `branches`.
+    recent: Vec<git::RecentBranch>,
     /// Bumped per refresh so a slow answer can't overwrite a newer one.
     generation: u64,
 }
@@ -57,6 +63,7 @@ impl RepoPane {
             shelf: None,
             shelf_collapsed: false,
             branches: Vec::new(),
+            recent: Vec::new(),
             generation: 0,
         }
     }
@@ -179,6 +186,8 @@ pub struct ChangesView {
     /// Debug QA hook (see `qa.rs`): once status has loaded, select the first
     /// changed file and then show this extra state (`branches`, `stash`, ...).
     pub(crate) qa: Option<String>,
+    /// Debug QA: a sample tooltip drawn in place, since hovering can't be scripted.
+    qa_tip: Option<Entity<crate::ui::TooltipView>>,
 
     popover: Option<Popover>,
     branch_filter: Entity<TextInput>,
@@ -261,6 +270,7 @@ impl ChangesView {
             task_link: None,
             busy: false,
             qa: None,
+            qa_tip: None,
             popover: None,
             branch_filter,
             branch_input,
@@ -975,10 +985,17 @@ impl ChangesView {
             let repo = pane.repo.clone();
             self.run(
                 cx,
-                move || git::list_branches(&repo).unwrap_or_default(),
-                move |this, branches, cx| {
+                move || {
+                    (
+                        git::list_branches(&repo).unwrap_or_default(),
+                        git::recent_branches(std::path::Path::new(&repo.path), RECENT_LIMIT)
+                            .unwrap_or_default(),
+                    )
+                },
+                move |this, (branches, recent), cx| {
                     if let Some(p) = this.pane_mut(id) {
                         p.branches = branches;
+                        p.recent = recent;
                     }
                     cx.notify();
                 },
@@ -1395,6 +1412,11 @@ impl ChangesView {
                 }
             }
             "tasks" => self.popover = Some(Popover::Tasks),
+            "tooltip" => {
+                let theme = self.theme;
+                let (title, hint) = crate::tips::lookup("repo-stash-now").unwrap();
+                self.qa_tip = Some(cx.new(|_| crate::ui::TooltipView::new(theme, title, hint)));
+            }
             "lines" => self.qa = Some("lines".into()),
             _ => {}
         }

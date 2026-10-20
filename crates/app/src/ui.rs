@@ -174,7 +174,7 @@ pub enum ButtonKind {
 
 /// A 28px button with an optional leading icon. Attach `.on_click(..)` at the
 /// call site.
-pub fn button(
+fn button_inner(
     theme: &GlassTheme,
     id: impl Into<ElementId>,
     kind: ButtonKind,
@@ -242,7 +242,7 @@ pub fn button(
 
 /// A square icon-only ghost button (22px), the row-action control. Hovering
 /// tints toward `hover_color` for destructive actions.
-pub fn icon_button(
+fn icon_button_inner(
     theme: &GlassTheme,
     glyph: Icon,
     id: impl Into<ElementId>,
@@ -478,7 +478,7 @@ pub fn segmented(theme: &GlassTheme) -> Div {
 }
 
 /// One option of a [`segmented`] group.
-pub fn segment(
+fn segment_inner(
     theme: &GlassTheme,
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
@@ -616,7 +616,7 @@ pub fn tab(
 
 /// A toggleable filter pill: tags, repos, date presets. Attach `.on_click(..)`
 /// at the call site.
-pub fn filter_chip(
+fn filter_chip_inner(
     theme: &GlassTheme,
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
@@ -658,7 +658,11 @@ pub enum CheckState {
 }
 
 /// A 16px checkbox. Attach `.on_click(..)` at the call site.
-pub fn checkbox(theme: &GlassTheme, id: impl Into<ElementId>, state: CheckState) -> Stateful<Div> {
+fn checkbox_inner(
+    theme: &GlassTheme,
+    id: impl Into<ElementId>,
+    state: CheckState,
+) -> Stateful<Div> {
     let theme = *theme;
     let filled = state != CheckState::Off;
     div()
@@ -683,4 +687,165 @@ pub fn checkbox(theme: &GlassTheme, id: impl Into<ElementId>, state: CheckState)
         .when(state == CheckState::Mixed, |d| {
             d.child(icon(Icon::Minus, 12.0, theme.accent_fg))
         })
+}
+
+// ---- tooltips -------------------------------------------------------------
+
+/// What a tooltip shows: a short title and, usually, one line saying what the
+/// control does.
+pub struct TooltipView {
+    title: SharedString,
+    hint: Option<SharedString>,
+    theme: GlassTheme,
+}
+
+impl gpui::Render for TooltipView {
+    fn render(
+        &mut self,
+        _window: &mut gpui::Window,
+        _cx: &mut gpui::Context<Self>,
+    ) -> impl IntoElement {
+        let theme = self.theme;
+        div()
+            .max_w(px(300.0))
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .px(theme.space_3)
+            .py(theme.space_2)
+            .rounded(theme.radius_md)
+            .border_1()
+            .border_color(theme.border_light)
+            .bg(theme.surface_solid)
+            .shadow_lg()
+            .child(
+                div()
+                    .t_small()
+                    .t_strong()
+                    .text_color(theme.text_primary)
+                    .child(self.title.clone()),
+            )
+            .children(
+                self.hint
+                    .clone()
+                    .map(|hint| div().t_small().text_color(theme.text_secondary).child(hint)),
+            )
+    }
+}
+
+impl TooltipView {
+    pub fn new(theme: GlassTheme, title: &'static str, hint: Option<&'static str>) -> Self {
+        Self {
+            title: title.into(),
+            hint: hint.map(SharedString::from),
+            theme,
+        }
+    }
+}
+
+/// A builder for `.tooltip(..)`.
+pub fn tooltip(
+    theme: &GlassTheme,
+    title: &'static str,
+    hint: Option<&'static str>,
+) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
+    let theme = *theme;
+    move |_window, cx| {
+        cx.new(|_| TooltipView {
+            title: title.into(),
+            hint: hint.map(SharedString::from),
+            theme,
+        })
+        .into()
+    }
+}
+
+/// The tooltip text registered for `id` in `tips.rs`, if any.
+fn tip_for(id: &ElementId) -> Option<(&'static str, Option<&'static str>)> {
+    match id {
+        ElementId::Name(name) | ElementId::NamedInteger(name, _) => crate::tips::lookup(name),
+        _ => None,
+    }
+}
+
+fn with_tip(
+    element: Stateful<Div>,
+    theme: &GlassTheme,
+    tip: Option<(&'static str, Option<&'static str>)>,
+) -> Stateful<Div> {
+    match tip {
+        Some((title, hint)) => element.tooltip(tooltip(theme, title, hint)),
+        None => element,
+    }
+}
+
+/// A 28px button with an optional leading icon. Attach `.on_click(..)` at the
+/// call site. Shows the tooltip registered for its id in `tips.rs`.
+pub fn button(
+    theme: &GlassTheme,
+    id: impl Into<ElementId>,
+    kind: ButtonKind,
+    glyph: Option<Icon>,
+    label: impl Into<SharedString>,
+) -> Stateful<Div> {
+    let id: ElementId = id.into();
+    let tip = tip_for(&id);
+    with_tip(button_inner(theme, id, kind, glyph, label), theme, tip)
+}
+
+/// A square icon-only ghost button, the row-action control. Hovering tints
+/// toward `hover_color` for destructive actions. Has the tooltip registered
+/// for its id.
+pub fn icon_button(
+    theme: &GlassTheme,
+    glyph: Icon,
+    id: impl Into<ElementId>,
+    hover_color: Hsla,
+) -> Stateful<Div> {
+    let id: ElementId = id.into();
+    let tip = tip_for(&id);
+    with_tip(icon_button_inner(theme, glyph, id, hover_color), theme, tip)
+}
+
+/// One option of a [`segmented`] group (with its registered tooltip).
+pub fn segment(
+    theme: &GlassTheme,
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    active: bool,
+) -> Stateful<Div> {
+    let id: ElementId = id.into();
+    let tip = tip_for(&id);
+    with_tip(segment_inner(theme, id, label, active), theme, tip)
+}
+
+/// A toggleable filter pill (with its registered tooltip). Attach
+/// `.on_click(..)` at the call site.
+pub fn filter_chip(
+    theme: &GlassTheme,
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    active: bool,
+) -> Stateful<Div> {
+    let id: ElementId = id.into();
+    let tip = tip_for(&id);
+    with_tip(filter_chip_inner(theme, id, label, active), theme, tip)
+}
+
+/// A 16px checkbox (with its registered tooltip). Attach `.on_click(..)` at
+/// the call site.
+pub fn checkbox(theme: &GlassTheme, id: impl Into<ElementId>, state: CheckState) -> Stateful<Div> {
+    let id: ElementId = id.into();
+    let tip = tip_for(&id);
+    with_tip(checkbox_inner(theme, id, state), theme, tip)
+}
+
+/// A tooltip builder for a control that isn't made by the shared builders
+/// above (a custom row or pill): looks `name` up in `tips.rs`.
+pub fn tip(
+    theme: &GlassTheme,
+    name: &'static str,
+) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
+    let (title, hint) = crate::tips::lookup(name).unwrap_or((name, None));
+    tooltip(theme, title, hint)
 }

@@ -17,7 +17,8 @@ mod testutil;
 mod timesheet;
 
 pub use branches::{
-    create_branch, delete_branch, rename_branch, switch_branch, SwitchMode, SwitchOutcome,
+    create_branch, delete_branch, recent_branches, rename_branch, switch_branch, RecentBranch,
+    SwitchMode, SwitchOutcome,
 };
 pub use changes::{
     discard_files, repo_status, stage_files, unstage_files, ChangeKind, ChangedFile, RepoStatus,

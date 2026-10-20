@@ -9,6 +9,19 @@ use super::*;
 use crate::commit_browser::PICKER_TREE;
 use crate::task_tree::{filter_tree, tree_guide_lines, tree_guides};
 use crate::theme::TypeScale;
+/// Recently used branches listed above the rest.
+const RECENT_SHOWN: usize = 5;
+
+/// A small heading between groups of the branch list.
+fn heading(theme: &GlassTheme, text: &'static str) -> AnyElement {
+    div()
+        .pt(theme.space_2)
+        .pb(px(2.0))
+        .px(theme.space_2)
+        .child(section_label(theme, text))
+        .into_any_element()
+}
+
 use crate::ui::{
     button, chip, icon, icon_button, section_label, segment, segmented, ButtonKind, Icon,
 };
@@ -97,10 +110,43 @@ impl ChangesView {
                 current.entry(b).or_default().push(pane.repo.name.clone());
             }
         }
-        // Branches the checked-out ones first, then the rest alphabetically.
-        let mut names: Vec<String> = known.keys().cloned().collect();
-        names.sort_by_key(|n| (!current.contains_key(n), n.to_lowercase()));
-        names.retain(|n| query.is_empty() || n.to_lowercase().contains(&query));
+        // The branches checked out now, then the recently used ones (newest
+        // first, across the scope's repos), then everything else A-Z.
+        let mut latest: BTreeMap<String, i64> = BTreeMap::new();
+        for pane in &panes {
+            for r in &pane.recent {
+                let t = latest.entry(r.name.clone()).or_insert(r.time);
+                *t = (*t).max(r.time);
+            }
+        }
+        let matches = |n: &String| query.is_empty() || n.to_lowercase().contains(&query);
+        let mut checked_out: Vec<String> = current
+            .keys()
+            .filter(|n| known.contains_key(*n) && matches(n))
+            .cloned()
+            .collect();
+        checked_out.sort_by_key(|n| n.to_lowercase());
+        let mut recent: Vec<String> = latest
+            .iter()
+            .filter(|(n, _)| known.contains_key(*n) && !current.contains_key(*n) && matches(n))
+            .map(|(n, _)| n.clone())
+            .collect();
+        recent.sort_by_key(|n| std::cmp::Reverse(latest[n]));
+        recent.truncate(RECENT_SHOWN);
+        let mut others: Vec<String> = known
+            .keys()
+            .filter(|n| !current.contains_key(*n) && !recent.contains(n) && matches(n))
+            .cloned()
+            .collect();
+        others.sort_by_key(|n| n.to_lowercase());
+        // Headings only when the list isn't being searched.
+        let sectioned = query.is_empty() && !recent.is_empty();
+        let (n_current, n_recent) = (checked_out.len(), recent.len());
+        let names: Vec<String> = checked_out
+            .into_iter()
+            .chain(recent)
+            .chain(others)
+            .collect();
 
         let title = match scope {
             Scope::All => format!("Branches · all {total} repos"),
@@ -221,8 +267,21 @@ impl ChangesView {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.switch_branch(scope, switch_name.clone(), cx);
                     }))
+                    .into_any_element()
             })
             .collect::<Vec<_>>();
+
+        // Put the headings between the groups.
+        let mut children: Vec<AnyElement> = Vec::with_capacity(rows.len() + 2);
+        for (i, row) in rows.into_iter().enumerate() {
+            if sectioned && i == n_current {
+                children.push(heading(&theme, "Recent"));
+            }
+            if sectioned && i == n_current + n_recent {
+                children.push(heading(&theme, "Other branches"));
+            }
+            children.push(row);
+        }
 
         let task_branch = self.task_link.and_then(|id| {
             self.state
@@ -320,7 +379,7 @@ impl ChangesView {
                     .gap(px(2.0))
                     .max_h(px(260.0))
                     .overflow_y_scroll()
-                    .children(rows),
+                    .children(children),
             )
             .child(section_label(&theme, "New branch"))
             .child(self.branch_input.clone())

@@ -295,6 +295,15 @@ screenshot (see "Not verified by hand" below).
   - [x] Open a changed file in the IDE: double-click the row or the `<>` icon
         (uses the Settings IDE command; the path is checked to be inside the
         repo and passed as one argument, never through a shell)
+  - [x] Tooltips: every control of the Changes view says what it does when
+        hovered (title + one line). All the wording is in `tips.rs`, keyed by
+        the control's element id; the shared button / icon-button / checkbox /
+        segment / chip builders in `ui.rs` look their id up there, so another
+        screen gets tooltips by adding lines to that table
+  - [x] Branch picker: a "Recent" group (the last five branches you checked
+        out, from git's reflog, newest first, merged across repos for the
+        all-repos picker) between the checked-out branch and the rest; while
+        searching, the list is flat
   - [x] Popovers close on a click anywhere outside them (also the history
         browser's branch dropdown); the task picker is the same tree as the
         commit browser's, without status icons

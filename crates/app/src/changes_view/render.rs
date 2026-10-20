@@ -243,6 +243,11 @@ impl Render for ChangesView {
             .child(header)
             .children(notices)
             .children(filter_chips)
+            .children(
+                self.qa_tip
+                    .clone()
+                    .map(|tip| div().absolute().top(px(210.0)).left(px(300.0)).child(tip)),
+            )
             .child(
                 div()
                     .flex()
@@ -341,6 +346,7 @@ impl ChangesView {
             .text_color(theme.text_secondary)
             .cursor_pointer()
             .hover(move |s| s.bg(theme.surface_hover).text_color(theme.text_primary))
+            .tooltip(crate::ui::tip(&theme, "repo-branch"))
             .child(icon(Icon::GitBranch, 12.0, theme.text_muted))
             .child(div().truncate().child(branch_label))
             .when(ahead > 0, |d| {
@@ -671,6 +677,7 @@ impl ChangesView {
                             })
                             .cursor_pointer()
                             .hover(move |s| s.bg(theme.surface_hover))
+                            .tooltip(crate::ui::tip(&theme, "changes-task-link"))
                             .child(icon(Icon::Link, 12.0, theme.text_muted))
                             .child(div().truncate().child(match &task_title {
                                 Some(t) => format!("Linked to: {t}"),

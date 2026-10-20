@@ -271,6 +271,57 @@ pub fn delete_branch(path: &Path, name: &str, force: bool) -> Result<(), GitErro
     Ok(())
 }
 
+/// A branch you were on recently, and when you last left or entered it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentBranch {
+    pub name: String,
+    /// Unix time of that checkout.
+    pub time: i64,
+}
+
+/// The local branches you checked out most recently, newest first, read from
+/// HEAD's reflog (the "checkout: moving from A to B" lines git writes). Both
+/// ends of a move count. Only branches that still exist are returned, so
+/// deleted ones vanish; the reflog is local, so a fresh clone has none.
+pub fn recent_branches(path: &Path, limit: usize) -> Result<Vec<RecentBranch>, GitError> {
+    let repo = Repository::open(path)?;
+    let Ok(reflog) = repo.reflog("HEAD") else {
+        return Ok(Vec::new());
+    };
+    let mut out: Vec<RecentBranch> = Vec::new();
+    for entry in reflog.iter() {
+        let Some(message) = entry.message() else {
+            continue;
+        };
+        let Some(rest) = message.strip_prefix("checkout: moving from ") else {
+            continue;
+        };
+        let Some((from, to)) = rest.rsplit_once(" to ") else {
+            continue;
+        };
+        let time = entry.committer().when().seconds();
+        for name in [to, from] {
+            if out.len() >= limit {
+                break;
+            }
+            let name = name.trim();
+            if out.iter().any(|r| r.name == name)
+                || repo.find_branch(name, BranchType::Local).is_err()
+            {
+                continue;
+            }
+            out.push(RecentBranch {
+                name: name.to_owned(),
+                time,
+            });
+        }
+        if out.len() >= limit {
+            break;
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,6 +453,43 @@ mod tests {
         create_branch(f.path(), "child", Some("feature"), SwitchMode::Bring).unwrap();
         assert_eq!(f.read("a.txt"), "feature\n");
         assert!(f.exists("f.txt"));
+    }
+
+    #[test]
+    fn recent_branches_follow_checkouts_newest_first() {
+        let f = Fixture::with_files(&[(
+            "a.txt", "1
+",
+        )]);
+        let main = f.branch_name().unwrap();
+        for name in ["one", "two", "three"] {
+            create_branch(f.path(), name, None, SwitchMode::Bring).unwrap();
+            switch_branch(f.path(), &main, SwitchMode::Bring).unwrap();
+        }
+        switch_branch(f.path(), "two", SwitchMode::Bring).unwrap();
+        let names = |limit| -> Vec<String> {
+            recent_branches(f.path(), limit)
+                .unwrap()
+                .into_iter()
+                .map(|r| r.name)
+                .collect()
+        };
+        // Currently on `two`, which was entered last, coming from main.
+        let all = names(10);
+        assert_eq!(all[0], "two");
+        assert!(all.contains(&main) && all.contains(&"three".to_string()));
+        assert_eq!(all.iter().filter(|n| *n == "two").count(), 1, "no repeats");
+        assert_eq!(names(2).len(), 2, "limited");
+        // A deleted branch is gone from the list.
+        switch_branch(f.path(), &main, SwitchMode::Bring).unwrap();
+        delete_branch(f.path(), "one", true).unwrap();
+        assert!(!names(10).contains(&"one".to_string()));
+        // A repo with no history of switching has none.
+        assert!(
+            recent_branches(Fixture::with_files(&[("x", "1")]).path(), 5)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
