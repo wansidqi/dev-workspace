@@ -747,6 +747,7 @@ impl gpui::Render for TooltipView {
 }
 
 impl TooltipView {
+    #[cfg(debug_assertions)]
     pub fn new(theme: GlassTheme, title: &'static str, hint: Option<&'static str>) -> Self {
         Self {
             title: title.into(),
