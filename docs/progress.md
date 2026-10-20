@@ -280,10 +280,11 @@ screenshot (see "Not verified by hand" below).
         reachable until git gc. It follows a branch rename. It is NOT a git
         stash: `git stash list` and GitHub Desktop don't show it
   - [x] "Switch branch and stash my changes" uses the shelf too
-  - [x] Git stashes made elsewhere (git CLI, GitHub Desktop) are still
-        reachable: the box icon on a repo header appears only when the repo
-        has any, lists them for the current branch (link for other branches)
-        with Pop / Apply / drop
+  - [x] Git stashes made elsewhere (git CLI, GitHub Desktop) are not shown
+        in the Changes view any more (the old list was removed to avoid
+        confusion with the per-branch stash). They are untouched in git: use
+        `git stash list` / GitHub Desktop, or `git stash drop`, to deal with
+        them. `devspace-git` still has the git-stash wrappers (`stash.rs`)
   - [x] Discard confirmation bar (files, lines, branch delete, stash)
   - [x] Task tie-in: "Link commit to a task" picker (the project's task
         tree); commits made while a task is chosen are linked to it for every

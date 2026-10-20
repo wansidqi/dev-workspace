@@ -13,8 +13,7 @@ use std::path::PathBuf;
 
 use devspace_core::{CommitLinkStatus, Repo, RepoId, TaskId};
 use devspace_git::{
-    self as git, DiffSide, FileDiff, GitError, LineSelection, RepoStatus, Shelf, StashEntry,
-    SwitchMode,
+    self as git, DiffSide, FileDiff, GitError, LineSelection, RepoStatus, Shelf, SwitchMode,
 };
 use gpui::{prelude::*, App, Context, Entity, UniformListScrollHandle, WeakEntity, Window};
 
@@ -38,7 +37,6 @@ struct RepoPane {
     error: Option<String>,
     loading: bool,
     collapsed: bool,
-    stashes: Vec<StashEntry>,
     /// This branch's stash (one per branch, any number of files).
     shelf: Option<Shelf>,
     shelf_collapsed: bool,
@@ -49,24 +47,6 @@ struct RepoPane {
 }
 
 impl RepoPane {
-    /// The stashes made on the checked-out branch, and how many belong to
-    /// other branches. Git keeps stashes repo-wide; scoping them to the branch
-    /// avoids popping another branch's work by mistake. Detached HEAD (no
-    /// branch) shows them all.
-    fn stashes_here(&self) -> (Vec<&StashEntry>, usize) {
-        let branch = self.status.as_ref().and_then(|s| s.branch.as_deref());
-        match branch {
-            Some(b) => {
-                let (here, other): (Vec<_>, Vec<_>) = self
-                    .stashes
-                    .iter()
-                    .partition(|s| s.branch.as_deref() == Some(b));
-                (here, other.len())
-            }
-            None => (self.stashes.iter().collect(), 0),
-        }
-    }
-
     fn new(repo: Repo) -> Self {
         Self {
             repo,
@@ -74,7 +54,6 @@ impl RepoPane {
             error: None,
             loading: false,
             collapsed: false,
-            stashes: Vec::new(),
             shelf: None,
             shelf_collapsed: false,
             branches: Vec::new(),
@@ -96,7 +75,6 @@ pub(crate) enum Scope {
 
 pub(crate) enum Popover {
     Branches(Scope),
-    Stashes(RepoId),
     Tasks,
 }
 
@@ -105,7 +83,6 @@ pub(crate) enum Confirm {
     DiscardFiles { repo: RepoId, files: Vec<String> },
     DiscardLines { count: usize },
     DeleteBranch { repo: RepoId, name: String },
-    DropStash { repo: RepoId, index: usize },
     DiscardStash { repo: RepoId, files: Vec<String> },
 }
 
@@ -209,8 +186,6 @@ pub struct ChangesView {
     branch_input_mode: BranchInput,
     task_filter: Entity<TextInput>,
     switch_mode: SwitchMode,
-    /// The stash popover also lists stashes from other branches.
-    show_other_stashes: bool,
     confirm: Option<Confirm>,
     notice: Vec<NoticeLine>,
 }
@@ -292,7 +267,6 @@ impl ChangesView {
             branch_input_mode: BranchInput::Create,
             task_filter,
             switch_mode: SwitchMode::Bring,
-            show_other_stashes: false,
             confirm: None,
             notice: Vec::new(),
         };
@@ -387,14 +361,8 @@ impl ChangesView {
         let path = pane.path();
         self.run(
             cx,
-            move || {
-                (
-                    git::repo_status(&path),
-                    git::stash_list(&path),
-                    git::shelf_list(&path),
-                )
-            },
-            move |this, (status, stashes, shelf), cx| {
+            move || (git::repo_status(&path), git::shelf_list(&path)),
+            move |this, (status, shelf), cx| {
                 let Some(pane) = this.pane_mut(id) else {
                     return;
                 };
@@ -412,7 +380,6 @@ impl ChangesView {
                         pane.error = Some(e.to_string());
                     }
                 }
-                pane.stashes = stashes.unwrap_or_default();
                 pane.shelf = shelf.ok().flatten();
                 let kept: HashSet<String> = pane
                     .shelf
@@ -794,9 +761,6 @@ impl ChangesView {
                 self.apply_lines(LineOp::Discard, selection, cx);
             }
             Confirm::DeleteBranch { repo, name } => self.delete_branch(repo, name, true, cx),
-            Confirm::DropStash { repo, index } => {
-                self.mutate(repo, cx, move |path| git::stash_drop(path, index));
-            }
             Confirm::DiscardStash { repo, files } => {
                 let Some(pane) = self.pane(repo) else { return };
                 let path = pane.path();
@@ -1213,13 +1177,6 @@ impl ChangesView {
 
     // ---- stash ---------------------------------------------------------
 
-    pub(crate) fn open_stashes(&mut self, repo: RepoId, cx: &mut Context<Self>) {
-        self.show_other_stashes = false;
-        self.popover = Some(Popover::Stashes(repo));
-        self.confirm = None;
-        cx.notify();
-    }
-
     /// Reports a stash or restore: one line for what worked, one per file
     /// that was left alone and why.
     fn shelf_notice(name: &str, verb: &str, outcome: &git::ShelfOutcome) -> Vec<NoticeLine> {
@@ -1366,24 +1323,6 @@ impl ChangesView {
         cx.notify();
     }
 
-    pub(crate) fn stash_apply(
-        &mut self,
-        repo: RepoId,
-        index: usize,
-        pop: bool,
-        cx: &mut Context<Self>,
-    ) {
-        self.mutate(repo, cx, move |path| {
-            if pop {
-                git::stash_pop(path, index)
-            } else {
-                git::stash_apply(path, index)
-            }
-        });
-        self.popover = None;
-        cx.notify();
-    }
-
     // ---- task link -----------------------------------------------------
 
     pub(crate) fn set_task_link(&mut self, task: Option<TaskId>, cx: &mut Context<Self>) {
@@ -1453,11 +1392,6 @@ impl ChangesView {
             "repo-branches" => {
                 if let Some((repo, _)) = first {
                     self.open_branches(Scope::Repo(repo), cx);
-                }
-            }
-            "stash" => {
-                if let Some((repo, _)) = first {
-                    self.open_stashes(repo, cx);
                 }
             }
             "tasks" => self.popover = Some(Popover::Tasks),

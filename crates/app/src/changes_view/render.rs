@@ -429,27 +429,6 @@ impl ChangesView {
                 d.child(chip(&theme, op, theme.warning))
             })
             .child(branch_button)
-            // Old git stashes (made by git or GitHub Desktop): a way to reach them.
-            .when(!pane.stashes.is_empty(), |d| {
-                d.child(
-                    icon_button(
-                        &theme,
-                        Icon::Archive,
-                        ("repo-stash", id.0 as u64),
-                        theme.text_primary,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| this.open_stashes(id, cx)))
-                    .when(pane.stashes_here().0.len() > 0, |d| {
-                        d.child(
-                            div()
-                                .t_micro()
-                                .t_code()
-                                .text_color(theme.accent)
-                                .child(pane.stashes_here().0.len().to_string()),
-                        )
-                    }),
-                )
-            })
             .when(files > 0, |d| {
                 d.child(
                     icon_button(
@@ -787,13 +766,6 @@ impl ChangesView {
                     self.repo_name(*repo)
                 ),
                 "Discard",
-            ),
-            Confirm::DropStash { repo, .. } => (
-                format!(
-                    "Drop this stash in {}? It can't be recovered.",
-                    self.repo_name(*repo)
-                ),
-                "Drop",
             ),
         };
         Some(
