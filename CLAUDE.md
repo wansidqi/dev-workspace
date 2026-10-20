@@ -8,7 +8,7 @@ A local-first **developer workspace** desktop app. It organizes work around proj
 
 Goals:
 - Low memory and CPU use (the reason for Rust + GPUI)
-- Local-first: no account, no network required
+- Local-first: no account, no network required (remote git operations and the optional GitHub integration are the only network features, and the app stays fully usable without them)
 - Plain files for user content (markdown, attachments) so data stays portable
 - Secure handling of credentials
 - A modern, glassy UI (translucent layered surfaces, soft light, depth) that stays fast and readable
@@ -26,7 +26,7 @@ Non-goals:
 | UI | GPUI (pin an exact version or git revision; the API is pre-1.0 and changes) |
 | Component helpers | gpui-component (evaluate before writing custom widgets) |
 | Database | SQLite via rusqlite (bundled feature), migrations in code |
-| Git | git2 (libgit2) for history and diffs; shell out to the git CLI only for cherry-pick export text |
+| Git | Hybrid. git2 (libgit2) for reads and local index work: history, status, diffs, staging (including hunk/line patches), commit, branch create/switch, stash. The system git CLI (resolved once, run with arguments, never through a shell) for network and history-rewriting work: fetch, pull, push, clone, merge, rebase, revert, cherry-pick. This reuses the user's credential manager, SSH config and hooks. |
 | Terminal | alacritty_terminal (emulation) + portable-pty (shell process) |
 | Markdown | pulldown-cmark for parsing and preview |
 | PDF viewing | pdfium-render (or mupdf); render pages to images |
@@ -44,6 +44,7 @@ Non-goals:
 4. **Attachments**: PDFs, images, other files on a project, task or subtask; built-in PDF viewer; copy into workspace or link by path.
 5. **Credentials vault**: per project; encrypted; reveal/copy with auto-hide and clipboard auto-clear; optional injection into terminal sessions as environment variables.
 6. **Git integration**: commit history browser (search, filter by repo/branch/author/date) that merges history across all repos linked to the project, newest first, each row labeled with its repo; select single, multiple or range and tag/map/label them to any task or subtask at any nesting depth in the same project (a task can have many commits; a commit can be mapped to more than one task; tasks are picked from the project's task tree); per-link note and status (needs migration, cherry-picked, deployed); badges on linked commits; unassigned commits view; branch view (commits on task branch not in target); suggested commits (task ID in message or branch); export ordered cherry-pick list; warn when a linked commit is missing after rebase or squash.
+   **Git client (GitHub Desktop parity)**, in phases: (1) working-copy changes view, file diffs, stage/unstage/discard by file, hunk and line, commit (summary, description, co-authors, amend), branch create/switch/rename/delete with a stash-or-carry prompt, stash; (2) fetch/pull/push with ahead/behind counts and a sync button; (3) merge with conflict detection and resolution, revert, undo last commit; (4) interactive rebase: squash, reorder, drag-to-cherry-pick; (5) optional, off by default: GitHub sign-in (OAuth device flow), pull request list and creation, CI check status. Tie it to tasks: commit from a task, create the task's branch, auto-link new commits to the active task.
 7. **Developer tools**: integrated terminal with tabs starting in the project folder; launch external IDE on the project folder; per-project run commands with log view.
 8. **Search and navigation**: global search; command palette; keyboard shortcuts; restore last project, task and layout on startup.
 9. **Data and safety**: backup and export/import of a project; local-first.
@@ -125,6 +126,9 @@ Rules:
 - Validate and canonicalize all file paths. Attachments and notes must stay inside the project directory.
 - Never launch an attached file that could run code (executables, scripts, installers, shortcuts): reveal it in the file manager instead. Open files by passing the path as a process argument, never through a shell.
 - Treat git repo contents and attached files as untrusted input.
+- Git CLI calls: pass arguments as a list (never a shell string), put `--` before paths, validate ref names with `is_safe_ref_name`, set `GIT_TERMINAL_PROMPT=0` so a missing credential fails instead of hanging, and never log remote URLs that embed credentials.
+- Destructive git actions (discard changes, delete branch, force push, reset, undo commit) need an explicit confirmation; prefer recoverable forms (stash before discard, `--force-with-lease` over `--force`).
+- GitHub tokens (optional integration) are stored like credentials: in the OS keychain, never on disk in plain text, never logged.
 
 ## GPUI guidelines
 
@@ -275,7 +279,7 @@ Debug builds read `DEVSPACE_DATA_DIR`, `DEVSPACE_SIZE` (`1280x760`) and `DEVSPAC
 ## Testing
 
 - core and storage must have unit tests (use in-memory SQLite for storage tests).
-- git crate tests create temporary repos with git2 and assert commit linking, branch views and patch-id matching, including the rebase and missing-commit case.
+- git crate tests create temporary repos with git2 and assert commit linking, branch views and patch-id matching, including the rebase and missing-commit case. Git client operations (status, hunk/line staging, commit, branch switch, stash, and CLI-backed fetch/pull/push/merge/rebase against a local bare remote) get the same temp-repo tests; tests skip CLI cases when `git` is not on PATH.
 - Encryption tests: round trip, wrong key fails, nonce is never reused.
 - UI is tested manually; keep logic out of views so it can be tested elsewhere.
 

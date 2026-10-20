@@ -196,6 +196,54 @@ remaining gap is visible at a glance.
       it by patch-id or marks the link `Missing` yet (`CommitInfo::patch_id`
       is currently the tree id, and links store none)
 
+## Git client (GitHub Desktop parity)
+
+Decided 2026-10-20: grow the read-only git integration into a full git
+client. Hybrid backend: git2 for reads and local index work, the system git
+CLI (argument list, no shell, `GIT_TERMINAL_PROMPT=0`) for network and
+history-rewriting operations — the same split GitHub Desktop uses (it bundles
+git rather than using libgit2 for writes). See CLAUDE.md "Tech stack" and
+"Security rules".
+
+Phase 1 — local working copy (git2 only)
+- [ ] `devspace-git`: working-copy status per repo (staged, unstaged,
+      untracked, conflicted, renamed)
+- [ ] File diff (workdir vs index, index vs HEAD, and commit diffs for the
+      history browser's missing detail view)
+- [ ] Stage / unstage / discard by file, hunk and line (build partial patches
+      and apply to the index); discard asks for confirmation
+- [ ] Commit: summary + description, co-authors trailer, amend last commit
+- [ ] Branches: create, switch, rename, delete; switching with changes offers
+      "stash and switch" or "bring changes"
+- [ ] Stash: save, list, apply, pop, drop
+- [ ] UI: "Changes" view (file list with checkboxes, virtualized diff with
+      highlighting, commit box), current-branch dropdown in the header
+- [ ] Task tie-in: commit from a task, create/check out the task's branch,
+      auto-link new commits to the active task
+
+Phase 2 — remotes (git CLI)
+- [ ] Resolve the git executable once; clear error when it is missing
+- [ ] Fetch, pull (fast-forward / merge per config), push (set upstream on
+      first push), ahead/behind counts, one "sync" button, periodic background
+      fetch (off by default)
+- [ ] Clone a repository and link it to the project
+
+Phase 3 — integration
+- [ ] Merge a branch into the current one; conflict list with "open in IDE",
+      mark resolved, abort
+- [ ] Revert a commit; undo last commit (soft reset, confirmation)
+
+Phase 4 — history rewriting (git CLI)
+- [ ] Interactive rebase: squash, reorder, edit message; drag-to-cherry-pick
+      onto a branch; abort/continue on conflict
+- [ ] After a rewrite, re-match commit links by patch-id (finishes the
+      missing-commit item above)
+
+Phase 5 — optional GitHub integration (off by default, network + account)
+- [ ] Sign in with OAuth device flow; token in the OS keychain
+- [ ] Pull request list for the current repo, create PR from a branch, CI
+      check status on branches and commits
+
 ## Developer tools
 
 - [x] Terminal: GPUI view (`crates/app/src/terminal_view.rs`) on the
@@ -556,6 +604,8 @@ in SQLite (`app.db`) instead.
 
 - Dependencies awaiting approval:
   `pdfium-render` (PDF viewer). (`pulldown-cmark` is approved and in use; code highlighting is built in, no crate needed.)
+- Git client Phase 5 (GitHub integration) would need an HTTP client crate
+  (for example `ureq`, no tokio) — needs approval before that phase starts.
 - History date filters use UTC day boundaries; a local-offset helper (or
   `chrono`, a new dependency) would make "Today" follow local time.
 - Everything merged from the parallel agents (palette, run commands,
