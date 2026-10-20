@@ -1,17 +1,65 @@
-//! Thin wrapper around `git2` for commit history and patch-id matching.
-//! The git CLI is only shelled out to for cherry-pick export text
-//! (see CLAUDE.md); everything else here uses libgit2 directly.
+//! Thin wrapper around `git2` for commit history, patch-id matching and the
+//! local working-copy client (status, diffs, staging, commit, branches,
+//! stash). The git CLI is reserved for network and history-rewriting work
+//! (see CLAUDE.md "Tech stack"); everything here uses libgit2 directly.
 
 use devspace_core::{Repo, RepoId, TaskId};
 use git2::Repository;
 
+mod branches;
+mod changes;
+mod commit;
+mod diff;
+mod stash;
+#[cfg(test)]
+mod testutil;
 mod timesheet;
+
+pub use branches::{
+    create_branch, delete_branch, rename_branch, switch_branch, SwitchMode, SwitchOutcome,
+};
+pub use changes::{
+    discard_files, repo_status, stage_files, unstage_files, ChangeKind, ChangedFile, RepoStatus,
+};
+pub use commit::{commit_staged, last_commit_message, CommitRequest};
+pub use diff::{
+    discard_lines, file_diff, stage_lines, unstage_lines, DiffHunk, DiffLine, DiffSide, FileDiff,
+    LineKind, LineSelection,
+};
+pub use stash::{stash_apply, stash_drop, stash_list, stash_pop, stash_save, StashEntry};
 pub use timesheet::timesheet_commits;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
     #[error("git error: {0}")]
     Git(#[from] git2::Error),
+    /// A request git can't honour as given (bad name, nothing staged, a
+    /// merge in progress...). The text is shown to the user as is.
+    #[error("{0}")]
+    Invalid(String),
+    /// A branch delete that needs the caller's explicit go-ahead.
+    #[error("branch `{0}` has commits that are not merged into the current branch")]
+    NotMerged(String),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// A path relative to the repo root, as git reports it: no absolute paths,
+/// drive prefixes or `..` components. Everything that touches the working
+/// tree by name goes through this first (CLAUDE.md path rule).
+pub(crate) fn check_rel_path(path: &str) -> Result<&str, GitError> {
+    let ok = !path.is_empty()
+        && !path.contains('\0')
+        && std::path::Path::new(path)
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)));
+    if ok {
+        Ok(path)
+    } else {
+        Err(GitError::Invalid(format!(
+            "not a path inside the repo: {path}"
+        )))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -503,7 +551,7 @@ pub struct BranchView {
 
 /// Branch and target names are user-entered; refuse anything git would read
 /// as an option or that carries whitespace/control characters.
-fn is_safe_ref_name(name: &str) -> bool {
+pub(crate) fn is_safe_ref_name(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with('-')
         && !name.chars().any(|c| c.is_whitespace() || c.is_control())
