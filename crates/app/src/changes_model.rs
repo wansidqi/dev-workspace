@@ -15,6 +15,10 @@ pub enum Row {
     File { repo: usize, file: usize },
     /// A repo with nothing to commit (or one that couldn't be read).
     Note(usize),
+    /// Header of the "Stashed changes" section of the repo at this index.
+    StashHeader(usize),
+    /// File `file` of that repo's stash.
+    StashFile { repo: usize, file: usize },
 }
 
 /// What the list needs to know about one repo to lay itself out.
@@ -24,6 +28,9 @@ pub struct RepoRows<'a> {
     pub collapsed: bool,
     /// Reading the repo failed; shown as a note under the header.
     pub failed: bool,
+    /// Files in this repo's stash for the current branch (0 = no section).
+    pub stash_files: usize,
+    pub stash_collapsed: bool,
 }
 
 /// Rows for every repo that passes `filter` (all of them when `None`):
@@ -44,6 +51,12 @@ pub fn rows(repos: &[RepoRows<'_>], filter: Option<RepoId>) -> Vec<Row> {
             out.push(Row::Note(ri));
         } else {
             out.extend((0..files).map(|file| Row::File { repo: ri, file }));
+        }
+        if repo.stash_files > 0 && !repo.failed {
+            out.push(Row::StashHeader(ri));
+            if !repo.stash_collapsed {
+                out.extend((0..repo.stash_files).map(|file| Row::StashFile { repo: ri, file }));
+            }
         }
     }
     out
@@ -203,12 +216,16 @@ mod tests {
                 status: Some(&api),
                 collapsed: false,
                 failed: false,
+                stash_files: 0,
+                stash_collapsed: false,
             },
             RepoRows {
                 id: RepoId(2),
                 status: Some(&fe),
                 collapsed: false,
                 failed: false,
+                stash_files: 0,
+                stash_collapsed: false,
             },
         ];
         assert_eq!(
@@ -232,6 +249,50 @@ mod tests {
     }
 
     #[test]
+    fn the_stash_section_follows_the_files_and_collapses() {
+        let fe = status(vec![file("a.ts", None, Some(ChangeKind::Modified))]);
+        let clean = status(vec![]);
+        let mut repos = [
+            RepoRows {
+                id: RepoId(1),
+                status: Some(&fe),
+                collapsed: false,
+                failed: false,
+                stash_files: 2,
+                stash_collapsed: false,
+            },
+            RepoRows {
+                id: RepoId(2),
+                status: Some(&clean),
+                collapsed: false,
+                failed: false,
+                stash_files: 1,
+                stash_collapsed: true,
+            },
+        ];
+        assert_eq!(
+            rows(&repos, None),
+            [
+                Row::Repo(0),
+                Row::File { repo: 0, file: 0 },
+                Row::StashHeader(0),
+                Row::StashFile { repo: 0, file: 0 },
+                Row::StashFile { repo: 0, file: 1 },
+                Row::Repo(1),
+                Row::Note(1),
+                Row::StashHeader(1),
+            ],
+            "a clean repo can still have a stash; a collapsed stash shows only its header"
+        );
+        repos[0].collapsed = true;
+        assert_eq!(
+            rows(&repos, Some(RepoId(1))),
+            [Row::Repo(0)],
+            "collapsing the repo hides the stash too"
+        );
+    }
+
+    #[test]
     fn collapsed_repos_hide_their_files_and_unread_repos_show_a_note() {
         let fe = status(vec![file("a.ts", None, Some(ChangeKind::Modified))]);
         let repos = [
@@ -240,12 +301,16 @@ mod tests {
                 status: Some(&fe),
                 collapsed: true,
                 failed: false,
+                stash_files: 0,
+                stash_collapsed: false,
             },
             RepoRows {
                 id: RepoId(2),
                 status: None,
                 collapsed: false,
                 failed: true,
+                stash_files: 0,
+                stash_collapsed: false,
             },
         ];
         assert_eq!(

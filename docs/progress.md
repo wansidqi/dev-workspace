@@ -241,7 +241,9 @@ screenshot (see "Not verified by hand" below).
         (unmerged needs an explicit force); switching with changes either
         brings them (fails without touching anything if they'd be
         overwritten) or stashes them first
-  - [x] Stash: save (with untracked files), list, apply, pop, drop
+  - [x] Git stash wrappers (`stash.rs`): save, list (with the branch parsed from
+        the message), apply, pop, drop. The UI uses them only for old stashes;
+        new stashes go through the shelf below
 - [x] Changes view (`changes_view.rs`, `changes_view/`, pure logic in
       `changes_model.rs` with tests; sidebar "Changes", Ctrl+Shift+G, palette
       "Open git changes"):
@@ -263,12 +265,26 @@ screenshot (see "Not verified by hand" below).
   - [x] Branches popover for one repo or for all repos at once: switch,
         create, rename, delete, "bring / stash my changes" toggle; repos
         without the branch are reported as skipped, not failed
-  - [x] Stashes are scoped to the checked-out branch (read from the stash
-        message: `WIP on <b>:` / `On <b>:`); the header count and the popover
-        show only those, with a link to reveal other branches' stashes.
-        A direct "stash all changes" icon sits beside the repo's bin
-  - [x] Stash popover per repo; discard confirmation bar (files, lines,
-        branch delete, stash drop)
+  - [x] Per-branch stash ("shelf", `devspace-git` `shelf.rs`): one stash per
+        branch holding any number of files. Stash a whole repo (down-arrow
+        icon on the repo header) or a single file (down-arrow on its row);
+        a "Stashed" section under the repo lists the files with their diff
+        against the version they started from. Tick files to restore or
+        discard just those, or use Restore all. Stashing again adds to the
+        branch's stash; a file already in it is skipped, so no duplicates
+  - [x] Restoring is a three-way merge (what the file was, what it is now,
+        what was stashed): edits made since are kept, and a file that would
+        conflict is left in the stash and reported. Nothing is overwritten
+  - [x] Storage: a commit under `refs/devspace/stash/<branch>` (trees `base/`
+        and `new/`), each change a child of the last, so earlier states stay
+        reachable until git gc. It follows a branch rename. It is NOT a git
+        stash: `git stash list` and GitHub Desktop don't show it
+  - [x] "Switch branch and stash my changes" uses the shelf too
+  - [x] Git stashes made elsewhere (git CLI, GitHub Desktop) are still
+        reachable: the box icon on a repo header appears only when the repo
+        has any, lists them for the current branch (link for other branches)
+        with Pop / Apply / drop
+  - [x] Discard confirmation bar (files, lines, branch delete, stash)
   - [x] Task tie-in: "Link commit to a task" picker (the project's task
         tree); commits made while a task is chosen are linked to it for every
         repo; if the task has a branch, "Use task branch in all repos"
@@ -287,6 +303,10 @@ screenshot (see "Not verified by hand" below).
   - [ ] Git hooks do not run on commit (libgit2 doesn't run them; GitHub
         Desktop does). Phase 2 can route commits through the CLI if wanted
   - [ ] Keyboard navigation in the file list and diff
+  - [ ] Shelf: line-ending handling covers `core.autocrlf` (true/input) only,
+        not `.gitattributes` rules; a file already in the stash can't be
+        stashed again until restored or discarded; the stash doesn't keep the
+        executable bit; no automatic restore when switching back to a branch
   - [ ] Commit-detail diff in the history browser (the diff code is reusable)
 - Not verified by hand: clicks. The environment forbids synthetic input on
   the live desktop, so the click handlers are wired to tested git functions

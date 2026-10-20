@@ -8,11 +8,13 @@
 //! when it finishes (CLAUDE.md: never block the UI thread). The pure logic
 //! (row layout, line selection, commit targets) is in `changes_model.rs`.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use devspace_core::{CommitLinkStatus, Repo, RepoId, TaskId};
 use devspace_git::{
-    self as git, DiffSide, FileDiff, GitError, LineSelection, RepoStatus, StashEntry, SwitchMode,
+    self as git, DiffSide, FileDiff, GitError, LineSelection, RepoStatus, Shelf, StashEntry,
+    SwitchMode,
 };
 use gpui::{prelude::*, App, Context, Entity, UniformListScrollHandle, WeakEntity, Window};
 
@@ -24,6 +26,7 @@ use crate::theme::GlassTheme;
 
 mod popovers;
 mod render;
+mod stash;
 
 pub type CloseHandler = Box<dyn Fn(&mut Window, &mut App)>;
 
@@ -36,6 +39,9 @@ struct RepoPane {
     loading: bool,
     collapsed: bool,
     stashes: Vec<StashEntry>,
+    /// This branch's stash (one per branch, any number of files).
+    shelf: Option<Shelf>,
+    shelf_collapsed: bool,
     /// Branch names, loaded when a branch popover opens.
     branches: Vec<String>,
     /// Bumped per refresh so a slow answer can't overwrite a newer one.
@@ -69,6 +75,8 @@ impl RepoPane {
             loading: false,
             collapsed: false,
             stashes: Vec::new(),
+            shelf: None,
+            shelf_collapsed: false,
             branches: Vec::new(),
             generation: 0,
         }
@@ -98,6 +106,7 @@ pub(crate) enum Confirm {
     DiscardLines { count: usize },
     DeleteBranch { repo: RepoId, name: String },
     DropStash { repo: RepoId, index: usize },
+    DiscardStash { repo: RepoId, files: Vec<String> },
 }
 
 /// What the branch text box does on Enter.
@@ -144,6 +153,8 @@ impl NoticeLine {
 /// The diff of the selected file on the selected side.
 pub(crate) struct LoadedDiff {
     pub repo: RepoId,
+    /// A stashed file: shown for reference, nothing in it can be staged.
+    pub readonly: bool,
     pub side: DiffSide,
     pub diff: FileDiff,
     pub rows: Vec<DiffRow>,
@@ -170,6 +181,10 @@ pub struct ChangesView {
     rows: Vec<changes_model::Row>,
 
     selected: Option<(RepoId, String)>,
+    /// A file of the stash whose diff is open (instead of a working file).
+    selected_stash: Option<(RepoId, String)>,
+    /// Ticked files of the stash (for a partial restore or discard).
+    shelf_sel: HashSet<(RepoId, String)>,
     side: DiffSide,
     diff: Option<LoadedDiff>,
     diff_error: Option<String>,
@@ -192,7 +207,6 @@ pub struct ChangesView {
     branch_filter: Entity<TextInput>,
     branch_input: Entity<TextInput>,
     branch_input_mode: BranchInput,
-    stash_message: Entity<TextInput>,
     task_filter: Entity<TextInput>,
     switch_mode: SwitchMode,
     /// The stash popover also lists stashes from other branches.
@@ -213,7 +227,6 @@ impl ChangesView {
         let co_authors = cx.new(|cx| TextInput::new(cx, "Co-authors: Name <email>, …", theme));
         let branch_filter = cx.new(|cx| TextInput::new(cx, "Filter branches…", theme));
         let branch_input = cx.new(|cx| TextInput::new(cx, "New branch name", theme));
-        let stash_message = cx.new(|cx| TextInput::new(cx, "Stash message (optional)", theme));
         let task_filter = cx.new(|cx| TextInput::new(cx, "Search tasks…", theme));
         for input in [
             &summary,
@@ -240,17 +253,6 @@ impl ChangesView {
                 });
             }));
         });
-        stash_message.update(cx, |input, _| {
-            let weak = weak.clone();
-            input.on_confirm = Some(Box::new(move |text, _window, cx| {
-                let text = text.to_string();
-                let weak = weak.clone();
-                cx.defer(move |cx| {
-                    weak.update(cx, |this, cx| this.stash_save(text, cx)).ok();
-                });
-            }));
-        });
-
         cx.observe(&state, |this, _, cx| {
             this.sync_repos(cx);
             cx.notify();
@@ -268,6 +270,8 @@ impl ChangesView {
             diff_scroll: UniformListScrollHandle::new(),
             rows: Vec::new(),
             selected: None,
+            selected_stash: None,
+            shelf_sel: HashSet::new(),
             side: DiffSide::Unstaged,
             diff: None,
             diff_error: None,
@@ -286,7 +290,6 @@ impl ChangesView {
             branch_filter,
             branch_input,
             branch_input_mode: BranchInput::Create,
-            stash_message,
             task_filter,
             switch_mode: SwitchMode::Bring,
             show_other_stashes: false,
@@ -384,8 +387,14 @@ impl ChangesView {
         let path = pane.path();
         self.run(
             cx,
-            move || (git::repo_status(&path), git::stash_list(&path)),
-            move |this, (status, stashes), cx| {
+            move || {
+                (
+                    git::repo_status(&path),
+                    git::stash_list(&path),
+                    git::shelf_list(&path),
+                )
+            },
+            move |this, (status, stashes, shelf), cx| {
                 let Some(pane) = this.pane_mut(id) else {
                     return;
                 };
@@ -404,6 +413,13 @@ impl ChangesView {
                     }
                 }
                 pane.stashes = stashes.unwrap_or_default();
+                pane.shelf = shelf.ok().flatten();
+                let kept: HashSet<String> = pane
+                    .shelf
+                    .iter()
+                    .flat_map(|s| s.files.iter().map(|f| f.path.clone()))
+                    .collect();
+                this.shelf_sel.retain(|(r, f)| *r != id || kept.contains(f));
                 this.after_status(id, cx);
                 cx.notify();
             },
@@ -414,6 +430,18 @@ impl ChangesView {
     fn after_status(&mut self, id: RepoId, cx: &mut Context<Self>) {
         if self.qa.is_some() && self.selected.is_none() {
             self.qa_apply(cx);
+            return;
+        }
+        if let Some((repo, file)) = self.selected_stash.clone() {
+            if repo == id {
+                let present = self
+                    .pane(id)
+                    .and_then(|p| p.shelf.as_ref())
+                    .is_some_and(|s| s.files.iter().any(|f| f.path == file));
+                if !present {
+                    self.clear_selection();
+                }
+            }
             return;
         }
         let Some((repo, file)) = self.selected.clone() else {
@@ -438,6 +466,7 @@ impl ChangesView {
 
     fn clear_selection(&mut self) {
         self.selected = None;
+        self.selected_stash = None;
         self.diff = None;
         self.diff_error = None;
         self.diff_loading = false;
@@ -447,6 +476,7 @@ impl ChangesView {
     }
 
     fn select_file(&mut self, repo: RepoId, path: String, cx: &mut Context<Self>) {
+        self.selected_stash = None;
         if self.selected.as_ref() == Some(&(repo, path.clone())) {
             return;
         }
@@ -478,6 +508,42 @@ impl ChangesView {
     }
 
     fn reload_diff(&mut self, cx: &mut Context<Self>) {
+        if let Some((repo, file)) = self.selected_stash.clone() {
+            let Some(pane) = self.pane(repo) else { return };
+            let path = pane.path();
+            self.diff_generation += 1;
+            let generation = self.diff_generation;
+            self.diff_loading = true;
+            self.run(
+                cx,
+                move || git::shelf_file_diff(&path, &file),
+                move |this, result, cx| {
+                    if this.diff_generation != generation {
+                        return;
+                    }
+                    this.diff_loading = false;
+                    match result {
+                        Ok(diff) => {
+                            let rows = changes_model::diff_rows(&diff);
+                            this.diff = Some(LoadedDiff {
+                                repo,
+                                readonly: true,
+                                side: DiffSide::Unstaged,
+                                diff,
+                                rows,
+                            });
+                            this.diff_error = None;
+                        }
+                        Err(e) => {
+                            this.diff = None;
+                            this.diff_error = Some(e.to_string());
+                        }
+                    }
+                    cx.notify();
+                },
+            );
+            return;
+        }
         let Some((repo, file)) = self.selected.clone() else {
             self.diff = None;
             return;
@@ -512,6 +578,7 @@ impl ChangesView {
                         let rows = changes_model::diff_rows(&diff);
                         this.diff = Some(LoadedDiff {
                             repo,
+                            readonly: false,
                             side,
                             diff,
                             rows,
@@ -729,6 +796,27 @@ impl ChangesView {
             Confirm::DeleteBranch { repo, name } => self.delete_branch(repo, name, true, cx),
             Confirm::DropStash { repo, index } => {
                 self.mutate(repo, cx, move |path| git::stash_drop(path, index));
+            }
+            Confirm::DiscardStash { repo, files } => {
+                let Some(pane) = self.pane(repo) else { return };
+                let path = pane.path();
+                let name = pane.repo.name.clone();
+                self.run(
+                    cx,
+                    move || git::shelf_discard(&path, &files),
+                    move |this, result, cx| {
+                        match result {
+                            Ok(outcome) => {
+                                this.shelf_sel
+                                    .retain(|(r, f)| !(*r == repo && outcome.done.contains(f)));
+                                let lines = Self::shelf_notice(&name, "discarded", &outcome);
+                                this.set_notice(lines, cx);
+                            }
+                            Err(e) => this.error_notice(&name, e, cx),
+                        }
+                        this.refresh_repo(repo, cx);
+                    },
+                );
             }
         }
         cx.notify();
@@ -1129,42 +1217,153 @@ impl ChangesView {
         self.show_other_stashes = false;
         self.popover = Some(Popover::Stashes(repo));
         self.confirm = None;
-        self.stash_message.update(cx, |i, cx| {
-            i.set_text_selected("");
-            cx.notify();
-        });
         cx.notify();
     }
 
-    fn stash_save(&mut self, message: String, cx: &mut Context<Self>) {
-        let Some(Popover::Stashes(repo)) = self.popover else {
-            return;
-        };
-        self.stash_repo(repo, message, cx);
+    /// Reports a stash or restore: one line for what worked, one per file
+    /// that was left alone and why.
+    fn shelf_notice(name: &str, verb: &str, outcome: &git::ShelfOutcome) -> Vec<NoticeLine> {
+        let mut lines = Vec::new();
+        let n = outcome.done.len();
+        if n > 0 {
+            lines.push(NoticeLine::ok(format!(
+                "{name}: {verb} {n} file{}",
+                if n == 1 { "" } else { "s" }
+            )));
+        }
+        for (file, reason) in &outcome.skipped {
+            let tone = if reason.starts_with("no changes") {
+                Tone::Warn
+            } else {
+                Tone::Err
+            };
+            lines.push(NoticeLine {
+                text: format!("{name}: {file} {reason}"),
+                tone,
+            });
+        }
+        if lines.is_empty() {
+            lines.push(NoticeLine::warn(format!("{name}: nothing to do")));
+        }
+        lines
     }
 
-    /// Stashes a repo's changes (new files too). An empty message gets git's
-    /// default one.
-    pub(crate) fn stash_repo(&mut self, repo: RepoId, message: String, cx: &mut Context<Self>) {
+    /// Moves the given files of a repo into this branch's stash.
+    pub(crate) fn stash_files(&mut self, repo: RepoId, files: Vec<String>, cx: &mut Context<Self>) {
         let Some(pane) = self.pane(repo) else { return };
         let path = pane.path();
         let name = pane.repo.name.clone();
         self.run(
             cx,
-            move || git::stash_save(&path, Some(&message), true),
+            move || git::shelf_stash(&path, &files),
             move |this, result, cx| {
                 match result {
-                    Ok(true) => this
-                        .set_notice(vec![NoticeLine::ok(format!("{name}: changes stashed"))], cx),
-                    Ok(false) => this.set_notice(
-                        vec![NoticeLine::warn(format!("{name}: nothing to stash"))],
-                        cx,
-                    ),
+                    Ok(outcome) => {
+                        let lines = Self::shelf_notice(&name, "stashed", &outcome);
+                        this.set_notice(lines, cx);
+                    }
                     Err(e) => this.error_notice(&name, e, cx),
                 }
                 this.refresh_repo(repo, cx);
             },
         );
+    }
+
+    /// Stashes every changed file of a repo (including both paths of a rename).
+    pub(crate) fn stash_repo_all(&mut self, repo: RepoId, cx: &mut Context<Self>) {
+        let files = self.changed_paths(repo);
+        self.stash_files(repo, files, cx);
+    }
+
+    /// The paths of a repo's changed files, a rename counting both names.
+    pub(crate) fn changed_paths(&self, repo: RepoId) -> Vec<String> {
+        self.pane(repo)
+            .and_then(|p| p.status.as_ref())
+            .map(|s| {
+                s.files
+                    .iter()
+                    .flat_map(|f| std::iter::once(f.path.clone()).chain(f.old_path.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Puts stashed files back (a three-way merge with what is on disk now).
+    pub(crate) fn restore_stash(
+        &mut self,
+        repo: RepoId,
+        files: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pane) = self.pane(repo) else { return };
+        let path = pane.path();
+        let name = pane.repo.name.clone();
+        self.run(
+            cx,
+            move || git::shelf_restore(&path, &files),
+            move |this, result, cx| {
+                match result {
+                    Ok(outcome) => {
+                        this.shelf_sel
+                            .retain(|(r, f)| !(*r == repo && outcome.done.contains(f)));
+                        let lines = Self::shelf_notice(&name, "restored", &outcome);
+                        this.set_notice(lines, cx);
+                    }
+                    Err(e) => this.error_notice(&name, e, cx),
+                }
+                this.refresh_repo(repo, cx);
+            },
+        );
+    }
+
+    /// The stashed files an action applies to: the ticked ones, or all of them.
+    pub(crate) fn stash_targets(&self, repo: RepoId) -> Vec<String> {
+        let Some(shelf) = self.pane(repo).and_then(|p| p.shelf.as_ref()) else {
+            return Vec::new();
+        };
+        let ticked: Vec<String> = shelf
+            .files
+            .iter()
+            .filter(|f| self.shelf_sel.contains(&(repo, f.path.clone())))
+            .map(|f| f.path.clone())
+            .collect();
+        if ticked.is_empty() {
+            shelf.files.iter().map(|f| f.path.clone()).collect()
+        } else {
+            ticked
+        }
+    }
+
+    pub(crate) fn toggle_stash_file(&mut self, repo: RepoId, file: String, cx: &mut Context<Self>) {
+        let key = (repo, file);
+        if !self.shelf_sel.remove(&key) {
+            self.shelf_sel.insert(key);
+        }
+        cx.notify();
+    }
+
+    /// Shows a stashed file's diff on the right.
+    pub(crate) fn select_stash_file(&mut self, repo: RepoId, file: String, cx: &mut Context<Self>) {
+        if self.selected_stash == Some((repo, file.clone())) {
+            return;
+        }
+        self.clear_selection();
+        self.selected_stash = Some((repo, file));
+        self.reload_diff(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn ask_discard_stash(
+        &mut self,
+        repo: RepoId,
+        files: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if files.is_empty() {
+            return;
+        }
+        self.confirm = Some(Confirm::DiscardStash { repo, files });
+        cx.notify();
     }
 
     pub(crate) fn stash_apply(
@@ -1207,11 +1406,42 @@ impl ChangesView {
         {
             return;
         }
+        // The stash states only ever touch the throwaway `abenson_*` fixture
+        // repos, never a real one.
+        let fixture = |p: &RepoPane| p.repo.name.starts_with("abenson_");
+        let extra = self.qa.take().unwrap_or_default();
+        if extra == "shelf" {
+            let target = self
+                .repos
+                .iter()
+                .find(|p| fixture(p) && p.status.as_ref().is_some_and(|s| s.files.len() >= 2));
+            if let Some(pane) = target {
+                let repo = pane.repo.id;
+                let files: Vec<String> = pane
+                    .status
+                    .iter()
+                    .flat_map(|s| s.files.iter().take(2).map(|f| f.path.clone()))
+                    .collect();
+                self.qa = Some("shelf-open".into());
+                self.stash_files(repo, files, cx);
+            }
+            return;
+        }
+        if extra == "shelf-open" {
+            let first = self.repos.iter().find_map(|p| {
+                let file = p.shelf.as_ref()?.files.first()?;
+                Some((p.repo.id, file.path.clone()))
+            });
+            match first {
+                Some((repo, path)) => self.select_stash_file(repo, path, cx),
+                None => self.qa = Some("shelf-open".into()),
+            }
+            return;
+        }
         let first = self.repos.iter().find_map(|p| {
             let file = p.status.as_ref()?.files.first()?;
             Some((p.repo.id, file.path.clone()))
         });
-        let extra = self.qa.take().unwrap_or_default();
         if let Some((repo, path)) = first.clone() {
             self.select_file(repo, path.clone(), cx);
             if extra == "confirm" {

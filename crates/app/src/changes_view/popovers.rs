@@ -422,7 +422,6 @@ impl ChangesView {
             return div().into_any_element();
         };
         let branch = pane.status.as_ref().and_then(|s| s.branch.clone());
-        let dirty = pane.status.as_ref().is_some_and(|s| !s.files.is_empty());
         let (here, other_count) = pane.stashes_here();
         let here: Vec<StashEntry> = here.into_iter().cloned().collect();
         let others: Vec<StashEntry> = if self.show_other_stashes {
@@ -436,8 +435,8 @@ impl ChangesView {
         };
 
         let title = match &branch {
-            Some(b) => format!("Stashes · {name} · {b}"),
-            None => format!("Stashes · {name}"),
+            Some(b) => format!("Git stashes · {name} · {b}"),
+            None => format!("Git stashes · {name}"),
         };
         let here_rows: Vec<AnyElement> = here
             .iter()
@@ -457,23 +456,11 @@ impl ChangesView {
             .flex_col()
             .gap(theme.space_2)
             .child(self.popover_title(title, cx))
-            .child(self.stash_message.clone())
             .child(
-                button(
-                    &theme,
-                    "stash-save",
-                    if dirty {
-                        ButtonKind::Secondary
-                    } else {
-                        ButtonKind::Ghost
-                    },
-                    Some(Icon::Archive),
-                    "Stash changes (including new files)",
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    let message = this.stash_message.read(cx).content.to_string();
-                    this.stash_save(message, cx);
-                })),
+                div()
+                    .t_small()
+                    .text_color(theme.text_secondary)
+                    .child("Stashes made with git or GitHub Desktop. Your own stash for a branch is listed under its files."),
             )
             .when(here.is_empty(), |d| {
                 d.child(

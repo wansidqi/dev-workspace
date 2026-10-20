@@ -66,6 +66,8 @@ impl Render for ChangesView {
                 status: p.status.as_ref(),
                 collapsed: p.collapsed,
                 failed: p.error.is_some(),
+                stash_files: p.shelf.as_ref().map_or(0, |s| s.files.len()),
+                stash_collapsed: p.shelf_collapsed,
             })
             .collect();
         self.rows = changes_model::rows(&layout, self.repo_filter);
@@ -258,6 +260,8 @@ impl ChangesView {
             Some(Row::Repo(ri)) => self.render_repo_header(ri, cx),
             Some(Row::File { repo, file }) => self.render_file_row(repo, file, cx),
             Some(Row::Note(ri)) => self.render_note_row(ri),
+            Some(Row::StashHeader(ri)) => self.render_stash_header(ri, cx),
+            Some(Row::StashFile { repo, file }) => self.render_stash_row(repo, file, cx),
             None => div().into_any_element(),
         }
     }
@@ -425,24 +429,27 @@ impl ChangesView {
                 d.child(chip(&theme, op, theme.warning))
             })
             .child(branch_button)
-            .child(
-                icon_button(
-                    &theme,
-                    Icon::Archive,
-                    ("repo-stash", id.0 as u64),
-                    theme.text_primary,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| this.open_stashes(id, cx)))
-                .when(pane.stashes_here().0.len() > 0, |d| {
-                    d.child(
-                        div()
-                            .t_micro()
-                            .t_code()
-                            .text_color(theme.accent)
-                            .child(pane.stashes_here().0.len().to_string()),
+            // Old git stashes (made by git or GitHub Desktop): a way to reach them.
+            .when(!pane.stashes.is_empty(), |d| {
+                d.child(
+                    icon_button(
+                        &theme,
+                        Icon::Archive,
+                        ("repo-stash", id.0 as u64),
+                        theme.text_primary,
                     )
-                }),
-            )
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_stashes(id, cx)))
+                    .when(pane.stashes_here().0.len() > 0, |d| {
+                        d.child(
+                            div()
+                                .t_micro()
+                                .t_code()
+                                .text_color(theme.accent)
+                                .child(pane.stashes_here().0.len().to_string()),
+                        )
+                    }),
+                )
+            })
             .when(files > 0, |d| {
                 d.child(
                     icon_button(
@@ -452,7 +459,7 @@ impl ChangesView {
                         theme.accent,
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.stash_repo(id, String::new(), cx);
+                        this.stash_repo_all(id, cx);
                     })),
                 )
             })
@@ -569,6 +576,17 @@ impl ChangesView {
                                 .child(format!("← {old}")),
                         )
                     }),
+            )
+            .child(
+                icon_button(&theme, Icon::Download, ("file-stash", key), theme.accent).on_click({
+                    let paths: Vec<String> = std::iter::once(path.clone())
+                        .chain(file.old_path.clone())
+                        .collect();
+                    cx.listener(move |this, _, _, cx| {
+                        this.stash_files(repo, paths.clone(), cx);
+                        cx.stop_propagation();
+                    })
+                }),
             )
             .child(
                 icon_button(&theme, Icon::Code, ("file-open", key), theme.text_primary).on_click({
@@ -761,6 +779,15 @@ impl ChangesView {
                 ),
                 "Delete branch",
             ),
+            Confirm::DiscardStash { repo, files } => (
+                format!(
+                    "Discard {} stashed file{} in {}? This can't be undone.",
+                    files.len(),
+                    if files.len() == 1 { "" } else { "s" },
+                    self.repo_name(*repo)
+                ),
+                "Discard",
+            ),
             Confirm::DropStash { repo, .. } => (
                 format!(
                     "Drop this stash in {}? It can't be recovered.",
@@ -811,7 +838,7 @@ impl ChangesView {
 
     // ---- diff ----------------------------------------------------------
 
-    fn selected_file(&self) -> Option<(&RepoPane, &ChangedFile)> {
+    pub(super) fn selected_file(&self) -> Option<(&RepoPane, &ChangedFile)> {
         let (repo, path) = self.selected.as_ref()?;
         let pane = self.pane(*repo)?;
         let file = pane
@@ -835,6 +862,9 @@ impl ChangesView {
                 .child(content)
                 .into_any_element()
         };
+        if let Some((repo, file)) = self.selected_stash.clone() {
+            return self.render_stash_diff_panel(repo, file, cx);
+        }
         let Some((pane, file)) = self.selected_file() else {
             let total: usize = self
                 .repos
@@ -1020,7 +1050,24 @@ impl ChangesView {
                 )
         });
 
-        let body: AnyElement = if let Some(error) = &self.diff_error {
+        let body = self.render_diff_body(cx);
+
+        shell(
+            div()
+                .flex()
+                .flex_col()
+                .size_full()
+                .min_h(px(0.0))
+                .child(header)
+                .children(selection_bar)
+                .child(body)
+                .into_any_element(),
+        )
+    }
+
+    pub(super) fn render_diff_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = self.theme;
+        if let Some(error) = &self.diff_error {
             div()
                 .p(theme.space_4)
                 .child(notice(&theme, error.clone(), true))
@@ -1080,27 +1127,37 @@ impl ChangesView {
                 },
                 "",
             )
-        };
-
-        shell(
-            div()
-                .flex()
-                .flex_col()
-                .size_full()
-                .min_h(px(0.0))
-                .child(header)
-                .children(selection_bar)
-                .child(body)
-                .into_any_element(),
-        )
+        }
     }
 
-    fn render_diff_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_diff_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let theme = self.theme;
         let Some(loaded) = &self.diff else {
             return div().into_any_element();
         };
         match loaded.rows.get(ix).copied() {
+            // A stashed file's diff is for reading: just the hunk header.
+            Some(DiffRow::Hunk(h)) if loaded.readonly => div()
+                .id(("diff-hunk", h as u64))
+                .flex()
+                .items_center()
+                .w_full()
+                .h(px(DIFF_ROW_HEIGHT + 6.0))
+                .px(theme.space_3)
+                .bg(theme.surface_sunken)
+                .border_y_1()
+                .border_color(theme.border_subtle)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .truncate()
+                        .t_small()
+                        .t_code()
+                        .text_color(theme.text_muted)
+                        .child(loaded.diff.hunks[h].header.clone()),
+                )
+                .into_any_element(),
             Some(DiffRow::Hunk(h)) => {
                 let hunk = &loaded.diff.hunks[h];
                 let staged_side = loaded.side == DiffSide::Staged;
@@ -1155,7 +1212,8 @@ impl ChangesView {
             }
             Some(DiffRow::Line { hunk, line }) => {
                 let l = &loaded.diff.hunks[hunk].lines[line];
-                let changed = matches!(l.kind, LineKind::Added | LineKind::Removed);
+                let changed =
+                    !loaded.readonly && matches!(l.kind, LineKind::Added | LineKind::Removed);
                 let picked = self.line_sel.contains(&(hunk, line));
                 let (bg, marker, marker_color) = match l.kind {
                     LineKind::Added => (theme.success.opacity(0.12), "+", theme.success),

@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use git2::{build::CheckoutBuilder, BranchType, ErrorCode, Repository, StashFlags, StatusOptions};
+use git2::{build::CheckoutBuilder, BranchType, ErrorCode, Repository, StatusOptions};
 
 use crate::{is_safe_ref_name, GitError};
 
@@ -70,15 +70,32 @@ fn checkout_ref(
     short: &str,
     mode: SwitchMode,
 ) -> Result<bool, GitError> {
-    let mut stashed = false;
+    // Files put in this branch's stash before switching.
+    let mut stashed: Vec<String> = Vec::new();
+    let workdir = repo.workdir().map(Path::to_path_buf);
     if mode == SwitchMode::Stash && is_dirty(repo)? {
-        let sig = repo
-            .signature()
-            .map_err(|_| invalid("git doesn't know who you are: set user.name and user.email"))?;
-        let from = current_branch(repo).unwrap_or_else(|| "(detached)".into());
-        let message = format!("devspace: changes on {from} before switching to {short}");
-        repo.stash_save2(&sig, Some(&message), Some(StashFlags::INCLUDE_UNTRACKED))?;
-        stashed = true;
+        let workdir = workdir
+            .clone()
+            .ok_or_else(|| invalid("this repository has no working tree"))?;
+        let status = crate::repo_status(&workdir)?;
+        let files: Vec<String> = status
+            .files
+            .iter()
+            .flat_map(|f| std::iter::once(f.path.clone()).chain(f.old_path.clone()))
+            .collect();
+        let outcome = crate::shelf_stash(&workdir, &files)?;
+        stashed = outcome.done;
+        // A file that is already in the stash (or can't be stashed) would be
+        // overwritten by the switch or carried along; stop before anything moves.
+        if let Some((file, reason)) = outcome
+            .skipped
+            .iter()
+            .find(|(_, reason)| !reason.starts_with("no changes"))
+        {
+            let message = format!("couldn't stash {file}: {reason}");
+            let _ = crate::shelf_restore(&workdir, &stashed);
+            return Err(invalid(message));
+        }
     }
     let result = (|| -> Result<(), git2::Error> {
         let target = repo.revparse_single(refname)?;
@@ -88,9 +105,9 @@ fn checkout_ref(
         repo.set_head(refname)
     })();
     if let Err(e) = result {
-        if stashed {
+        if let (false, Some(workdir)) = (stashed.is_empty(), &workdir) {
             // Put the user's work back where it was.
-            let _ = repo.stash_pop(0, None);
+            let _ = crate::shelf_restore(workdir, &stashed);
         }
         return Err(if e.code() == ErrorCode::Conflict {
             invalid(format!(
@@ -101,7 +118,7 @@ fn checkout_ref(
             e.into()
         });
     }
-    Ok(stashed)
+    Ok(!stashed.is_empty())
 }
 
 /// Checks out a local branch, or makes a tracking branch from `origin/<name>`
@@ -222,6 +239,7 @@ pub fn rename_branch(path: &Path, old: &str, new: &str) -> Result<(), GitError> 
         .find_branch(old, BranchType::Local)
         .map_err(|_| invalid(format!("there is no local branch `{old}`")))?;
     branch.rename(new, false)?;
+    crate::shelf::shelf_rename(&repo, old, new)?;
     Ok(())
 }
 
@@ -257,7 +275,7 @@ pub fn delete_branch(path: &Path, name: &str, force: bool) -> Result<(), GitErro
 mod tests {
     use super::*;
     use crate::testutil::Fixture;
-    use crate::{repo_status, stash_list};
+    use crate::{repo_status, shelf_list};
 
     /// Repo on its default branch with `a.txt` and a second branch `feature`
     /// that changes `a.txt` and adds `f.txt`.
@@ -326,9 +344,13 @@ mod tests {
         assert!(out.stashed);
         assert_eq!(f.read("a.txt"), "feature\n");
         assert!(!f.exists("scratch.txt"));
-        let list = stash_list(f.path()).unwrap();
-        assert_eq!(list.len(), 1);
-        assert!(list[0].message.contains(&main));
+        // The work is in the stash of the branch it was made on.
+        let shelf = shelf_list(f.path()).unwrap();
+        assert!(shelf.is_none(), "not on the new branch");
+        switch_branch(f.path(), &main, SwitchMode::Bring).unwrap();
+        let shelf = shelf_list(f.path()).unwrap().unwrap();
+        let files: Vec<_> = shelf.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(files, ["a.txt", "scratch.txt"]);
     }
 
     #[test]
@@ -336,7 +358,7 @@ mod tests {
         let (f, _) = two_branches();
         let out = switch_branch(f.path(), "feature", SwitchMode::Stash).unwrap();
         assert!(!out.stashed);
-        assert!(stash_list(f.path()).unwrap().is_empty());
+        assert!(shelf_list(f.path()).unwrap().is_none());
     }
 
     #[test]

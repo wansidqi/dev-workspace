@@ -10,6 +10,7 @@ mod branches;
 mod changes;
 mod commit;
 mod diff;
+mod shelf;
 mod stash;
 #[cfg(test)]
 mod testutil;
@@ -25,6 +26,10 @@ pub use commit::{commit_staged, last_commit_message, CommitRequest};
 pub use diff::{
     discard_lines, file_diff, stage_lines, unstage_lines, DiffHunk, DiffLine, DiffSide, FileDiff,
     LineKind, LineSelection,
+};
+pub use shelf::{
+    shelf_discard, shelf_file_diff, shelf_list, shelf_restore, shelf_stash, Shelf, ShelfFile,
+    ShelfKind, ShelfOutcome,
 };
 pub use stash::{stash_apply, stash_drop, stash_list, stash_pop, stash_save, StashEntry};
 pub use timesheet::timesheet_commits;

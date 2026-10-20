@@ -152,7 +152,7 @@ pub fn file_diff(repo_path: &Path, file: &str, side: DiffSide) -> Result<FileDif
     check_rel_path(file)?;
     let repo = Repository::open(repo_path)?;
     let diff = raw_diff(&repo, file, side)?;
-    let mut out = FileDiff {
+    let out = FileDiff {
         path: file.to_owned(),
         ..FileDiff::default()
     };
@@ -162,6 +162,44 @@ pub fn file_diff(repo_path: &Path, file: &str, side: DiffSide) -> Result<FileDif
     let Some(patch) = Patch::from_diff(&diff, 0)? else {
         return Ok(out);
     };
+    fill_from_patch(&patch, out)
+}
+
+/// The diff between two stored versions of a file (either may be missing):
+/// how the stashed content of a file differs from what it was based on.
+pub(crate) fn blob_diff(
+    repo: &Repository,
+    old: Option<git2::Oid>,
+    new: Option<git2::Oid>,
+    path: &str,
+) -> Result<FileDiff, GitError> {
+    let read = |id: Option<git2::Oid>| -> Result<Vec<u8>, GitError> {
+        Ok(match id {
+            Some(id) => repo.find_blob(id)?.content().to_vec(),
+            None => Vec::new(),
+        })
+    };
+    let (old_bytes, new_bytes) = (read(old)?, read(new)?);
+    let out = FileDiff {
+        path: path.to_owned(),
+        ..FileDiff::default()
+    };
+    let mut opts = DiffOptions::new();
+    opts.context_lines(3);
+    let patch = Patch::from_buffers(
+        &old_bytes,
+        Some(Path::new(path)),
+        &new_bytes,
+        Some(Path::new(path)),
+        Some(&mut opts),
+    )?;
+    let mut out = fill_from_patch(&patch, out)?;
+    out.old_missing = old.is_none();
+    out.new_missing = new.is_none();
+    Ok(out)
+}
+
+fn fill_from_patch(patch: &Patch<'_>, mut out: FileDiff) -> Result<FileDiff, GitError> {
     let delta = patch.delta();
     out.binary = delta.flags().is_binary();
     out.old_missing = matches!(delta.status(), Delta::Added | Delta::Untracked);
