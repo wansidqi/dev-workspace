@@ -57,6 +57,14 @@ impl Render for ChangesView {
                 .map(|p| p.name.clone())
                 .unwrap_or_default()
         };
+        let subtitle = match self.scope {
+            ChangesScope::Project => project_name,
+            ChangesScope::All => format!(
+                "All projects, {} repo{}",
+                self.repos.len(),
+                if self.repos.len() == 1 { "" } else { "s" }
+            ),
+        };
 
         let layout: Vec<RepoRows<'_>> = self
             .repos
@@ -70,7 +78,7 @@ impl Render for ChangesView {
                 stash_collapsed: p.shelf_collapsed,
             })
             .collect();
-        self.rows = changes_model::rows(&layout, self.repo_filter);
+        self.rows = changes_model::rows(&layout, &self.repo_filter);
         drop(layout);
 
         let popover = self.render_popover(cx);
@@ -79,7 +87,7 @@ impl Render for ChangesView {
         let header = page_header(
             &theme,
             "Changes",
-            Some(project_name.into()),
+            Some(subtitle.into()),
             Some(
                 back_button(&theme, "changes-back")
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -156,43 +164,94 @@ impl Render for ChangesView {
                 )
         });
 
-        let filter_chips = (self.repos.len() > 1).then(|| {
+        let tab_strip = {
+            let scope = self.scope;
+            let changed = |pane: &RepoPane| pane.status.as_ref().map_or(0, |s| s.files.len());
+            let total: usize = self.repos.iter().map(changed).sum();
+            let tab_label = |name: &str, n: usize| {
+                if n > 0 {
+                    format!("{name} · {n}")
+                } else {
+                    name.to_string()
+                }
+            };
             div()
                 .flex()
-                .flex_wrap()
                 .items_center()
-                .gap(theme.space_1)
+                .gap(theme.space_3)
                 .px(theme.space_6)
                 .py(theme.space_2)
+                .border_b_1()
+                .border_color(theme.border_subtle)
                 .child(
-                    filter_chip(
-                        &theme,
-                        "changes-repo-all",
-                        "All repos",
-                        self.repo_filter.is_none(),
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.repo_filter = None;
-                        cx.notify();
-                    })),
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(theme.space_1)
+                        .child(
+                            filter_chip(
+                                &theme,
+                                "changes-scope-all",
+                                "All projects",
+                                scope == ChangesScope::All,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_scope(ChangesScope::All, cx);
+                            })),
+                        )
+                        .child(
+                            filter_chip(
+                                &theme,
+                                "changes-scope-project",
+                                "This project",
+                                scope == ChangesScope::Project,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_scope(ChangesScope::Project, cx);
+                            })),
+                        ),
                 )
-                .children(self.repos.iter().map(|pane| {
-                    let id = pane.repo.id;
-                    filter_chip(
-                        &theme,
-                        ("changes-repo-filter", id.0 as u64),
-                        pane.repo.name.clone(),
-                        self.repo_filter == Some(id),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.repo_filter = Some(id);
-                        if this.amend && this.amend_target() != Some(id) {
-                            this.amend = false;
-                        }
-                        cx.notify();
-                    }))
-                }))
-        });
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(1.0))
+                        .h(px(16.0))
+                        .bg(theme.border_subtle),
+                )
+                .child(
+                    div()
+                        .id("changes-tabs")
+                        .flex()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .items_center()
+                        .gap(theme.space_1)
+                        .overflow_x_scroll()
+                        .child(
+                            filter_chip(
+                                &theme,
+                                "changes-repo-all",
+                                tab_label("All repos", total),
+                                self.repo_filter.is_empty(),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.repo_filter.clear();
+                                cx.notify();
+                            })),
+                        )
+                        .children(self.repos.iter().map(|pane| {
+                            let id = pane.repo.id;
+                            filter_chip(
+                                &theme,
+                                ("changes-repo-filter", id.0 as u64),
+                                tab_label(&pane.repo.name, changed(pane)),
+                                self.repo_filter.contains(&id),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| this.pick_repo(id, cx)))
+                        })),
+                )
+        };
 
         let list = if self.repos.is_empty() {
             empty_state(
@@ -242,7 +301,7 @@ impl Render for ChangesView {
             .min_h(px(0.0))
             .child(header)
             .children(notices)
-            .children(filter_chips)
+            .child(tab_strip)
             .children(
                 self.qa_tip
                     .clone()
@@ -683,6 +742,7 @@ impl ChangesView {
                                 Some(t) => format!("Linked to: {t}"),
                                 None => "Link commit to a task".to_string(),
                             }))
+                            .when(self.scope == ChangesScope::All, |d| d.hidden())
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.popover = Some(Popover::Tasks);
                                 let focus = this.task_filter.read(cx).focus_handle.clone();
@@ -848,7 +908,7 @@ impl ChangesView {
             let total: usize = self
                 .repos
                 .iter()
-                .filter(|p| self.repo_filter.is_none_or(|f| f == p.repo.id))
+                .filter(|p| self.repo_filter.is_empty() || self.repo_filter.contains(&p.repo.id))
                 .map(|p| p.status.as_ref().map(|s| s.files.len()).unwrap_or(0))
                 .sum();
             let (title, hint) = if total == 0 && self.repos.iter().all(|p| p.status.is_some()) {

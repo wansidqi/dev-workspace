@@ -30,12 +30,23 @@ mod stash;
 /// Recently used branches kept per repo (the picker shows the newest five).
 const RECENT_LIMIT: usize = 8;
 
+/// One key per checkout: the same folder spelled with different slashes or
+/// case is one repo.
+fn path_key(path: &str) -> String {
+    path.trim()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_lowercase()
+}
+
 pub type CloseHandler = Box<dyn Fn(&mut Window, &mut App)>;
 
 /// A repo's column in the view: its status and the little bit of UI state
 /// that belongs to it.
 struct RepoPane {
     repo: Repo,
+    /// Name of the project the repo is listed under (the first, if shared).
+    project: String,
     status: Option<RepoStatus>,
     error: Option<String>,
     loading: bool,
@@ -53,9 +64,10 @@ struct RepoPane {
 }
 
 impl RepoPane {
-    fn new(repo: Repo) -> Self {
+    fn new(repo: Repo, project: String) -> Self {
         Self {
             repo,
+            project,
             status: None,
             error: None,
             loading: false,
@@ -71,6 +83,15 @@ impl RepoPane {
     fn path(&self) -> PathBuf {
         PathBuf::from(&self.repo.path)
     }
+}
+
+/// Whose repos the view lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChangesScope {
+    /// Every active project's repos (a repo linked twice is listed once).
+    All,
+    /// Only the selected project's repos.
+    Project,
 }
 
 /// Which repos a branch action applies to.
@@ -157,8 +178,10 @@ pub struct ChangesView {
     theme: GlassTheme,
     pub on_close: Option<CloseHandler>,
 
+    scope: ChangesScope,
     repos: Vec<RepoPane>,
-    repo_filter: Option<RepoId>,
+    /// Repos the list is narrowed to; empty = all of them.
+    repo_filter: Vec<RepoId>,
     list_scroll: UniformListScrollHandle,
     diff_scroll: UniformListScrollHandle,
     /// Cached row layout of the file list, rebuilt on render.
@@ -248,8 +271,9 @@ impl ChangesView {
             settings,
             theme,
             on_close: None,
+            scope: ChangesScope::All,
             repos: Vec::new(),
-            repo_filter: None,
+            repo_filter: Vec::new(),
             list_scroll: UniformListScrollHandle::new(),
             diff_scroll: UniformListScrollHandle::new(),
             rows: Vec::new(),
@@ -315,14 +339,60 @@ impl ChangesView {
             .unwrap_or_else(|| "repo".into())
     }
 
+    /// The repos to list, each with the project it is listed under: the
+    /// selected project's, or every active project's with a repo linked from
+    /// several projects (same folder) kept once, under its first project.
+    fn listed_repos(&self, cx: &Context<Self>) -> Vec<(String, Repo)> {
+        let state = self.state.read(cx);
+        match self.scope {
+            ChangesScope::Project => {
+                let project = state
+                    .selected_project
+                    .and_then(|id| state.projects.iter().find(|p| p.id == id))
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
+                state
+                    .repos
+                    .iter()
+                    .map(|r| (project.clone(), r.clone()))
+                    .collect()
+            }
+            ChangesScope::All => {
+                let mut seen = HashSet::new();
+                state
+                    .all_project_repos()
+                    .into_iter()
+                    .filter(|(_, _, r)| seen.insert(path_key(&r.path)))
+                    .map(|(_, project, repo)| (project, repo))
+                    .collect()
+            }
+        }
+    }
+
+    /// Switches between every project's repos and the selected project's.
+    pub(crate) fn set_scope(&mut self, scope: ChangesScope, cx: &mut Context<Self>) {
+        if self.scope == scope {
+            return;
+        }
+        self.scope = scope;
+        // A task belongs to one project, so it can't tag commits across several.
+        if scope == ChangesScope::All {
+            self.task_link = None;
+        }
+        self.sync_repos(cx);
+        cx.notify();
+    }
+
     /// Keeps the panes in step with the project's linked repos.
     fn sync_repos(&mut self, cx: &mut Context<Self>) {
-        let repos = self.state.read(cx).repos.clone();
+        let repos = self.listed_repos(cx);
         let same = repos.len() == self.repos.len()
-            && repos
-                .iter()
-                .zip(&self.repos)
-                .all(|(a, b)| a.id == b.repo.id && a.path == b.repo.path && a.name == b.repo.name);
+            && repos.iter().zip(&self.repos).all(|((project, a), b)| {
+                a.id == b.repo.id
+                    && a.path == b.repo.path
+                    && a.name == b.repo.name
+                    && *project == b.project
+            });
         if same {
             return;
         }
@@ -330,17 +400,17 @@ impl ChangesView {
             self.repos.drain(..).map(|p| (p.repo.id, p)).collect();
         self.repos = repos
             .into_iter()
-            .map(|repo| match old.remove(&repo.id) {
+            .map(|(project, repo)| match old.remove(&repo.id) {
                 Some(mut pane) => {
                     pane.repo = repo;
+                    pane.project = project;
                     pane
                 }
-                None => RepoPane::new(repo),
+                None => RepoPane::new(repo, project),
             })
             .collect();
-        if self.repo_filter.is_some_and(|f| self.pane(f).is_none()) {
-            self.repo_filter = None;
-        }
+        let present: HashSet<RepoId> = self.repos.iter().map(|p| p.repo.id).collect();
+        self.repo_filter.retain(|id| present.contains(id));
         if self
             .selected
             .as_ref()
@@ -798,10 +868,28 @@ impl ChangesView {
 
     // ---- commit --------------------------------------------------------
 
-    /// The repo an amend would apply to: the filtered repo, or the only one.
+    /// The repo an amend would apply to: the one filtered repo, or the only
+    /// repo. An amend needs exactly one, so it is off while several are shown.
     pub(crate) fn amend_target(&self) -> Option<RepoId> {
-        self.repo_filter
-            .or_else(|| (self.repos.len() == 1).then(|| self.repos[0].repo.id))
+        match self.repo_filter.as_slice() {
+            [one] => Some(*one),
+            [] if self.repos.len() == 1 => Some(self.repos[0].repo.id),
+            _ => None,
+        }
+    }
+
+    /// A click on a repo tab adds that repo to the repos shown, or removes it if
+    /// it is already shown. With none selected every repo is shown.
+    fn pick_repo(&mut self, id: RepoId, cx: &mut Context<Self>) {
+        if let Some(at) = self.repo_filter.iter().position(|r| *r == id) {
+            self.repo_filter.remove(at);
+        } else {
+            self.repo_filter.push(id);
+        }
+        if self.amend && self.amend_target().is_none() {
+            self.amend = false;
+        }
+        cx.notify();
     }
 
     /// Repos the next commit goes to.
@@ -814,7 +902,7 @@ impl ChangesView {
             .iter()
             .filter_map(|p| p.status.as_ref().map(|s| (p.repo.id, s)))
             .collect();
-        changes_model::commit_targets(&statuses, self.repo_filter)
+        changes_model::commit_targets(&statuses, &self.repo_filter)
     }
 
     fn set_amend(&mut self, on: bool, cx: &mut Context<Self>) {

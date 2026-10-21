@@ -320,16 +320,15 @@ impl Root {
             )
             .into_any_element()
         });
-        let changes = has_project.then(|| {
-            self.nav_row(
+        let changes = self
+            .nav_row(
                 crate::NAV_CHANGES,
                 self.open_changes.is_some(),
                 None,
                 |this, cx| this.toggle_changes(cx),
                 cx,
             )
-            .into_any_element()
-        });
+            .into_any_element();
         let run = has_project.then(|| self.run_sidebar_row(cx).into_any_element());
         let credentials = has_project.then(|| self.credentials_sidebar_row(cx).into_any_element());
         let timesheet = self.timesheet_sidebar_row(cx).into_any_element();
@@ -392,7 +391,7 @@ impl Root {
                             .pl(theme.space_3)
                             .child(section_label(&theme, "Workspace")),
                     )
-                    .children(changes)
+                    .child(changes)
                     .children(history)
                     .children(run)
                     .child(timesheet)

@@ -24,9 +24,14 @@ pub fn lookup(name: &str) -> Option<(&'static str, Option<&'static str>)> {
         ),
         "changes-notice-dismiss" => Some(("Dismiss", None)),
         "changes-repo-all" => Some(("Show every repo", None)),
+        "changes-scope-all" => tip(
+            "Repos from every project",
+            "Shows each linked repo once, across all projects.",
+        ),
+        "changes-scope-project" => Some(("Only this project's repos", None)),
         "changes-repo-filter" => tip(
-            "Show only this repo",
-            "A commit then goes to this repo only.",
+            "Show this repo",
+            "Click several to combine them; a commit goes to the repos shown.",
         ),
 
         // ---- Changes: a repo's row and its files -----------------------------

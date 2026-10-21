@@ -204,6 +204,22 @@ impl AppState {
         self.reload_credentials();
     }
 
+    /// Every active project's linked repos, in sidebar order, each tagged
+    /// with its project. Read straight from the database, so it does not
+    /// depend on (or change) the selected project; the global repo overview
+    /// uses it.
+    pub fn all_project_repos(&self) -> Vec<(ProjectId, String, Repo)> {
+        self.projects
+            .iter()
+            .flat_map(|p| {
+                RepoRepo::list_for_project(&self.conn, p.id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|repo| (p.id, p.name.clone(), repo))
+            })
+            .collect()
+    }
+
     fn reload_commit_links(&mut self) {
         let Some(project) = self.selected_project else {
             self.commit_links.clear();

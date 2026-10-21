@@ -33,13 +33,13 @@ pub struct RepoRows<'a> {
     pub stash_collapsed: bool,
 }
 
-/// Rows for every repo that passes `filter` (all of them when `None`):
+/// Rows for every repo in `filter` (all of them when it is empty):
 /// header, then its files unless collapsed, or a single note row when there
 /// is nothing to list.
-pub fn rows(repos: &[RepoRows<'_>], filter: Option<RepoId>) -> Vec<Row> {
+pub fn rows(repos: &[RepoRows<'_>], filter: &[RepoId]) -> Vec<Row> {
     let mut out = Vec::new();
     for (ri, repo) in repos.iter().enumerate() {
-        if filter.is_some_and(|f| f != repo.id) {
+        if !filter.is_empty() && !filter.contains(&repo.id) {
             continue;
         }
         out.push(Row::Repo(ri));
@@ -68,14 +68,13 @@ pub fn header_toggle_stages(status: &RepoStatus) -> bool {
     status.files.iter().any(|f| !f.is_fully_staged())
 }
 
-/// Repos a commit goes to: the single filtered repo, or every repo that has
-/// something staged. Amending always needs exactly one.
-pub fn commit_targets(repos: &[(RepoId, &RepoStatus)], filter: Option<RepoId>) -> Vec<RepoId> {
+/// Repos a commit goes to: every filtered repo (every repo when the filter is
+/// empty) that has something staged. Amending always needs exactly one.
+pub fn commit_targets(repos: &[(RepoId, &RepoStatus)], filter: &[RepoId]) -> Vec<RepoId> {
     repos
         .iter()
-        .filter(|(id, status)| match filter {
-            Some(f) => *id == f && status.staged_count() > 0,
-            None => status.staged_count() > 0,
+        .filter(|(id, status)| {
+            (filter.is_empty() || filter.contains(id)) && status.staged_count() > 0
         })
         .map(|(id, _)| *id)
         .collect()
@@ -229,7 +228,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            rows(&repos, None),
+            rows(&repos, &[]),
             [
                 Row::Repo(0),
                 Row::Note(0),
@@ -239,7 +238,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            rows(&repos, Some(RepoId(2))),
+            rows(&repos, &[RepoId(2)]),
             [
                 Row::Repo(1),
                 Row::File { repo: 1, file: 0 },
@@ -271,7 +270,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            rows(&repos, None),
+            rows(&repos, &[]),
             [
                 Row::Repo(0),
                 Row::File { repo: 0, file: 0 },
@@ -286,7 +285,7 @@ mod tests {
         );
         repos[0].collapsed = true;
         assert_eq!(
-            rows(&repos, Some(RepoId(1))),
+            rows(&repos, &[RepoId(1)]),
             [Row::Repo(0)],
             "collapsing the repo hides the stash too"
         );
@@ -314,7 +313,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            rows(&repos, None),
+            rows(&repos, &[]),
             [Row::Repo(0), Row::Repo(1), Row::Note(1)]
         );
     }
@@ -342,9 +341,13 @@ mod tests {
         let b = status(vec![file("b", None, Some(ChangeKind::Modified))]);
         let c = status(vec![file("c", Some(ChangeKind::Modified), None)]);
         let repos = [(RepoId(1), &a), (RepoId(2), &b), (RepoId(3), &c)];
-        assert_eq!(commit_targets(&repos, None), [RepoId(1), RepoId(3)]);
-        assert_eq!(commit_targets(&repos, Some(RepoId(3))), [RepoId(3)]);
-        assert!(commit_targets(&repos, Some(RepoId(2))).is_empty());
+        assert_eq!(commit_targets(&repos, &[]), [RepoId(1), RepoId(3)]);
+        assert_eq!(commit_targets(&repos, &[RepoId(3)]), [RepoId(3)]);
+        assert!(commit_targets(&repos, &[RepoId(2)]).is_empty());
+        assert_eq!(
+            commit_targets(&repos, &[RepoId(1), RepoId(3)]),
+            [RepoId(1), RepoId(3)]
+        );
     }
 
     fn sample_diff() -> FileDiff {
