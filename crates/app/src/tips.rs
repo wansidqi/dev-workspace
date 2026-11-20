@@ -144,6 +144,7 @@ pub fn lookup(name: &str) -> Option<(&'static str, Option<&'static str>)> {
             "New checklist",
             "A note that opens as a task list with a quick-add row.",
         ),
+        "task-note-rename" => Some(("Rename note", None)),
         "task-toggle" => Some(("Tick or untick", None)),
         "task-priority" => tip(
             "Priority",

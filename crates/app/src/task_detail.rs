@@ -89,6 +89,8 @@ pub struct TaskDetail {
     commit_keys_requested: Vec<CommitKey>,
     /// The due-date / branch field currently being edited, with its input.
     editing: Option<(Field, Entity<TextInput>)>,
+    /// The note whose title is being renamed in the Notes tab, with its input.
+    editing_note: Option<(NoteId, Entity<TextInput>)>,
     /// Per repo: the commits on this task's branch that are not in the
     /// target branch, and commits that look like they belong to the task.
     /// Both are read in the background and refreshed when their inputs
@@ -172,6 +174,7 @@ impl TaskDetail {
             task_id,
             tab: Tab::Notes,
             new_note_input,
+            editing_note: None,
             tag_input,
             copy_files: true,
             notice: None,
@@ -448,6 +451,52 @@ impl TaskDetail {
                 cx,
             ))
             .into_any_element()
+    }
+
+    /// Turns a note row into a title input. Enter saves the new title, Escape
+    /// or an empty title leaves it as it was.
+    fn start_rename_note(
+        &mut self,
+        id: NoteId,
+        title: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let theme = self.theme;
+        let input = cx.new(|cx| {
+            let mut input = TextInput::new(cx, "Note title…", theme);
+            input.set_text_selected(title);
+            input
+        });
+        let me = cx.entity();
+        let state = self.state.clone();
+        input.update(cx, |input, _| {
+            let me_confirm = me.clone();
+            input.on_confirm = Some(Box::new(move |title, _window, cx| {
+                let title = title.trim().to_string();
+                if !title.is_empty() {
+                    state.update(cx, |state, cx| {
+                        state.rename_note(id, &title);
+                        cx.notify();
+                    });
+                }
+                me_confirm.update(cx, |this, cx| {
+                    this.editing_note = None;
+                    cx.notify();
+                });
+            }));
+            input.keep_on_confirm = true;
+            input.on_cancel = Some(Box::new(move |_window, cx| {
+                me.update(cx, |this, cx| {
+                    this.editing_note = None;
+                    cx.notify();
+                });
+            }));
+        });
+        let focus = input.read(cx).focus_handle.clone();
+        window.focus(&focus, cx);
+        self.editing_note = Some((id, input));
+        cx.notify();
     }
 
     /// Creates a checklist note, titled from the input (or "Todo") and opens it.
@@ -801,9 +850,21 @@ impl TaskDetail {
                 .filter_map(|n| state.note_progress(n.id).map(|p| (n.id, p)))
                 .collect()
         };
+        let editing_note = self.editing_note.clone();
         let rows = notes.into_iter().map(|note| {
             let id = note.id;
             let title: SharedString = note.title.clone().into();
+            // The row being renamed becomes its title input.
+            if let Some((_, input)) = editing_note.as_ref().filter(|(e, _)| *e == id) {
+                return div()
+                    .px(theme.space_2)
+                    .py(theme.space_2)
+                    .border_b_1()
+                    .border_color(theme.border_subtle)
+                    .child(input.clone())
+                    .into_any_element();
+            }
+            let rename_title = title.clone();
             self.row()
                 .id(("task-note", id.0 as u64))
                 .cursor_pointer()
@@ -846,21 +907,34 @@ impl TaskDetail {
                         .map(|&(done, total)| progress_pill(&theme, done, total)),
                 )
                 .child(
-                    row_actions().child(
-                        icon_button(
-                            &theme,
-                            Icon::Trash,
-                            ("task-note-delete", id.0 as u64),
-                            theme.danger,
+                    row_actions()
+                        .child(
+                            icon_button(
+                                &theme,
+                                Icon::Pencil,
+                                ("task-note-rename", id.0 as u64),
+                                theme.text_primary,
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.start_rename_note(id, rename_title.clone(), window, cx);
+                                cx.stop_propagation();
+                            })),
                         )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.state.update(cx, |state, cx| {
-                                state.delete_note(id);
-                                cx.notify();
-                            });
-                            cx.stop_propagation();
-                        })),
-                    ),
+                        .child(
+                            icon_button(
+                                &theme,
+                                Icon::Trash,
+                                ("task-note-delete", id.0 as u64),
+                                theme.danger,
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.state.update(cx, |state, cx| {
+                                    state.delete_note(id);
+                                    cx.notify();
+                                });
+                                cx.stop_propagation();
+                            })),
+                        ),
                 )
                 .into_any_element()
         });
