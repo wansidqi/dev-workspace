@@ -153,6 +153,48 @@ fn inline_until<'a>(events: &mut impl Iterator<Item = Event<'a>>, end: TagEnd) -
     inline.take()
 }
 
+/// Splits a leading checkbox marker (`[ ]`, `[]`, `[x]`, `[X]`, `[✅]`) off
+/// `text`, returning whether it is ticked and the text after it. Notes are
+/// often written as `[ ] todo` lines with no `- ` in front, which markdown
+/// itself would leave as plain text.
+fn checkbox_prefix(text: &str) -> Option<(bool, &str)> {
+    let rest = text.strip_prefix('[')?;
+    let (done, rest) = if let Some(r) = rest.strip_prefix(']') {
+        (false, r)
+    } else if let Some(r) = rest.strip_prefix(" ]") {
+        (false, r)
+    } else {
+        let end = rest.find(']')?;
+        match &rest[..end] {
+            "x" | "X" | "✅" => (true, &rest[end + 1..]),
+            _ => return None,
+        }
+    };
+    // Require a space after the marker so `[]()` or `[x]y` stay plain text.
+    let rest = rest.strip_prefix(' ')?;
+    Some((done, rest))
+}
+
+/// A paragraph, or a one-item task list when it starts with a checkbox marker.
+fn paragraph_block(mut spans: Vec<Span>) -> Block {
+    let Some((done, rest)) = spans.first().and_then(|s| checkbox_prefix(&s.text)) else {
+        return Block::Paragraph(spans);
+    };
+    let rest = rest.to_string();
+    if rest.is_empty() {
+        spans.remove(0);
+    } else {
+        spans[0].text = rest;
+    }
+    Block::List {
+        start: None,
+        items: vec![Item {
+            checked: Some(done),
+            blocks: vec![Block::Paragraph(spans)],
+        }],
+    }
+}
+
 fn parse_blocks<'a>(
     events: &mut impl Iterator<Item = Event<'a>>,
     until: Option<TagEnd>,
@@ -166,7 +208,7 @@ fn parse_blocks<'a>(
         () => {
             let spans = pending.take();
             if !spans.is_empty() {
-                blocks.push(Block::Paragraph(spans));
+                blocks.push(paragraph_block(spans));
             }
         };
     }
@@ -188,7 +230,7 @@ fn parse_blocks<'a>(
                 flush!();
                 let spans = inline_until(events, TagEnd::Paragraph);
                 if !spans.is_empty() {
-                    blocks.push(Block::Paragraph(spans));
+                    blocks.push(paragraph_block(spans));
                 }
             }
             Event::Start(Tag::CodeBlock(kind)) => {
@@ -400,6 +442,26 @@ mod tests {
         assert_eq!(items[0].checked, None);
         assert_eq!(items[1].checked, Some(true));
         assert_eq!(items[2].checked, Some(false));
+        assert!(matches!(&items[0].blocks[0], Block::Paragraph(s) if text(s) == "one"));
+    }
+
+    #[test]
+    fn bare_checkbox_lines_become_tasks() {
+        let blocks = parse("[ ] one\n\n[] two\n\n[x] three\n\n[✅] four\n\n[link](u) five\n\n[x]no\n");
+        let checked: Vec<Option<bool>> = blocks
+            .iter()
+            .map(|b| match b {
+                Block::List { items, .. } => items[0].checked,
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            checked,
+            vec![Some(false), Some(false), Some(true), Some(true), None, None]
+        );
+        let Block::List { items, .. } = &blocks[0] else {
+            panic!("expected task");
+        };
         assert!(matches!(&items[0].blocks[0], Block::Paragraph(s) if text(s) == "one"));
     }
 

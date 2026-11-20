@@ -30,28 +30,34 @@ pub struct CopyHook {
 /// The preview for a note: one element per top-level block.
 pub fn render(blocks: &[Block], theme: &GlassTheme, hook: &CopyHook) -> AnyElement {
     let counter = Cell::new(0);
+    // Like the notes list: flat rows on hairlines. Paragraphs, tasks and list
+    // items are the rows; cards (code, tables) and quotes get their own air.
     div()
         .flex()
         .flex_col()
-        .gap(theme.space_4)
-        .children(
-            blocks
-                .iter()
-                .map(|b| render_block(b, theme, hook, &counter)),
-        )
+        .children(blocks.iter().map(|b| {
+            let el = render_block(b, theme, hook, &counter, true);
+            match b {
+                Block::Paragraph(_) | Block::List { .. } | Block::Heading(..) => el,
+                _ => div().py(theme.space_3).child(el).into_any_element(),
+            }
+        }))
         .into_any_element()
 }
 
+/// `top` is true for blocks directly under the note: their paragraphs and list
+/// items become hairline-separated rows; nested ones stay plain.
 fn render_block(
     block: &Block,
     theme: &GlassTheme,
     hook: &CopyHook,
     counter: &Cell<usize>,
+    top: bool,
 ) -> AnyElement {
     let theme = *theme;
     match block {
         Block::Heading(level, spans) => {
-            let el = div().text_color(theme.text_primary);
+            let el = div().px(theme.space_2).text_color(theme.text_primary);
             let el = match level {
                 1 => el
                     .t_title()
@@ -74,6 +80,12 @@ fn render_block(
             .t_body()
             .line_height(gpui::relative(NOTE_LINE_HEIGHT))
             .text_color(theme.text_primary)
+            .when(top, |d| {
+                d.px(theme.space_2)
+                    .py(theme.space_3)
+                    .border_b_1()
+                    .border_color(theme.border_subtle)
+            })
             .child(inline(spans, &theme))
             .into_any_element(),
         Block::Code { lang, text } => {
@@ -90,18 +102,21 @@ fn render_block(
             .border_l_2()
             .border_color(theme.accent.opacity(0.6))
             .text_color(theme.text_secondary)
-            .children(inner.iter().map(|b| render_block(b, &theme, hook, counter)))
+            .children(
+                inner
+                    .iter()
+                    .map(|b| render_block(b, &theme, hook, counter, false)),
+            )
             .into_any_element(),
         Block::List { start, items } => div()
             .flex()
             .flex_col()
-            .gap(theme.space_2)
-            .pl(theme.space_2)
+            .when(!top, |d| d.gap(theme.space_1).pl(theme.space_2))
             .children(
                 items
                     .iter()
                     .enumerate()
-                    .map(|(ix, item)| list_item(*start, ix, item, &theme, hook, counter)),
+                    .map(|(ix, item)| list_item(*start, ix, item, &theme, hook, counter, top)),
             )
             .into_any_element(),
         Block::Rule => div()
@@ -251,29 +266,49 @@ fn list_item(
     theme: &GlassTheme,
     hook: &CopyHook,
     counter: &Cell<usize>,
+    top: bool,
 ) -> AnyElement {
     let theme = *theme;
-    let marker: SharedString = match (item.checked, start) {
-        (Some(true), _) => "☑".into(),
-        (Some(false), _) => "☐".into(),
-        (None, Some(first)) => format!("{}.", first + ix as u64).into(),
-        (None, None) => "•".into(),
+    let done = item.checked == Some(true);
+    // Tasks use the same status shapes as the task list (never colour alone).
+    let marker: AnyElement = match (item.checked, start) {
+        (Some(true), _) => icon(Icon::CircleCheck, 16.0, theme.success).into_any_element(),
+        (Some(false), _) => icon(Icon::CircleDashed, 16.0, theme.text_muted).into_any_element(),
+        (None, Some(first)) => div()
+            .t_body()
+            .t_code()
+            .text_color(theme.text_muted)
+            .child(SharedString::from(format!("{}.", first + ix as u64)))
+            .into_any_element(),
+        (None, None) => div()
+            .t_body()
+            .text_color(theme.text_muted)
+            .child("•")
+            .into_any_element(),
     };
     div()
         .flex()
         .items_start()
-        .gap(theme.space_2)
+        .gap(theme.space_3)
+        .t_body()
+        .line_height(gpui::relative(NOTE_LINE_HEIGHT))
+        .text_color(if done {
+            theme.text_secondary
+        } else {
+            theme.text_primary
+        })
+        .when(top, |d| {
+            d.px(theme.space_2)
+                .py(theme.space_3)
+                .border_b_1()
+                .border_color(theme.border_subtle)
+        })
         .child(
+            // Centre the 16px icon on the first 13px line (20.8px tall).
             div()
                 .flex_none()
                 .min_w(px(18.0))
-                .t_body()
-                .line_height(gpui::relative(NOTE_LINE_HEIGHT))
-                .text_color(if item.checked == Some(true) {
-                    theme.success
-                } else {
-                    theme.text_secondary
-                })
+                .pt(px(2.0))
                 .child(marker),
         )
         .child(
@@ -286,7 +321,7 @@ fn list_item(
                 .children(
                     item.blocks
                         .iter()
-                        .map(|b| render_block(b, &theme, hook, counter)),
+                        .map(|b| render_block(b, &theme, hook, counter, false)),
                 ),
         )
         .into_any_element()
