@@ -138,6 +138,19 @@ pub fn lookup(name: &str) -> Option<(&'static str, Option<&'static str>)> {
         ),
         "confirm-yes" => Some(("Do it", None)),
         "confirm-no" => Some(("Cancel", None)),
+
+        // ---- Notes and checklists ------------------------------------------
+        "note-new-todo" => tip(
+            "New checklist",
+            "A note that opens as a task list with a quick-add row.",
+        ),
+        "task-toggle" => Some(("Tick or untick", None)),
+        "task-priority" => tip(
+            "Priority",
+            "Click to cycle low, med, high, urgent, none. Saved in the note as !high.",
+        ),
+        "note-hide-done" => Some(("Hide or show finished tasks", None)),
+
         _ => None,
     }
 }

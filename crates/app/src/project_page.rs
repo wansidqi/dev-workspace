@@ -12,7 +12,8 @@ use crate::motion;
 use crate::task_tree::{tree_guide_lines, tree_guides, TreeGeometry, TreeGuides};
 use crate::theme::{GlassTheme, TypeScale};
 use crate::ui::{
-    button, chip, empty_state, filter_chip, icon, icon_button, section_label, status_style,
+    button, chip, empty_state, filter_chip, icon, icon_button, progress_pill, section_label,
+    status_style,
     ButtonKind, Icon,
 };
 use crate::{date, flatten_tasks, shell, status_label, Root};
@@ -45,6 +46,7 @@ fn status_color(theme: &GlassTheme, status: TaskStatus) -> Hsla {
 fn note_icon(kind: NoteKind) -> Icon {
     match kind {
         NoteKind::Note => Icon::FileText,
+        NoteKind::Todo => Icon::ListChecks,
         NoteKind::Script => Icon::Script,
         NoteKind::Sql => Icon::Database,
     }
@@ -793,6 +795,23 @@ impl Root {
             .into_any_element()
     }
 
+    /// Creates a project-level checklist note, titled from the "new note"
+    /// input (or "Todo"), and opens it.
+    fn create_project_todo(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        let typed = self.new_note_input.read(cx).content.trim().to_string();
+        let title = if typed.is_empty() { "Todo".into() } else { typed };
+        self.new_note_input
+            .update(cx, |input, cx| input.reset(window, cx));
+        let created = self.state.update(cx, |state, cx| {
+            let id = state.create_note_of_kind(None, &title, NoteKind::Todo);
+            cx.notify();
+            id
+        });
+        if let Some(id) = created {
+            self.open_note(id, title.into(), cx);
+        }
+    }
+
     /// Notes, files and repositories.
     fn project_rail(
         &mut self,
@@ -806,6 +825,13 @@ impl Root {
         let note_count = notes.len();
         let editing_note_id = self.editing_note.as_ref().map(|(id, _)| *id);
 
+        let progress: HashMap<_, _> = {
+            let state = self.state.read(cx);
+            notes
+                .iter()
+                .filter_map(|n| state.note_progress(n.id).map(|p| (n.id, p)))
+                .collect()
+        };
         let note_rows: Vec<AnyElement> = notes
             .into_iter()
             .map(|note| {
@@ -857,6 +883,11 @@ impl Root {
                                 .child(note.kind.label().to_uppercase()),
                         )
                     })
+                    .children(
+                        progress
+                            .get(&id)
+                            .map(|&(done, total)| progress_pill(&theme, done, total)),
+                    )
                     .child(if hovered {
                         div()
                             .flex()
@@ -921,7 +952,31 @@ impl Root {
                         .child("No notes yet."),
                 )
             })
-            .child(div().mt(theme.space_1).child(self.new_note_input.clone()));
+            .child(
+                div()
+                    .mt(theme.space_1)
+                    .flex()
+                    .items_center()
+                    .gap(theme.space_2)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .child(self.new_note_input.clone()),
+                    )
+                    .child(
+                        button(
+                            &theme,
+                            "note-new-todo",
+                            ButtonKind::Secondary,
+                            Some(Icon::ListChecks),
+                            "Todo",
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.create_project_todo(window, cx)
+                        })),
+                    ),
+            );
 
         let confirm_unlink = self.confirm_unlink_repo;
         let repo_rows: Vec<AnyElement> = repos

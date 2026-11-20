@@ -49,7 +49,7 @@ use anyhow::Result;
 use changes_view::ChangesView;
 use commit_browser::CommitBrowser;
 use credentials_panel::CredentialsPanel;
-use devspace_core::{NoteId, ProjectId, Task, TaskId, TaskStatus};
+use devspace_core::{NoteId, NoteKind, ProjectId, Task, TaskId, TaskStatus};
 use devspace_storage::{run_migrations, WorkspacePaths};
 use gpui::{
     actions, div, prelude::*, px, size, App, Bounds, Context, Entity, KeyBinding,
@@ -108,6 +108,10 @@ struct Root {
     note_preview: Option<(SharedString, Vec<markdown::Block>)>,
     /// Code block whose copy button was just pressed (shows "Copied" briefly).
     note_copied: Option<usize>,
+    /// Preview hides finished tasks (a view filter; the note text is untouched).
+    note_hide_done: bool,
+    /// "Add a task" row of the open note's preview; built when a note opens.
+    note_task_input: Option<Entity<TextInput>>,
     /// Right-hand terminal panel (CLAUDE.md layout concept: "collapsible
     /// panels for terminal, commit browser and credentials"). Owns a tab set
     /// per project; hiding it or switching projects keeps shells running.
@@ -405,7 +409,14 @@ impl Root {
             .read(cx)
             .read_note_content(id)
             .unwrap_or_default();
-        let mode = note_page::NoteMode::initial(&content);
+        let kind = self
+            .state
+            .read(cx)
+            .notes
+            .iter()
+            .find(|n| n.id == id)
+            .map_or(NoteKind::Note, |n| n.kind);
+        let mode = note_page::NoteMode::initial(&content, kind);
         let theme = self.theme;
         let state = self.state.clone();
         let root = cx.entity();
@@ -432,6 +443,16 @@ impl Root {
             }));
             editor
         });
+        // The preview's "Add a task" row: Enter appends `[ ] text` to the note.
+        let task_input = cx.new(|cx| TextInput::new(cx, "Add a task… (e.g. !high fix login)", theme));
+        let task_editor = editor.clone();
+        task_input.update(cx, |input, _| {
+            input.on_confirm = Some(Box::new(move |text, window, cx| {
+                let edit = markdown::TaskEdit::Add(text.to_string());
+                task_editor.update(cx, |e, cx| e.apply_task_edit(&edit, window, cx));
+            }));
+        });
+        self.note_task_input = Some(task_input);
         self.open_note = Some((id, title, editor));
         self.note_mode = mode;
         self.note_preview = None;
@@ -1108,6 +1129,8 @@ fn main() -> Result<()> {
                         open_note: None,
                         note_mode: note_page::NoteMode::Edit,
                         note_copied: None,
+                        note_hide_done: false,
+                        note_task_input: None,
                         note_preview: None,
                         terminal_panel,
                         terminal_open: saved.terminal_open,

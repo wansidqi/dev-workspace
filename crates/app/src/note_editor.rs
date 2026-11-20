@@ -373,6 +373,29 @@ impl NoteEditor {
         }
     }
 
+    /// Applies a task change asked for by the preview (tick, priority, new
+    /// task) and persists the note like any other edit. Ignored if the text no
+    /// longer matches what the preview saw.
+    pub fn apply_task_edit(
+        &mut self,
+        edit: &crate::markdown::TaskEdit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((range, text)) = crate::markdown::task_edit(&self.content, edit) else {
+            return;
+        };
+        let mut content = self.content.to_string();
+        content.replace_range(range, &text);
+        self.content = content.into();
+        let end = self.content.len();
+        self.selected_range = end..end;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.notify_change(window, cx);
+        cx.notify();
+    }
+
     /// Applies a toolbar formatting command to the current selection.
     pub fn apply_format(
         &mut self,

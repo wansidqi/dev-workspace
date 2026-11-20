@@ -95,6 +95,7 @@ impl NoteRepo {
 fn kind_to_str(kind: NoteKind) -> &'static str {
     match kind {
         NoteKind::Note => "note",
+        NoteKind::Todo => "todo",
         NoteKind::Script => "script",
         NoteKind::Sql => "sql",
     }
@@ -102,6 +103,7 @@ fn kind_to_str(kind: NoteKind) -> &'static str {
 
 fn str_to_kind(s: &str) -> NoteKind {
     match s {
+        "todo" => NoteKind::Todo,
         "script" => NoteKind::Script,
         "sql" => NoteKind::Sql,
         _ => NoteKind::Note,

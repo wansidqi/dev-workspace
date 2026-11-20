@@ -4,55 +4,157 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::{
-    div, prelude::*, px, AnyElement, App, ClipboardItem, FontStyle, FontWeight, HighlightStyle,
-    SharedString, StrikethroughStyle, StyledText, Window,
+    div, prelude::*, px, relative, AnyElement, App, ClipboardItem, FontStyle, FontWeight,
+    HighlightStyle, SharedString, StrikethroughStyle, StyledText, Window,
 };
 
 use crate::highlight::{self, Token};
-use crate::markdown::{Block, Item, Span};
+use devspace_core::TaskPriority;
+use gpui::Entity;
+
+use crate::markdown::{task_counts, Block, Item, Span, TaskEdit};
+use crate::text_input::TextInput;
 use crate::theme::{syntax_color, GlassTheme, TypeScale, CODE_FONT};
 use crate::ui::{icon, Icon};
 
-/// What the preview needs from its owner to make code blocks copyable: which
-/// block was just copied (to show "Copied"), and what to do on a copy click.
-/// Called with the block index and its text when a copy button is pressed.
 /// Line height for note text, shared with the editor so editing and preview
 /// wrap and space the same way (13px body text like the rest of the app).
 pub const NOTE_LINE_HEIGHT: f32 = 1.6;
 
-pub type CopyHandler = Rc<dyn Fn(usize, String, &mut Window, &mut App)>;
+/// Widest the rendered note grows, so long lines wrap at a readable length.
+pub const NOTE_MAX_WIDTH: f32 = 1040.0;
 
+/// Called with the block index and its text when a copy button is pressed.
+pub type CopyHandler = Rc<dyn Fn(usize, String, &mut Window, &mut App)>;
+/// Called with the change to make to the note text when a task is ticked or
+/// its priority chip is clicked.
+pub type EditHandler = Rc<dyn Fn(TaskEdit, &mut Window, &mut App)>;
+pub type ActionHandler = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// What the preview needs from its owner: which code block was just copied (to
+/// show "Copied") and what to do on a copy click, plus task interaction.
 pub struct CopyHook {
     pub copied: Option<usize>,
     pub on_copy: CopyHandler,
+    pub on_edit: EditHandler,
+    /// The "Add a task…" row under the note, when it should show.
+    pub add_task: Option<Entity<TextInput>>,
+    /// Hide finished tasks from the top-level lists.
+    pub hide_done: bool,
+    pub on_toggle_hide_done: ActionHandler,
 }
 
 /// The preview for a note: one element per top-level block.
 pub fn render(blocks: &[Block], theme: &GlassTheme, hook: &CopyHook) -> AnyElement {
     let counter = Cell::new(0);
-    // Like the notes list: flat rows on hairlines. Paragraphs, tasks and list
-    // items are the rows; cards (code, tables) and quotes get their own air.
+    let (done, total) = task_counts(blocks);
+    // Like the notes list: flat rows. Paragraphs, tasks and list items are the
+    // rows; cards (code, tables) and quotes get their own air.
     div()
         .flex()
         .flex_col()
-        .children(blocks.iter().map(|b| {
-            let el = render_block(b, theme, hook, &counter, true);
-            match b {
+        .when(total > 0, |d| {
+            d.child(progress_header(done, total, theme, hook))
+        })
+        .children(blocks.iter().enumerate().filter_map(|(i, b)| {
+            let el = match b {
+                Block::List { start, items } if hook.hide_done => {
+                    let items: Vec<Item> = items
+                        .iter()
+                        .filter(|it| it.checked != Some(true))
+                        .cloned()
+                        .collect();
+                    if items.is_empty() {
+                        return None;
+                    }
+                    let shown = Block::List {
+                        start: *start,
+                        items,
+                    };
+                    render_block(&shown, theme, hook, &counter, Some(i))
+                }
+                _ => render_block(b, theme, hook, &counter, Some(i)),
+            };
+            Some(match b {
                 Block::Paragraph(_) | Block::List { .. } | Block::Heading(..) => el,
-                _ => div().py(theme.space_3).child(el).into_any_element(),
-            }
+                _ => div().py(theme.space_4).child(el).into_any_element(),
+            })
         }))
+        .children(
+            hook.add_task
+                .clone()
+                .map(|input| div().px(theme.space_2).pt(theme.space_3).child(input)),
+        )
         .into_any_element()
 }
 
-/// `top` is true for blocks directly under the note: their paragraphs and list
-/// items become hairline-separated rows; nested ones stay plain.
+/// "2 of 6 done", a thin progress bar and the hide-finished toggle.
+fn progress_header(done: usize, total: usize, theme: &GlassTheme, hook: &CopyHook) -> AnyElement {
+    let theme = *theme;
+    let fraction = done as f32 / total as f32;
+    let on_toggle = hook.on_toggle_hide_done.clone();
+    div()
+        .flex()
+        .flex_col()
+        .gap(theme.space_2)
+        .px(theme.space_2)
+        .pb(theme.space_3)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .t_small()
+                .t_code()
+                .child(
+                    div()
+                        .text_color(theme.text_secondary)
+                        .child(format!("{done} of {total} done")),
+                )
+                .child(
+                    div()
+                        .id("note-hide-done")
+                        .px(theme.space_2)
+                        .rounded(theme.radius_sm)
+                        .cursor_pointer()
+                        .text_color(theme.text_muted)
+                        .hover(move |s| s.bg(theme.surface_hover).text_color(theme.text_primary))
+                        .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            on_toggle(window, cx);
+                        })
+                        .child(if hook.hide_done {
+                            "Show done"
+                        } else {
+                            "Hide done"
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .h(px(3.0))
+                .w_full()
+                .rounded(px(2.0))
+                .bg(theme.border_light)
+                .child(
+                    div()
+                        .h_full()
+                        .w(relative(fraction))
+                        .rounded(px(2.0))
+                        .bg(theme.accent),
+                ),
+        )
+        .into_any_element()
+}
+
+/// `top` is the block's index for blocks directly under the note: their
+/// paragraphs and list items become hoverable rows; nested ones stay plain.
 fn render_block(
     block: &Block,
     theme: &GlassTheme,
     hook: &CopyHook,
     counter: &Cell<usize>,
-    top: bool,
+    top: Option<usize>,
 ) -> AnyElement {
     let theme = *theme;
     match block {
@@ -72,17 +174,23 @@ fn render_block(
             };
             el.child(inline(spans, &theme)).into_any_element()
         }
-        Block::Paragraph(spans) => div()
-            .t_body()
-            .t_code()
-            .line_height(gpui::relative(NOTE_LINE_HEIGHT))
-            .text_color(theme.text_primary)
-            .when(top, |d| {
-                d.px(theme.space_2)
+        Block::Paragraph(spans) => {
+            let row = div()
+                .t_body()
+                .line_height(relative(NOTE_LINE_HEIGHT))
+                .text_color(theme.text_primary)
+                .child(inline(spans, &theme));
+            match top {
+                Some(i) => row
+                    .id(("note-p", i))
+                    .px(theme.space_2)
                     .py(theme.space_2)
-            })
-            .child(inline(spans, &theme))
-            .into_any_element(),
+                    .rounded(theme.radius_md)
+                    .hover(move |s| s.bg(theme.surface_hover))
+                    .into_any_element(),
+                None => row.into_any_element(),
+            }
+        }
         Block::Code { lang, text } => {
             let index = counter.get();
             counter.set(index + 1);
@@ -100,19 +208,24 @@ fn render_block(
             .children(
                 inner
                     .iter()
-                    .map(|b| render_block(b, &theme, hook, counter, false)),
+                    .map(|b| render_block(b, &theme, hook, counter, None)),
             )
             .into_any_element(),
         Block::List { start, items } => div()
             .flex()
             .flex_col()
-            .when(!top, |d| d.gap(theme.space_1).pl(theme.space_2))
-            .children(
-                items
-                    .iter()
-                    .enumerate()
-                    .map(|(ix, item)| list_item(*start, ix, item, &theme, hook, counter, top)),
-            )
+            .when(top.is_none(), |d| d.gap(theme.space_1).pl(theme.space_2))
+            .children(items.iter().enumerate().map(|(ix, item)| {
+                list_item(
+                    *start,
+                    ix,
+                    item,
+                    &theme,
+                    hook,
+                    counter,
+                    top.map(|i| i * 10_000 + ix),
+                )
+            }))
             .into_any_element(),
         Block::Rule => div()
             .h(px(1.0))
@@ -261,7 +374,7 @@ fn list_item(
     theme: &GlassTheme,
     hook: &CopyHook,
     counter: &Cell<usize>,
-    top: bool,
+    top: Option<usize>,
 ) -> AnyElement {
     let theme = *theme;
     let done = item.checked == Some(true);
@@ -281,27 +394,75 @@ fn list_item(
             .child("•")
             .into_any_element(),
     };
-    div()
+    // Only tasks whose marker could be located are clickable.
+    let task_marker = item.checked.and(item.marker.clone());
+    let marker = match task_marker.clone() {
+        Some(range) => {
+            let on_edit = hook.on_edit.clone();
+            div()
+                .id(("task-toggle", range.start))
+                .flex_none()
+                .rounded(theme.radius_sm)
+                .cursor_pointer()
+                .hover(move |s| s.bg(theme.surface_hover))
+                .on_click(move |_, window, cx| {
+                    // Keep the preview's double-click-to-edit from also firing.
+                    cx.stop_propagation();
+                    on_edit(TaskEdit::Toggle(range.clone()), window, cx);
+                })
+                .child(marker)
+                .into_any_element()
+        }
+        None => marker,
+    };
+    let priority_chip = task_marker.map(|marker_range| {
+        priority_chip(
+            &theme,
+            item.priority,
+            TaskEdit::CyclePriority {
+                marker: marker_range.clone(),
+                token: item.priority_token.clone(),
+                current: item.priority,
+            },
+            marker_range.start,
+            hook.on_edit.clone(),
+        )
+    });
+    // Finished tasks read as done: dimmer and struck through.
+    let blocks: Vec<AnyElement> = item
+        .blocks
+        .iter()
+        .map(|b| match b {
+            Block::Paragraph(spans) if done => {
+                let struck: Vec<Span> = spans
+                    .iter()
+                    .map(|s| Span {
+                        strike: true,
+                        ..s.clone()
+                    })
+                    .collect();
+                render_block(&Block::Paragraph(struck), &theme, hook, counter, None)
+            }
+            _ => render_block(b, &theme, hook, counter, None),
+        })
+        .collect();
+    let row = div()
+        .group("note-task")
         .flex()
         .items_start()
         .gap(theme.space_3)
         .t_body()
-        .t_code()
-        .line_height(gpui::relative(NOTE_LINE_HEIGHT))
+        .line_height(relative(NOTE_LINE_HEIGHT))
         .text_color(if done {
             theme.text_secondary
         } else {
             theme.text_primary
         })
-        .when(top, |d| {
-            d.px(theme.space_2)
-                .py(theme.space_2)
-        })
         .child(
             // Centre the 16px icon on the first 13px line (20.8px tall).
             div()
                 .flex_none()
-                .min_w(px(18.0))
+                .min_w(px(20.0))
                 .pt(px(2.0))
                 .child(marker),
         )
@@ -312,12 +473,66 @@ fn list_item(
                 .flex_1()
                 .min_w(px(0.0))
                 .gap(theme.space_2)
-                .children(
-                    item.blocks
-                        .iter()
-                        .map(|b| render_block(b, &theme, hook, counter, false)),
-                ),
+                .children(blocks),
         )
+        .children(priority_chip);
+    match top {
+        Some(id) => row
+            .id(("note-item", id))
+            .px(theme.space_2)
+            .py(theme.space_2)
+            .rounded(theme.radius_md)
+            .hover(move |s| s.bg(theme.surface_hover))
+            .into_any_element(),
+        None => row.into_any_element(),
+    }
+}
+
+/// A task's priority as a chip: a shape (chevron, bar, triangle) plus a word,
+/// so it is never colour alone. Without a priority the chip is a faint
+/// "priority" prompt that only shows while the row is hovered. Clicking it
+/// moves to the next priority (see `markdown::next_priority`).
+fn priority_chip(
+    theme: &GlassTheme,
+    priority: Option<TaskPriority>,
+    edit: TaskEdit,
+    id: usize,
+    on_edit: EditHandler,
+) -> AnyElement {
+    let theme = *theme;
+    let (glyph, color, label) = match priority {
+        Some(TaskPriority::Low) => (Icon::ChevronDown, theme.text_secondary, "low"),
+        Some(TaskPriority::Medium) => (Icon::Minus, theme.accent, "med"),
+        Some(TaskPriority::High) => (Icon::ChevronUp, theme.warning, "high"),
+        Some(TaskPriority::Urgent) => (Icon::Triangle, theme.danger, "urgent"),
+        None => (Icon::Minus, theme.text_muted, "priority"),
+    };
+    div()
+        .id(("task-priority", id))
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(4.0))
+        .h(px(20.0))
+        .mt(px(1.0))
+        .px(theme.space_2)
+        .rounded(theme.radius_sm)
+        .cursor_pointer()
+        .t_micro()
+        .t_code()
+        .text_color(color)
+        .when(priority.is_some(), |d| d.bg(color.opacity(0.14)))
+        .when(priority.is_none(), |d| {
+            d.opacity(0.0)
+                .group_hover("note-task", |s| s.opacity(1.0))
+        })
+        .hover(move |s| s.bg(theme.surface_hover))
+        .on_click(move |_, window, cx| {
+            cx.stop_propagation();
+            on_edit(edit.clone(), window, cx);
+        })
+        .child(icon(glyph, 12.0, color))
+        .child(label.to_uppercase())
         .into_any_element()
 }
 

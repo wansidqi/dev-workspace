@@ -24,7 +24,7 @@ use crate::text_input::TextInput;
 use crate::theme::GlassTheme;
 use crate::ui::{
     back_button, button, chip, empty_state, icon, icon_button, icon_chip, notice, section_label,
-    segment, segmented, status_style, tab, tab_bar, ButtonKind, Icon,
+    progress_pill, segment, segmented, status_style, tab, tab_bar, ButtonKind, Icon,
 };
 
 pub type CloseHandler = Box<dyn Fn(&mut Window, &mut App)>;
@@ -450,10 +450,29 @@ impl TaskDetail {
             .into_any_element()
     }
 
+    /// Creates a checklist note, titled from the input (or "Todo") and opens it.
+    fn create_todo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let typed = self.new_note_input.read(cx).content.trim().to_string();
+        let title = if typed.is_empty() { "Todo".into() } else { typed };
+        self.new_note_input
+            .update(cx, |input, cx| input.reset(window, cx));
+        self.create_note_of(&title, NoteKind::Todo, window, cx);
+    }
+
     fn create_note(&mut self, title: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.create_note_of(title, NoteKind::Note, window, cx);
+    }
+
+    fn create_note_of(
+        &mut self,
+        title: &str,
+        kind: NoteKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let task = self.task_id;
         let created = self.state.update(cx, |state, cx| {
-            let id = state.create_note_for(Some(task), title);
+            let id = state.create_note_of_kind(Some(task), title, kind);
             cx.notify();
             id
         });
@@ -744,8 +763,22 @@ impl TaskDetail {
 
     fn notes_tab(&mut self, notes: Vec<Note>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = self.theme;
-        let mut out: Vec<AnyElement> =
-            vec![div().child(self.new_note_input.clone()).into_any_element()];
+        let mut out: Vec<AnyElement> = vec![div()
+            .flex()
+            .items_center()
+            .gap(theme.space_2)
+            .child(div().flex_1().min_w(px(0.0)).child(self.new_note_input.clone()))
+            .child(
+                button(
+                    &theme,
+                    "note-new-todo",
+                    ButtonKind::Secondary,
+                    Some(Icon::ListChecks),
+                    "Todo",
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.create_todo(window, cx))),
+            )
+            .into_any_element()];
         out.push(
             div()
                 .px(theme.space_1)
@@ -761,6 +794,13 @@ impl TaskDetail {
                 "Notes are markdown files: write down decisions, scripts or SQL for this task.",
             ));
         }
+        let progress: std::collections::HashMap<NoteId, (usize, usize)> = {
+            let state = self.state.read(cx);
+            notes
+                .iter()
+                .filter_map(|n| state.note_progress(n.id).map(|p| (n.id, p)))
+                .collect()
+        };
         let rows = notes.into_iter().map(|note| {
             let id = note.id;
             let title: SharedString = note.title.clone().into();
@@ -799,6 +839,11 @@ impl TaskDetail {
                                 ),
                             },
                         )),
+                )
+                .children(
+                    progress
+                        .get(&id)
+                        .map(|&(done, total)| progress_pill(&theme, done, total)),
                 )
                 .child(
                     row_actions().child(
@@ -1377,6 +1422,7 @@ fn row_actions() -> gpui::Div {
 fn note_icon(kind: NoteKind) -> Icon {
     match kind {
         NoteKind::Note => Icon::FileText,
+        NoteKind::Todo => Icon::ListChecks,
         NoteKind::Script => Icon::Script,
         NoteKind::Sql => Icon::Database,
     }

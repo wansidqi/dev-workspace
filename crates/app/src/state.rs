@@ -16,6 +16,7 @@ use rusqlite::Connection;
 mod credentials; // credentials vault helpers (state/credentials.rs)
 mod run_commands; // run-command helpers (state/run_commands.rs)
 mod timesheet; // timesheet helpers (state/timesheet.rs)
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 pub use timesheet::TimesheetProject;
 
@@ -100,6 +101,10 @@ pub struct AppState {
     /// Kind given to the next note created from the UI; the "new note" rows
     /// show it as a chip that cycles it.
     pub new_note_kind: NoteKind,
+    /// (finished, total) tasks per note of the selected project, for the notes
+    /// lists. Filled when a project loads and kept current on every note write,
+    /// so rendering a list never touches the disk.
+    note_progress: HashMap<NoteId, (usize, usize)>,
     next_repo_id: i64,
 }
 
@@ -136,6 +141,7 @@ impl AppState {
             next_task_id: 1,
             next_note_id: 1,
             new_note_kind: NoteKind::Note,
+            note_progress: HashMap::new(),
             next_repo_id: 1,
         };
         state.reload_projects();
@@ -192,7 +198,8 @@ impl AppState {
         if let Some(max) = self.notes.iter().map(|n| n.id.0).max() {
             self.next_note_id = self.next_note_id.max(max + 1);
         }
-        self.repos = RepoRepo::list_for_project(&self.conn, id).unwrap_or_default();
+        self.reload_note_progress(id);
+        self.repos =RepoRepo::list_for_project(&self.conn, id).unwrap_or_default();
         if let Some(max) = self.repos.iter().map(|r| r.id.0).max() {
             self.next_repo_id = self.next_repo_id.max(max + 1);
         }
@@ -493,6 +500,16 @@ impl AppState {
     /// or subtask at any depth. The task must belong to the selected
     /// project. Returns the new note's id.
     pub fn create_note_for(&mut self, task: Option<TaskId>, title: &str) -> Option<NoteId> {
+        self.create_note_of_kind(task, title, self.new_note_kind)
+    }
+
+    /// Like [`Self::create_note_for`] with an explicit kind (a Todo note, say).
+    pub fn create_note_of_kind(
+        &mut self,
+        task: Option<TaskId>,
+        title: &str,
+        kind: NoteKind,
+    ) -> Option<NoteId> {
         let project_id = self.selected_project?;
         if let Some(task_id) = task {
             if !self.tasks.iter().any(|t| t.id == task_id) {
@@ -504,7 +521,6 @@ impl AppState {
             self.notes.iter().map(|n| n.id.0).max().unwrap_or(0),
         ));
         let file_name = format!("{}.md", id.0);
-        let kind = self.new_note_kind;
         let mut note = Note::new(id, project_id, kind, title, &file_name, now()).ok()?;
         note.task_id = task;
         self.paths.ensure_dirs(Some(project_id)).ok()?;
@@ -557,6 +573,7 @@ impl AppState {
         let _ = std::fs::remove_file(full_path);
         if NoteRepo::delete(&self.conn, id).is_ok() {
             self.notes.retain(|n| n.id != id);
+            self.note_progress.remove(&id);
         }
     }
 
@@ -580,6 +597,35 @@ impl AppState {
         }
         note.updated_at = now();
         let _ = NoteRepo::update(&self.conn, note);
+        match crate::markdown::note_progress(content) {
+            Some(counts) => self.note_progress.insert(id, counts),
+            None => self.note_progress.remove(&id),
+        };
+    }
+
+    /// Task progress of a note, `None` when it has no tasks.
+    pub fn note_progress(&self, id: NoteId) -> Option<(usize, usize)> {
+        self.note_progress.get(&id).copied()
+    }
+
+    /// Reads each note of the project once to count its tasks. Large files are
+    /// skipped: a progress badge is not worth stalling the UI on them.
+    fn reload_note_progress(&mut self, project: ProjectId) {
+        const MAX_BYTES: u64 = 256 * 1024;
+        self.note_progress.clear();
+        let dir = self.paths.notes_dir(project);
+        for note in &self.notes {
+            let path = dir.join(&note.file_path);
+            if std::fs::metadata(&path).map_or(true, |m| m.len() > MAX_BYTES) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            if let Some(counts) = crate::markdown::note_progress(&text) {
+                self.note_progress.insert(note.id, counts);
+            }
+        }
     }
 
     pub fn create_task(&mut self, title: &str) {
@@ -1104,6 +1150,32 @@ mod tests {
         state.select_project(project);
         assert_eq!(kind_of(&state, sql), Some(NoteKind::Sql));
         assert_eq!(kind_of(&state, script), Some(NoteKind::Script));
+    }
+
+    #[test]
+    fn todo_notes_keep_their_kind_and_track_task_progress() {
+        let scratch = Scratch::new();
+        let (mut state, a, _b) = setup(&scratch);
+        let todo = state
+            .create_note_of_kind(Some(a), "Release", NoteKind::Todo)
+            .unwrap();
+        let prose = state.create_note_for(Some(a), "Context").unwrap();
+        assert_eq!(state.note_progress(todo), None, "no tasks yet");
+
+        state.write_note_content(todo, "[ ] !high one\n\n[x] two\n\n- [ ] three\n");
+        state.write_note_content(prose, "just words");
+        assert_eq!(state.note_progress(todo), Some((1, 3)));
+        assert_eq!(state.note_progress(prose), None);
+
+        // The counts and the kind survive a reload (progress is re-read from the files).
+        let project = state.selected_project.unwrap();
+        state.select_project(project);
+        assert_eq!(state.note_progress(todo), Some((1, 3)));
+        let kind = state.notes.iter().find(|n| n.id == todo).map(|n| n.kind);
+        assert_eq!(kind, Some(NoteKind::Todo));
+
+        state.delete_note(todo);
+        assert_eq!(state.note_progress(todo), None);
     }
 
     #[test]

@@ -3,6 +3,8 @@ use crate::{NoteId, ProjectId, TaskId};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoteKind {
     Note,
+    /// A checklist: opens as a rendered task list with a quick-add row.
+    Todo,
     Script,
     Sql,
 }
@@ -12,6 +14,7 @@ impl NoteKind {
     pub fn label(self) -> &'static str {
         match self {
             NoteKind::Note => "Note",
+            NoteKind::Todo => "Todo",
             NoteKind::Script => "Script",
             NoteKind::Sql => "SQL",
         }
@@ -20,7 +23,8 @@ impl NoteKind {
     /// The kind a click on the kind chip moves to, wrapping around.
     pub fn cycle(self) -> Self {
         match self {
-            NoteKind::Note => NoteKind::Script,
+            NoteKind::Note => NoteKind::Todo,
+            NoteKind::Todo => NoteKind::Script,
             NoteKind::Script => NoteKind::Sql,
             NoteKind::Sql => NoteKind::Note,
         }
@@ -101,11 +105,11 @@ mod tests {
     fn kind_cycle_visits_every_kind_and_wraps() {
         let mut kind = NoteKind::Note;
         let mut seen = Vec::new();
-        for _ in 0..3 {
+        for _ in 0..4 {
             seen.push(kind.label());
             kind = kind.cycle();
         }
-        assert_eq!(seen, ["Note", "Script", "SQL"]);
+        assert_eq!(seen, ["Note", "Todo", "Script", "SQL"]);
         assert_eq!(kind, NoteKind::Note);
     }
 
