@@ -16,6 +16,10 @@ use crate::ui::{icon, Icon};
 /// What the preview needs from its owner to make code blocks copyable: which
 /// block was just copied (to show "Copied"), and what to do on a copy click.
 /// Called with the block index and its text when a copy button is pressed.
+/// Line height for note text, shared with the editor so editing and preview
+/// wrap and space the same way (13px body text like the rest of the app).
+pub const NOTE_LINE_HEIGHT: f32 = 1.6;
+
 pub type CopyHandler = Rc<dyn Fn(usize, String, &mut Window, &mut App)>;
 
 pub struct CopyHook {
@@ -67,8 +71,8 @@ fn render_block(
             el.child(inline(spans, &theme)).into_any_element()
         }
         Block::Paragraph(spans) => div()
-            .t_prose()
-            .line_height(gpui::relative(1.65))
+            .t_body()
+            .line_height(gpui::relative(NOTE_LINE_HEIGHT))
             .text_color(theme.text_primary)
             .child(inline(spans, &theme))
             .into_any_element(),
@@ -263,7 +267,8 @@ fn list_item(
             div()
                 .flex_none()
                 .min_w(px(18.0))
-                .t_prose()
+                .t_body()
+                .line_height(gpui::relative(NOTE_LINE_HEIGHT))
                 .text_color(if item.checked == Some(true) {
                     theme.success
                 } else {
