@@ -4,10 +4,8 @@
 //! multiple shaped lines instead of one, so cursor movement, hit-testing and
 //! painting all need a line index alongside the byte offset.
 //!
-//! Known limitation: Up/Down move the cursor by column measured in bytes,
-//! not by on-screen x position, so it will drift on non-monospace fonts with
-//! mixed-width lines. Fine for the plain-text notes this backs; revisit if a
-//! proportional-font editor ever needs pixel-accurate vertical movement.
+//! Up/Down keep the on-screen x position (the editor uses the proportional UI
+//! font), and every edit or cursor move scrolls the cursor into view.
 
 use std::ops::Range;
 
@@ -15,8 +13,8 @@ use gpui::{
     actions, div, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem, Context,
     CursorStyle, ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle,
     Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style, TextRun,
-    UTF16Selection, Window,
+    MouseUpEvent, PaintQuad, Pixels, Point, ScrollHandle, ShapedLine, SharedString, Style,
+    TextRun, UTF16Selection, Window,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -108,6 +106,11 @@ pub struct NoteEditor {
     pub on_close: Option<CloseHandler>,
     /// Called on Ctrl+S (the caller switches to the preview).
     pub on_save: Option<CloseHandler>,
+    /// Tracks the scroller so the cursor can be kept in view while typing.
+    scroll_handle: ScrollHandle,
+    /// Set by every selection or content change; the next paint scrolls the
+    /// cursor into view and clears it, so the mouse wheel is never fought.
+    reveal_cursor: bool,
     pub theme: GlassTheme,
 }
 
@@ -131,6 +134,8 @@ impl NoteEditor {
             on_change: None,
             on_close: None,
             on_save: None,
+            scroll_handle: ScrollHandle::new(),
+            reveal_cursor: true,
             theme,
         }
     }
@@ -193,10 +198,28 @@ impl NoteEditor {
             self.move_to(0, window, cx);
             return;
         }
-        let col = offset - self.line_range(line_idx).start;
-        let prev_range = self.line_range(line_idx - 1);
-        let target = (prev_range.start + col).min(prev_range.end);
+        let target = self.offset_on_line(line_idx - 1, offset);
         self.move_to(target, window, cx);
+    }
+
+    /// Offset on `target_line` closest to the on-screen x of `from_offset`, so
+    /// Up/Down keep their column on the proportional note font. Falls back to
+    /// the same byte column before the first paint has shaped any lines.
+    fn offset_on_line(&self, target_line: usize, from_offset: usize) -> usize {
+        let from_line = self.line_index_for_offset(from_offset);
+        let from_start = self.line_range(from_line).start;
+        let target = self.line_range(target_line);
+        let col = from_offset - from_start;
+        match (
+            self.last_lines.get(from_line),
+            self.last_lines.get(target_line),
+        ) {
+            (Some(from), Some(to)) => {
+                let x = from.x_for_index(col.min(from.len()));
+                (target.start + to.closest_index_for_x(x)).min(target.end)
+            }
+            _ => (target.start + col).min(target.end),
+        }
     }
 
     fn down(&mut self, _: &NeDown, window: &mut Window, cx: &mut Context<Self>) {
@@ -207,9 +230,7 @@ impl NoteEditor {
             self.move_to(self.content.len(), window, cx);
             return;
         }
-        let col = offset - self.line_range(line_idx).start;
-        let next_range = self.line_range(line_idx + 1);
-        let target = (next_range.start + col).min(next_range.end);
+        let target = self.offset_on_line(line_idx + 1, offset);
         self.move_to(target, window, cx);
     }
 
@@ -365,6 +386,7 @@ impl NoteEditor {
         self.content = text.into();
         self.selected_range = edit.select;
         self.selection_reversed = false;
+        self.reveal_cursor = true;
         self.marked_range = None;
         window.notify_text_input_changed(&self.focus_handle);
         self.notify_change(window, cx);
@@ -426,6 +448,7 @@ impl NoteEditor {
     fn move_to(&mut self, offset: usize, window: &Window, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
         self.selection_reversed = false;
+        self.reveal_cursor = true;
         window.notify_text_selection_changed(&self.focus_handle);
         cx.notify()
     }
@@ -468,6 +491,7 @@ impl NoteEditor {
             self.selection_reversed = !self.selection_reversed;
             self.selected_range = self.selected_range.end..self.selected_range.start;
         }
+        self.reveal_cursor = true;
         window.notify_text_selection_changed(&self.focus_handle);
         cx.notify()
     }
@@ -562,6 +586,7 @@ impl EntityInputHandler for NoteEditor {
     ) {
         self.selected_range = self.range_from_utf16(&range_utf16);
         self.selection_reversed = false;
+        self.reveal_cursor = true;
         window.notify_text_selection_changed(&self.focus_handle);
         cx.notify();
     }
@@ -608,6 +633,7 @@ impl EntityInputHandler for NoteEditor {
                 .into();
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.selection_reversed = false;
+        self.reveal_cursor = true;
         self.marked_range.take();
         window.notify_text_input_changed(&self.focus_handle);
         self.notify_change(window, cx);
@@ -647,6 +673,7 @@ impl EntityInputHandler for NoteEditor {
             })
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
         self.selection_reversed = false;
+        self.reveal_cursor = true;
 
         window.notify_text_input_changed(&self.focus_handle);
         self.notify_change(window, cx);
@@ -794,6 +821,28 @@ impl Element for NoteTextElement {
             .map(|l| l.x_for_index(cursor_col))
             .unwrap_or(px(0.0));
 
+        // Keep the cursor inside the scroller after typing or moving it. The
+        // offset is read from this frame's layout, so a stale one-frame-old
+        // measurement cannot cause a wrong jump; a refresh repaints at the new
+        // offset.
+        let (reveal, scroll_handle) = (input.reveal_cursor, input.scroll_handle.clone());
+        if reveal {
+            let viewport = scroll_handle.bounds();
+            let margin = line_height;
+            let mut offset = scroll_handle.offset();
+            let cursor_bottom = cursor_top + line_height;
+            if cursor_top < viewport.top() + margin {
+                offset.y = (offset.y + (viewport.top() + margin - cursor_top)).min(px(0.0));
+            } else if cursor_bottom > viewport.bottom() - margin {
+                offset.y += viewport.bottom() - margin - cursor_bottom;
+            }
+            if offset != scroll_handle.offset() && viewport.size.height > px(0.0) {
+                scroll_handle.set_offset(offset);
+                window.refresh();
+            }
+            self.input.update(cx, |input, _| input.reveal_cursor = false);
+        }
+
         let mut selections = Vec::new();
         if !selected_range.is_empty() {
             for (idx, line) in shaped.iter().enumerate() {
@@ -924,8 +973,8 @@ impl Render for NoteEditor {
             .w_full()
             .min_h_full()
             .p(theme.space_4)
-            .font_family(crate::theme::CODE_FONT)
-            .text_size(px(crate::theme::FS_BODY))
+            .font_family(crate::theme::UI_FONT)
+            .text_size(px(crate::theme::FS_PROSE))
             .line_height(gpui::relative(1.6))
             .child(NoteTextElement {
                 input: cx.entity(),
@@ -937,6 +986,7 @@ impl Render for NoteEditor {
             .w_full()
             .h_full()
             .overflow_y_scroll()
+            .track_scroll(&self.scroll_handle)
             .rounded(theme.radius_md)
             .bg(theme.surface_sunken)
             .border_1()
