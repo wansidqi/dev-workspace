@@ -973,7 +973,7 @@ impl Render for NoteEditor {
             .w_full()
             .min_h_full()
             .p(theme.space_4)
-            .font_family(crate::theme::UI_FONT)
+            .font_family(crate::theme::CODE_FONT)
             .text_size(px(crate::theme::FS_BODY))
             .line_height(gpui::relative(crate::markdown_view::NOTE_LINE_HEIGHT))
             .child(NoteTextElement {

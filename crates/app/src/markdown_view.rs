@@ -62,15 +62,11 @@ fn render_block(
                 1 => el
                     .t_title()
                     .mt(theme.space_3)
-                    .pb(theme.space_2)
-                    .border_b_1()
-                    .border_color(theme.border_light),
+                    .pb(theme.space_2),
                 2 => el
                     .t_heading()
                     .mt(theme.space_2)
-                    .pb(theme.space_1)
-                    .border_b_1()
-                    .border_color(theme.border_subtle),
+                    .pb(theme.space_1),
                 3 => el.t_prose().font_weight(FontWeight::SEMIBOLD),
                 _ => el.t_body().font_weight(FontWeight::SEMIBOLD),
             };
@@ -78,13 +74,12 @@ fn render_block(
         }
         Block::Paragraph(spans) => div()
             .t_body()
+            .t_code()
             .line_height(gpui::relative(NOTE_LINE_HEIGHT))
             .text_color(theme.text_primary)
             .when(top, |d| {
                 d.px(theme.space_2)
-                    .py(theme.space_3)
-                    .border_b_1()
-                    .border_color(theme.border_subtle)
+                    .py(theme.space_2)
             })
             .child(inline(spans, &theme))
             .into_any_element(),
@@ -291,6 +286,7 @@ fn list_item(
         .items_start()
         .gap(theme.space_3)
         .t_body()
+        .t_code()
         .line_height(gpui::relative(NOTE_LINE_HEIGHT))
         .text_color(if done {
             theme.text_secondary
@@ -299,9 +295,7 @@ fn list_item(
         })
         .when(top, |d| {
             d.px(theme.space_2)
-                .py(theme.space_3)
-                .border_b_1()
-                .border_color(theme.border_subtle)
+                .py(theme.space_2)
         })
         .child(
             // Centre the 16px icon on the first 13px line (20.8px tall).
