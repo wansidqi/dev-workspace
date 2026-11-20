@@ -6,10 +6,12 @@
 //! rail beside it (stacked below on narrow windows). Settings and backup live
 //! in their own view, not here.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::motion;
-use crate::task_tree::{tree_guide_lines, tree_guides, TreeGeometry, TreeGuides};
+use crate::task_tree::{
+    tree_guide_lines, tree_guides, visible_rows, RowMotion, TreeGeometry, TreeGuides,
+};
 use crate::theme::{GlassTheme, TypeScale};
 use crate::ui::{
     button, chip, empty_state, filter_chip, icon, icon_button, progress_pill, section_label,
@@ -29,6 +31,15 @@ const NOTE_HOVER_KEY_BASE: u64 = 3_000_000;
 /// tasks; below it the rail stacks underneath.
 const TWO_COLUMN_MIN_WIDTH: f32 = 960.0;
 const RAIL_WIDTH: f32 = 340.0;
+
+/// The fold or unfold of a task that is animating. `leaving` is a fold, whose
+/// rows stay a moment to fade out; `token` makes each click a fresh animation.
+#[derive(Debug, Clone)]
+pub struct TreeMotion {
+    pub tasks: HashSet<TaskId>,
+    pub leaving: bool,
+    pub token: u64,
+}
 
 /// Geometry of a task row the tree guides must line up with.
 const TREE: TreeGeometry = TreeGeometry {
@@ -538,15 +549,84 @@ impl Root {
                 }))
         });
 
-        let depths: Vec<usize> = tasks.iter().map(|(_, d)| *d).collect();
-        let rows: Vec<AnyElement> = tasks
+        // Fold away the subtrees of collapsed tasks. Guides are drawn from the
+        // rows that remain, so a folded parent shows no trunk into nothing.
+        let all_depths: Vec<usize> = tasks.iter().map(|(_, d)| *d).collect();
+        let ids: Vec<TaskId> = tasks.iter().map(|(t, _)| t.id).collect();
+        let motion = self.tree_motion.as_ref().map(|m| (&m.tasks, m.leaving));
+        let shown = visible_rows(&all_depths, &ids, &self.collapsed_tasks, motion);
+        let depths: Vec<usize> = shown.iter().map(|(ix, _)| all_depths[*ix]).collect();
+        let token = self.tree_motion.as_ref().map_or(0, |m| m.token);
+        let rows: Vec<AnyElement> = shown
             .iter()
             .enumerate()
-            .map(|(ix, (task, depth))| {
-                let guides = tree_guides(&depths, ix);
-                self.task_row(task, *depth, &guides, task_counts, editing_task_id, cx)
+            .map(|(vis, (ix, row_motion))| {
+                let (task, depth) = &tasks[*ix];
+                let guides = tree_guides(&depths, vis);
+                let descendants = all_depths[ix + 1..]
+                    .iter()
+                    .take_while(|d| **d > *depth)
+                    .count();
+                let collapsed = self.collapsed_tasks.contains(&task.id);
+                let row = self.task_row(
+                    task,
+                    *depth,
+                    &guides,
+                    task_counts,
+                    editing_task_id,
+                    (descendants, collapsed),
+                    cx,
+                );
+                // Only rows an expand just revealed (or a collapse is fading
+                // out) move; everything else stays put. The token makes each
+                // expand a new element, so it plays once per click.
+                let key = (u64::from(token as u32) << 32) | task.id.0 as u64;
+                match row_motion {
+                    RowMotion::Still => row,
+                    RowMotion::Reveal(n) => motion::enter_after(
+                        div().child(row),
+                        ("task-reveal", key),
+                        *n,
+                        motion::STANDARD,
+                    )
+                    .into_any_element(),
+                    RowMotion::Leave => {
+                        motion::leave(div().child(row), ("task-leave", key), motion::FAST)
+                            .into_any_element()
+                    }
+                }
             })
             .collect();
+
+        // Tasks that have subtasks, for the fold-all button.
+        let parents: Vec<TaskId> = tasks
+            .iter()
+            .enumerate()
+            .filter(|(ix, (_, depth))| tasks.get(ix + 1).is_some_and(|(_, next)| next > depth))
+            .map(|(_, (task, _))| task.id)
+            .collect();
+        let all_folded =
+            !parents.is_empty() && parents.iter().all(|id| self.collapsed_tasks.contains(id));
+        let fold_all = (!parents.is_empty()).then(|| {
+            button(
+                &theme,
+                "tasks-fold-all",
+                ButtonKind::Ghost,
+                Some(if all_folded {
+                    Icon::ChevronDown
+                } else {
+                    Icon::ChevronUp
+                }),
+                if all_folded {
+                    "Expand all"
+                } else {
+                    "Collapse all"
+                },
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_all_collapsed(&parents, cx);
+            }))
+        });
 
         div()
             .flex()
@@ -555,16 +635,24 @@ impl Root {
             .child(
                 div()
                     .flex()
-                    .items_baseline()
+                    .items_center()
+                    .justify_between()
                     .gap(theme.space_2)
-                    .child(div().t_heading().text_color(theme.text_primary).child("Tasks"))
                     .child(
                         div()
-                            .t_small()
-                            .t_code()
-                            .text_color(theme.text_muted)
-                            .child(tasks.len().to_string()),
-                    ),
+                            .flex()
+                            .items_baseline()
+                            .gap(theme.space_2)
+                            .child(div().t_heading().text_color(theme.text_primary).child("Tasks"))
+                            .child(
+                                div()
+                                    .t_small()
+                                    .t_code()
+                                    .text_color(theme.text_muted)
+                                    .child(tasks.len().to_string()),
+                            ),
+                    )
+                    .children(fold_all),
             )
             .children(filters)
             .child(self.new_task_input.clone())
@@ -599,6 +687,60 @@ impl Root {
             })
     }
 
+    /// Folds or unfolds one task's subtasks.
+    fn toggle_task_collapsed(&mut self, id: TaskId, cx: &mut Context<Self>) {
+        let leaving = self.collapsed_tasks.insert(id);
+        if !leaving {
+            self.collapsed_tasks.remove(&id);
+        }
+        self.start_tree_motion(HashSet::from([id]), leaving, cx);
+    }
+
+    /// Folds every task that has subtasks, or unfolds them all when they are
+    /// already all folded. `parents` are the tasks that have subtasks.
+    fn toggle_all_collapsed(&mut self, parents: &[TaskId], cx: &mut Context<Self>) {
+        let open: HashSet<TaskId> = parents
+            .iter()
+            .copied()
+            .filter(|id| !self.collapsed_tasks.contains(id))
+            .collect();
+        if open.is_empty() {
+            let folded: HashSet<TaskId> = parents.iter().copied().collect();
+            self.collapsed_tasks.clear();
+            self.start_tree_motion(folded, false, cx);
+        } else {
+            self.collapsed_tasks.extend(parents.iter().copied());
+            self.start_tree_motion(open, true, cx);
+        }
+    }
+
+    /// Animates a fold or unfold. Unfolding fades the revealed rows in; folding
+    /// keeps them on screen for one short fade before they go.
+    fn start_tree_motion(&mut self, tasks: HashSet<TaskId>, leaving: bool, cx: &mut Context<Self>) {
+        self.tree_motion_token += 1;
+        let token = self.tree_motion_token;
+        self.tree_motion = Some(TreeMotion {
+            tasks,
+            leaving,
+            token,
+        });
+        if leaving {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(motion::FAST + std::time::Duration::from_millis(20))
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.tree_motion.as_ref().is_some_and(|m| m.token == token) {
+                        this.tree_motion = None;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
     /// One task row. The status icon cycles the status; the rest of the row
     /// opens the task. Row actions appear while it is hovered.
     fn task_row(
@@ -608,8 +750,11 @@ impl Root {
         guides: &TreeGuides,
         task_counts: &HashMap<TaskId, (usize, usize, usize)>,
         editing_task_id: Option<TaskId>,
+        // (rows nested under this task, whether they are folded away)
+        fold: (usize, bool),
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let (descendants, collapsed) = fold;
         let theme = self.theme;
         let id = task.id;
         let indent = px(depth as f32 * TREE.indent);
@@ -676,7 +821,6 @@ impl Root {
             )
             .child(
                 div()
-                    .flex_1()
                     .min_w(px(0.0))
                     .truncate()
                     .t_body()
@@ -688,6 +832,47 @@ impl Root {
                     .when(done, |d| d.line_through())
                     .child(task.title.clone()),
             )
+            .when(descendants > 0, |d| {
+                d.child(
+                    div()
+                        .id(("task-collapse", id.0 as u64))
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(px(4.0))
+                        .h(px(24.0))
+                        .px(theme.space_1)
+                        .rounded(theme.radius_sm)
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(theme.surface_hover))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.toggle_task_collapsed(id, cx);
+                            cx.stop_propagation();
+                        }))
+                        .child(icon(
+                            if collapsed {
+                                Icon::ChevronRight
+                            } else {
+                                Icon::ChevronDown
+                            },
+                            14.0,
+                            theme.text_muted,
+                        ))
+                        // A folded task says how much it is hiding.
+                        .when(collapsed, |d| {
+                            d.child(
+                                div()
+                                    .t_small()
+                                    .t_code()
+                                    .text_color(theme.text_secondary)
+                                    .child(format!("+{descendants}")),
+                            )
+                        }),
+                )
+            })
+            // Takes the free width, so the chevron sits right after the title and
+            // the tags and counts stay at the right edge.
+            .child(div().flex_1())
             .children(task.tags.iter().take(3).map(|tag| {
                 let tint = crate::theme::label_color(&theme, tag);
                 div()

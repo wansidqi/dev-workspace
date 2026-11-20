@@ -145,6 +145,8 @@ pub fn lookup(name: &str) -> Option<(&'static str, Option<&'static str>)> {
             "A note that opens as a task list with a quick-add row.",
         ),
         "task-note-rename" => Some(("Rename note", None)),
+        "task-collapse" => Some(("Fold or unfold subtasks", None)),
+        "tasks-fold-all" => Some(("Fold or unfold every task with subtasks", None)),
         "task-toggle" => Some(("Tick or untick", None)),
         "task-priority" => tip(
             "Priority",

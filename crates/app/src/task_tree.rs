@@ -4,7 +4,8 @@
 //! row geometry.
 
 use crate::theme::GlassTheme;
-use devspace_core::Task;
+use devspace_core::{Task, TaskId};
+use std::collections::HashSet;
 use gpui::{div, prelude::*, px, Div, Pixels};
 
 /// Row geometry the guides must line up with.
@@ -109,6 +110,77 @@ pub fn tree_guide_lines(
     out
 }
 
+/// How a visible row of the task tree should move this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowMotion {
+    /// At rest.
+    Still,
+    /// Just revealed by an expand: the `n`th row of the group (for a short stagger).
+    Reveal(usize),
+    /// Still on screen while a collapse fades it out.
+    Leave,
+}
+
+/// The rows of a depth-first task list that should be drawn, as indexes into
+/// it, hiding everything under a collapsed task. `motion` is the fold or unfold
+/// in flight (the tasks, and whether they are `leaving`): an unfolding task's subtree is flagged
+/// [`RowMotion::Reveal`], and a folding task's subtree stays, flagged
+/// [`RowMotion::Leave`], until the caller ends the motion.
+pub fn visible_rows(
+    depths: &[usize],
+    ids: &[TaskId],
+    collapsed: &HashSet<TaskId>,
+    motion: Option<(&HashSet<TaskId>, bool)>,
+) -> Vec<(usize, RowMotion)> {
+    let moving = |id: TaskId, leaving: bool| {
+        motion.is_some_and(|(tasks, l)| l == leaving && tasks.contains(&id))
+    };
+    let mut out = Vec::new();
+    // Depth of a collapsed task whose subtree is currently skipped, and whether
+    // that subtree is still being shown for a fade-out.
+    let mut hidden_under: Option<(usize, bool)> = None;
+    // While fading a subtree out: a collapsed task inside it hides its own
+    // children, which were never on screen.
+    let mut inner_hidden: Option<usize> = None;
+    let mut reveal_under: Option<usize> = None;
+    let mut reveal_n = 0;
+    for ix in 0..depths.len() {
+        let depth = depths[ix];
+        let has_children = depths.get(ix + 1).is_some_and(|d| *d > depth);
+        if let Some((hidden_depth, leaving)) = hidden_under {
+            if depth > hidden_depth {
+                if leaving && inner_hidden.is_none_or(|d| depth <= d) {
+                    inner_hidden = None;
+                    out.push((ix, RowMotion::Leave));
+                    if collapsed.contains(&ids[ix]) && has_children {
+                        inner_hidden = Some(depth);
+                    }
+                }
+                continue;
+            }
+            hidden_under = None;
+            inner_hidden = None;
+        }
+        let mut row_motion = RowMotion::Still;
+        if let Some(reveal_depth) = reveal_under {
+            if depth > reveal_depth {
+                row_motion = RowMotion::Reveal(reveal_n);
+                reveal_n += 1;
+            } else {
+                reveal_under = None;
+            }
+        }
+        out.push((ix, row_motion));
+        if collapsed.contains(&ids[ix]) && has_children {
+            hidden_under = Some((depth, moving(ids[ix], true)));
+        } else if moving(ids[ix], false) && has_children && reveal_under.is_none() {
+            reveal_under = Some(depth);
+            reveal_n = 0;
+        }
+    }
+    out
+}
+
 /// Narrows a depth-first task list to titles containing `query` (ignoring
 /// case), keeping every ancestor of a match so the result is still a tree.
 /// Each row says whether it matched itself or is only there as an ancestor.
@@ -146,7 +218,85 @@ pub fn filter_tree(tasks: Vec<(Task, usize)>, query: &str) -> Vec<(Task, usize, 
 #[cfg(test)]
 mod tests {
     use super::{filter_tree, tree_guides};
+    use super::{visible_rows, RowMotion};
+    use std::collections::HashSet;
+
+    // A / (A1 / A1a, A2) / B  as ids 0..5, depths 0 1 2 1 0.
+    const DEPTHS: [usize; 5] = [0, 1, 2, 1, 0];
+    fn ids() -> Vec<TaskId> {
+        (0..5).map(TaskId).collect()
+    }
+    fn shown(collapsed: &[i64], motion: Option<(&[i64], bool)>) -> Vec<(usize, RowMotion)> {
+        let collapsed: HashSet<TaskId> = collapsed.iter().map(|i| TaskId(*i)).collect();
+        let moving: Option<(HashSet<TaskId>, bool)> =
+            motion.map(|(ids, l)| (ids.iter().map(|i| TaskId(*i)).collect(), l));
+        visible_rows(
+            &DEPTHS,
+            &ids(),
+            &collapsed,
+            moving.as_ref().map(|(set, l)| (set, *l)),
+        )
+    }
+    fn rows(v: &[(usize, RowMotion)]) -> Vec<usize> {
+        v.iter().map(|(i, _)| *i).collect()
+    }
+
+    #[test]
+    fn a_collapsed_task_hides_its_whole_subtree() {
+        assert_eq!(rows(&shown(&[], None)), vec![0, 1, 2, 3, 4]);
+        assert_eq!(rows(&shown(&[0], None)), vec![0, 4]);
+        // Folding only A1 keeps its sibling A2.
+        assert_eq!(rows(&shown(&[1], None)), vec![0, 1, 3, 4]);
+        // A task without children cannot hide anything.
+        assert_eq!(rows(&shown(&[4], None)), vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn unfolding_flags_the_revealed_rows_in_order() {
+        let out = shown(&[], Some((&[0], false)));
+        assert_eq!(out[0].1, RowMotion::Still);
+        assert_eq!(out[1].1, RowMotion::Reveal(0));
+        assert_eq!(out[2].1, RowMotion::Reveal(1));
+        assert_eq!(out[3].1, RowMotion::Reveal(2));
+        assert_eq!(out[4].1, RowMotion::Still, "a later root does not move");
+    }
+
+    #[test]
+    fn folding_keeps_the_subtree_on_screen_flagged_to_leave() {
+        let out = shown(&[0], Some((&[0], true)));
+        assert_eq!(rows(&out), vec![0, 1, 2, 3, 4]);
+        assert_eq!(out[1].1, RowMotion::Leave);
+        assert_eq!(out[2].1, RowMotion::Leave);
+        assert_eq!(out[3].1, RowMotion::Leave);
+        assert_eq!(out[4].1, RowMotion::Still);
+        // Rows already hidden by a nested fold do not flash while the outer one leaves.
+        let out = shown(&[0, 1], Some((&[0], true)));
+        assert_eq!(rows(&out), vec![0, 1, 3, 4], "A1a stays hidden under folded A1");
+    }
+
     use devspace_core::{ProjectId, Task, TaskId};
+
+    #[test]
+    fn unfolding_several_tasks_at_once_flags_each_row_once() {
+        // Expand all: A and A1 both come back; the nested one must not restart the count.
+        let out = shown(&[], Some((&[0, 1], false)));
+        let flags: Vec<RowMotion> = out.iter().map(|(_, m)| *m).collect();
+        assert_eq!(
+            flags,
+            vec![
+                RowMotion::Still,
+                RowMotion::Reveal(0),
+                RowMotion::Reveal(1),
+                RowMotion::Reveal(2),
+                RowMotion::Still
+            ]
+        );
+        // Collapse all: everything under A leaves together, A1a once.
+        let out = shown(&[0, 1], Some((&[0, 1], true)));
+        assert_eq!(rows(&out), vec![0, 1, 3, 4]);
+        assert_eq!(out[1].1, RowMotion::Leave);
+        assert_eq!(out[2].1, RowMotion::Leave);
+    }
 
     #[test]
     fn marks_trunks_last_children_and_parents() {

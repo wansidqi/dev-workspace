@@ -110,6 +110,11 @@ struct Root {
     note_copied: Option<usize>,
     /// Preview hides finished tasks (a view filter; the note text is untouched).
     note_hide_done: bool,
+    /// Tasks whose subtasks are folded away in the project's task tree.
+    collapsed_tasks: std::collections::HashSet<TaskId>,
+    /// The fold or unfold that is animating, so only those rows move.
+    tree_motion: Option<project_page::TreeMotion>,
+    tree_motion_token: u64,
     /// "Add a task" row of the open note's preview; built when a note opens.
     note_task_input: Option<Entity<TextInput>>,
     /// Right-hand terminal panel (CLAUDE.md layout concept: "collapsible
@@ -1130,6 +1135,9 @@ fn main() -> Result<()> {
                         note_mode: note_page::NoteMode::Edit,
                         note_copied: None,
                         note_hide_done: false,
+                        collapsed_tasks: std::collections::HashSet::new(),
+                        tree_motion: None,
+                        tree_motion_token: 0,
                         note_task_input: None,
                         note_preview: None,
                         terminal_panel,
