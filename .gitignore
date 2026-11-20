@@ -10,3 +10,6 @@
 
 .DS_Store
 Thumbs.db
+
+# Dated release builds (scripts/release.ps1)
+/releases

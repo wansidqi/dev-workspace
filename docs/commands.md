@@ -51,6 +51,8 @@ The optimised executable is `target\release\devspace.exe` (in this repo: `D:\dev
 
 Production notes:
 
+To archive a release without replacing older ones, run `powershell -File scripts\release.ps1`. It builds and copies `devspace.exe` plus a `BUILD.txt` (commit hash) into `releases\<yyyy-MM-dd>\`. A second release on the same day goes to `releases\<yyyy-MM-dd_HHmmss>\`. The `releases` folder is git-ignored.
+
 - A release build is slower to compile than a debug build (a few minutes the first time), then incremental.
 - The QA environment variables above are ignored in release; the app always uses the OS data folder.
 - Stop a running `devspace.exe` before rebuilding. Windows will not let cargo overwrite the executable while it runs (`Access is denied (os error 5)`).
