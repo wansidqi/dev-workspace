@@ -4,11 +4,13 @@
 //! Nothing here is interactive except the copy button on code blocks.
 
 use std::cell::Cell;
+use std::ops::Range;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use gpui::{
     div, font, prelude::*, px, relative, AnyElement, App, ClipboardItem, FontStyle, FontWeight,
-    HighlightStyle, Hsla, SharedString, StrikethroughStyle, StyledText, TextRun, UnderlineStyle,
+    HighlightStyle, Hsla, InteractiveText, SharedString, StrikethroughStyle, StyledText, TextRun, UnderlineStyle,
     Window,
 };
 
@@ -30,31 +32,42 @@ pub type CopyHandler = Rc<dyn Fn(usize, String, &mut Window, &mut App)>;
 /// Called with the marker's range in the note text when a checkbox is clicked.
 pub type ToggleHandler = Rc<dyn Fn(std::ops::Range<usize>, &mut Window, &mut App)>;
 
+/// Called with a link's destination (a URL or `#anchor`) when it is clicked.
+pub type LinkHandler = Rc<dyn Fn(String, &mut Window, &mut App)>;
+
 /// What the preview needs from its owner: which code block was just copied (to
-/// show "Copied"), what to do on a copy click, and what to do when a task
-/// checkbox is clicked.
+/// show "Copied"), what to do on a copy click, when a task checkbox is clicked
+/// and when a link is clicked.
 pub struct CopyHook {
     pub copied: Option<usize>,
     pub on_copy: CopyHandler,
     pub on_toggle: ToggleHandler,
+    pub on_link: LinkHandler,
 }
 
-/// The preview for a note: one element per top-level block.
-pub fn render(blocks: &[Block], theme: &GlassTheme, hook: &CopyHook) -> AnyElement {
+/// Ids for the clickable text of one render, handed out in order so they stay the
+/// same from frame to frame.
+static NEXT_LINK_ID: AtomicUsize = AtomicUsize::new(0);
+
+/// The preview for a note: one element per top-level block, each already sized
+/// to the reading column. They are separate children (not one wrapper) so the
+/// owner's scroll handle can scroll to the one a `#anchor` link points at.
+pub fn render_blocks(blocks: &[Block], theme: &GlassTheme, hook: &CopyHook) -> Vec<AnyElement> {
+    NEXT_LINK_ID.store(0, Ordering::Relaxed);
     let counter = Cell::new(0);
-    div()
-        .flex()
-        .flex_col()
-        .gap(theme.space_3)
-        .t_prose()
-        .line_height(relative(NOTE_LINE_HEIGHT))
-        .children(
-            blocks
-                .iter()
-                .enumerate()
-                .map(|(i, b)| render_block(b, theme, hook, &counter, i == 0)),
-        )
-        .into_any_element()
+    blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            div()
+                .w_full()
+                .max_w(px(NOTE_MAX_WIDTH))
+                .t_prose()
+                .line_height(relative(NOTE_LINE_HEIGHT))
+                .child(render_block(b, theme, hook, &counter, i == 0))
+                .into_any_element()
+        })
+        .collect()
 }
 
 /// `first` is true for the first block of the note or of a container, which
@@ -87,21 +100,23 @@ fn render_block(
                 3 => el.t_prose().font_weight(FontWeight::SEMIBOLD),
                 _ => el.t_body().font_weight(FontWeight::SEMIBOLD),
             };
-            el.child(inline(
+            el.child(text(
                 spans,
                 &theme,
                 FontWeight::SEMIBOLD,
                 theme.text_primary,
+                hook,
             ))
             .into_any_element()
         }
         Block::Paragraph(spans) => div()
             .text_color(theme.text_primary)
-            .child(inline(
+            .child(text(
                 spans,
                 &theme,
                 FontWeight::NORMAL,
                 theme.text_primary,
+                hook,
             ))
             .into_any_element(),
         Block::Code { lang, text } => {
@@ -220,7 +235,7 @@ fn render_block(
             .my(theme.space_2)
             .bg(theme.border_light)
             .into_any_element(),
-        Block::Table { header, rows } => table(header, rows, &theme),
+        Block::Table { header, rows } => table(header, rows, &theme, hook),
     }
 }
 
@@ -446,7 +461,12 @@ fn checkbox(
         .into_any_element()
 }
 
-fn table(header: &[Vec<Span>], rows: &[Vec<Vec<Span>>], theme: &GlassTheme) -> AnyElement {
+fn table(
+    header: &[Vec<Span>],
+    rows: &[Vec<Vec<Span>>],
+    theme: &GlassTheme,
+    hook: &CopyHook,
+) -> AnyElement {
     let theme = *theme;
     let cell = move |spans: &Vec<Span>, head: bool| {
         div()
@@ -455,7 +475,7 @@ fn table(header: &[Vec<Span>], rows: &[Vec<Vec<Span>>], theme: &GlassTheme) -> A
             .px(theme.space_2)
             .py(theme.space_1)
             .text_color(theme.text_primary)
-            .child(inline(
+            .child(text(
                 spans,
                 &theme,
                 if head {
@@ -464,6 +484,7 @@ fn table(header: &[Vec<Span>], rows: &[Vec<Vec<Span>>], theme: &GlassTheme) -> A
                     FontWeight::NORMAL
                 },
                 theme.text_primary,
+                hook,
             ))
     };
     div()
@@ -488,32 +509,57 @@ fn table(header: &[Vec<Span>], rows: &[Vec<Vec<Span>>], theme: &GlassTheme) -> A
         .into_any_element()
 }
 
-/// One styled text element for a paragraph's spans. Built from text runs
-/// rather than highlights because inline code needs its own (mono) font, which
-/// a highlight cannot carry. `base_weight` and `color` are the surrounding
-/// text's, since a run replaces the element's own font and colour.
-fn inline(spans: &[Span], theme: &GlassTheme, base_weight: FontWeight, color: Hsla) -> StyledText {
+/// A paragraph's spans as an element: plain styled text, or clickable text when
+/// it holds links (the pointer cursor comes with it). Clicking a link hands its
+/// destination to the owner, which decides what to do with it.
+fn text(
+    spans: &[Span],
+    theme: &GlassTheme,
+    base_weight: FontWeight,
+    color: Hsla,
+    hook: &CopyHook,
+) -> AnyElement {
+    let (styled, links) = inline(spans, theme, base_weight, color);
+    if links.is_empty() {
+        return styled.into_any_element();
+    }
+    let (ranges, urls): (Vec<Range<usize>>, Vec<String>) = links.into_iter().unzip();
+    let on_link = hook.on_link.clone();
+    let id = NEXT_LINK_ID.fetch_add(1, Ordering::Relaxed);
+    InteractiveText::new(("md-link", id), styled)
+        .on_click(ranges, move |ix, window, cx| {
+            // Keep the preview's double-click-to-edit from also firing.
+            cx.stop_propagation();
+            if let Some(url) = urls.get(ix) {
+                on_link(url.clone(), window, cx);
+            }
+        })
+        .into_any_element()
+}
+
+/// The styled text for a paragraph's spans, and the byte range and destination
+/// of each link in it. Built from text runs rather than highlights because
+/// inline code needs its own (mono) font, which a highlight cannot carry.
+/// `base_weight` and `color` are the surrounding text's, since a run replaces the
+/// element's own font and colour.
+fn inline(
+    spans: &[Span],
+    theme: &GlassTheme,
+    base_weight: FontWeight,
+    color: Hsla,
+) -> (StyledText, Vec<(Range<usize>, String)>) {
     let mut text = String::new();
     let mut runs = Vec::with_capacity(spans.len());
+    let mut links = Vec::new();
     for span in spans {
         if span.text.is_empty() {
             continue;
         }
-        // A supported colour model shows a circle in that colour first, inside
-        // the same code chip.
-        if let Some([r, g, b]) = span.swatch {
-            const DOT: &str = "\u{25CF} ";
-            text.push_str(DOT);
-            runs.push(TextRun {
-                len: DOT.len(),
-                font: font(CODE_FONT),
-                color: gpui::rgb(u32::from_be_bytes([0, r, g, b])).into(),
-                background_color: Some(theme.surface_raised),
-                underline: None,
-                strikethrough: None,
-            });
-        }
+        let start = text.len();
         text.push_str(&span.text);
+        if let Some(href) = &span.href {
+            links.push((start..text.len(), href.clone()));
+        }
         let mut f = font(if span.code { CODE_FONT } else { UI_FONT });
         f.weight = if span.bold {
             FontWeight::SEMIBOLD
@@ -538,6 +584,31 @@ fn inline(spans: &[Span], theme: &GlassTheme, base_weight: FontWeight, color: Hs
                 color: None,
             }),
         });
+        // A supported colour model shows a circle in that colour after the code,
+        // as GitHub does. GitHub outlines it so dark colours stay visible; a text
+        // run cannot draw an outline, so the circle sits on a lighter backing.
+        if let Some([r, g, b]) = span.swatch {
+            const GAP: &str = " ";
+            const DOT: &str = "\u{25CF}";
+            text.push_str(GAP);
+            runs.push(TextRun {
+                len: GAP.len(),
+                font: font(UI_FONT),
+                color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
+            text.push_str(DOT);
+            runs.push(TextRun {
+                len: DOT.len(),
+                font: font(CODE_FONT),
+                color: gpui::rgb(u32::from_be_bytes([0, r, g, b])).into(),
+                background_color: Some(theme.border_strong),
+                underline: None,
+                strikethrough: None,
+            });
+        }
     }
-    StyledText::new(text).with_runs(runs)
+    (StyledText::new(text).with_runs(runs), links)
 }

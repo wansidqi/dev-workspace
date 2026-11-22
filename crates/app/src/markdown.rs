@@ -26,6 +26,9 @@ pub struct Span {
     pub strike: bool,
     pub code: bool,
     pub link: bool,
+    /// Where a click on a link goes: the URL or `#anchor`. Bare URLs link to
+    /// themselves.
+    pub href: Option<String>,
     /// `<ins>`: underlined text.
     pub underline: bool,
     /// For inline code that is a supported colour (`#0969DA`, `rgb(...)`,
@@ -201,6 +204,8 @@ struct Inline {
     italic: u32,
     strike: u32,
     link: u32,
+    /// Destinations of the links currently open, innermost last.
+    hrefs: Vec<String>,
     ins: u32,
     sub: u32,
     sup: u32,
@@ -209,7 +214,15 @@ struct Inline {
 }
 
 impl Inline {
-    fn push_styled(&mut self, text: &str, code: bool, link: bool, swatch: Option<[u8; 3]>) {
+    /// `autolink` is the URL for text that is itself a bare link; text inside a
+    /// `[label](url)` takes the open link's URL.
+    fn push_styled(
+        &mut self,
+        text: &str,
+        code: bool,
+        autolink: Option<&str>,
+        swatch: Option<[u8; 3]>,
+    ) {
         if text.is_empty() {
             return;
         }
@@ -224,7 +237,10 @@ impl Inline {
             italic: self.italic > 0,
             strike: self.strike > 0,
             code,
-            link: link || self.link > 0,
+            link: autolink.is_some() || self.link > 0,
+            href: autolink
+                .map(str::to_string)
+                .or_else(|| self.hrefs.last().cloned()),
             underline: self.ins > 0,
             swatch,
         };
@@ -237,6 +253,7 @@ impl Inline {
                 && last.strike == span.strike
                 && last.code == span.code
                 && last.link == span.link
+                && last.href == span.href
                 && last.underline == span.underline
             {
                 last.text.push_str(&span.text);
@@ -250,18 +267,18 @@ impl Inline {
     fn push_text(&mut self, text: &str) {
         let text = emojify(text);
         if self.link > 0 {
-            self.push_styled(&text, false, false, None);
+            self.push_styled(&text, false, None, None);
             return;
         }
         let mut rest = text.as_str();
         while let Some(at) = find_url(rest) {
             let (before, tail) = rest.split_at(at);
             let len = url_len(tail);
-            self.push_styled(before, false, false, None);
-            self.push_styled(&tail[..len], false, true, None);
+            self.push_styled(before, false, None, None);
+            self.push_styled(&tail[..len], false, Some(&tail[..len]), None);
             rest = &tail[len..];
         }
-        self.push_styled(rest, false, false, None);
+        self.push_styled(rest, false, None, None);
     }
 
     /// Inline HTML: the tags GitHub's page documents are honoured, comments are
@@ -285,8 +302,8 @@ impl Inline {
             "</sub>" => self.sub = self.sub.saturating_sub(1),
             "<sup>" => self.sup += 1,
             "</sup>" => self.sup = self.sup.saturating_sub(1),
-            "<br>" | "<br/>" | "<br />" => self.push_styled("\n", false, false, None),
-            _ => self.push_styled(raw, false, false, None),
+            "<br>" | "<br/>" | "<br />" => self.push_styled("\n", false, None, None),
+            _ => self.push_styled(raw, false, None, None),
         }
     }
 
@@ -299,13 +316,15 @@ impl Inline {
                 }
             }
             Event::Html(t) | Event::InlineHtml(t) => self.html(t),
-            Event::Code(t) => self.push_styled(t, true, false, color_of(t)),
-            Event::SoftBreak => self.push_styled(" ", false, false, None),
-            Event::HardBreak => self.push_styled("\n", false, false, None),
+            Event::Code(t) => self.push_styled(t, true, None, color_of(t)),
+            Event::SoftBreak => self.push_styled(" ", false, None, None),
+            Event::HardBreak => self.push_styled("\n", false, None, None),
             Event::FootnoteReference(name) => {
                 let number = footnote_number(name).to_string();
                 self.sup += 1;
-                self.push_styled(&number, false, true, None);
+                self.link += 1;
+                self.push_styled(&number, false, None, None);
+                self.link -= 1;
                 self.sup -= 1;
             }
             Event::Start(Tag::Strong) => self.bold += 1,
@@ -314,8 +333,14 @@ impl Inline {
             Event::End(TagEnd::Emphasis) => self.italic = self.italic.saturating_sub(1),
             Event::Start(Tag::Strikethrough) => self.strike += 1,
             Event::End(TagEnd::Strikethrough) => self.strike = self.strike.saturating_sub(1),
-            Event::Start(Tag::Link { .. }) => self.link += 1,
-            Event::End(TagEnd::Link) => self.link = self.link.saturating_sub(1),
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                self.link += 1;
+                self.hrefs.push(dest_url.to_string());
+            }
+            Event::End(TagEnd::Link) => {
+                self.link = self.link.saturating_sub(1);
+                self.hrefs.pop();
+            }
             // Images are shown as their alt text.
             Event::Start(Tag::Image { .. }) | Event::End(TagEnd::Image) => {}
             _ => return false,
@@ -824,6 +849,46 @@ fn parse_table<'a>(events: &mut impl Iterator<Item = Event<'a>>) -> Block {
     Block::Table { header, rows }
 }
 
+/// GitHub's anchor for a heading: lowercase, spaces to hyphens, other
+/// whitespace and punctuation removed (hyphens and underscores stay), markup
+/// already gone because the heading is plain spans.
+fn slug(text: &str) -> String {
+    let mut out = String::new();
+    for c in text.trim().chars() {
+        if c == ' ' {
+            out.push('-');
+        } else if c.is_alphanumeric() || c == '-' || c == '_' {
+            out.extend(c.to_lowercase());
+        }
+    }
+    out
+}
+
+/// The top-level block index of the heading a `#anchor` link points at. Repeated
+/// headings get `-1`, `-2`, ... in order, as on GitHub. Only top-level headings
+/// can be scrolled to.
+pub fn anchor_index(blocks: &[Block], anchor: &str) -> Option<usize> {
+    let want = anchor.trim_start_matches('#').to_lowercase();
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (i, block) in blocks.iter().enumerate() {
+        let Block::Heading(_, spans) = block else {
+            continue;
+        };
+        let base = slug(&spans.iter().map(|s| s.text.as_str()).collect::<String>());
+        let count = seen.entry(base.clone()).or_insert(0);
+        let name = if *count == 0 {
+            base
+        } else {
+            format!("{base}-{count}")
+        };
+        *count += 1;
+        if name == want {
+            return Some(i);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -953,6 +1018,87 @@ mod tests {
             panic!("expected nested list");
         };
         assert_eq!(inner[0].checked, Some(true));
+    }
+
+    #[test]
+    fn links_carry_their_destination() {
+        let blocks = parse(
+            "See [GitHub Pages](https://pages.github.com/) or [below](#sample-section) or https://example.com/x.",
+        );
+        let hrefs: Vec<(&str, &str)> = para(&blocks, 0)
+            .iter()
+            .filter_map(|s| s.href.as_deref().map(|h| (s.text.as_str(), h)))
+            .collect();
+        assert_eq!(
+            hrefs,
+            vec![
+                ("GitHub Pages", "https://pages.github.com/"),
+                ("below", "#sample-section"),
+                ("https://example.com/x", "https://example.com/x"),
+            ]
+        );
+        // Plain text around them has no destination.
+        assert!(para(&blocks, 0)[0].href.is_none());
+    }
+
+    #[test]
+    fn heading_anchors_follow_githubs_rules() {
+        let blocks = parse(
+            "# Intro\n\n## This'll be a _Helpful_ Section About the Greek Letter Θ!\n\n## Not unique\n\ntext\n\n## Not unique\n\n## Not unique\n",
+        );
+        assert_eq!(anchor_index(&blocks, "intro"), Some(0));
+        assert_eq!(
+            anchor_index(
+                &blocks,
+                "thisll-be-a-helpful-section-about-the-greek-letter-θ"
+            ),
+            Some(1)
+        );
+        assert_eq!(anchor_index(&blocks, "not-unique"), Some(2));
+        assert_eq!(anchor_index(&blocks, "not-unique-1"), Some(4));
+        assert_eq!(anchor_index(&blocks, "not-unique-2"), Some(5));
+        assert_eq!(anchor_index(&blocks, "#INTRO"), Some(0));
+        assert_eq!(anchor_index(&blocks, "missing"), None);
+    }
+
+    /// `samples/markdown-demo.md` shows every supported feature; this keeps it
+    /// honest. Skipped when the samples folder is not there.
+    #[test]
+    fn the_demo_note_exercises_every_feature() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../samples/markdown-demo.md");
+        let Ok(source) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let blocks = parse(&source);
+
+        // Every `](#anchor)` link in the note points at a real heading.
+        let mut rest = source.as_str();
+        let mut anchors = 0;
+        while let Some(at) = rest.find("](#") {
+            let tail = &rest[at + 3..];
+            let end = tail.find(')').expect("closed link");
+            let name = &tail[..end];
+            assert!(anchor_index(&blocks, name).is_some(), "dead anchor #{name}");
+            anchors += 1;
+            rest = &tail[end..];
+        }
+        assert!(anchors >= 15, "expected the contents list and more, got {anchors}");
+
+        let alerts = blocks
+            .iter()
+            .filter(|b| matches!(b, Block::Alert { .. }))
+            .count();
+        assert_eq!(alerts, 5);
+        assert!(matches!(blocks.last(), Some(Block::Footnotes(n)) if n.len() == 2));
+        assert!(markers(&source).len() >= 12, "tasks of every spelling");
+        assert!(blocks.iter().any(|b| matches!(b, Block::Table { .. })));
+        assert!(blocks
+            .iter()
+            .any(|b| matches!(b, Block::Code { lang: Some(l), .. } if l == "sql")));
+        // The raw script tag is shown as text, never dropped or run.
+        assert!(blocks.iter().any(|b| matches!(b, Block::Paragraph(s)
+            if s.iter().any(|s| s.text.contains("<script>")))));
     }
 
     #[test]

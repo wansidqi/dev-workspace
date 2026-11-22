@@ -108,6 +108,8 @@ struct Root {
     note_preview: Option<(SharedString, Vec<markdown::Block>)>,
     /// Code block whose copy button was just pressed (shows "Copied" briefly).
     note_copied: Option<usize>,
+    /// Scroll position of the rendered note, so `#anchor` links can scroll it.
+    note_scroll: gpui::ScrollHandle,
     /// Tasks whose subtasks are folded away in the project's task tree.
     collapsed_tasks: std::collections::HashSet<TaskId>,
     /// The fold or unfold that is animating, so only those rows move.
@@ -438,6 +440,7 @@ impl Root {
             editor
         });
         self.open_note = Some((id, title, editor));
+        self.note_scroll = gpui::ScrollHandle::new();
         self.note_mode = mode;
         self.note_preview = None;
         cx.notify();
@@ -1113,6 +1116,7 @@ fn main() -> Result<()> {
                         open_note: None,
                         note_mode: note_page::NoteMode::Edit,
                         note_copied: None,
+                        note_scroll: gpui::ScrollHandle::new(),
                         collapsed_tasks: std::collections::HashSet::new(),
                         tree_motion: None,
                         tree_motion_token: 0,

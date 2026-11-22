@@ -67,6 +67,28 @@ impl Root {
         }
     }
 
+    /// Follows a link clicked in the preview. `#anchor` scrolls to that heading
+    /// in the note; web and mail links open in the default app; anything else
+    /// (relative file paths, other schemes) is refused with a toast, since the
+    /// target is untrusted.
+    pub fn follow_note_link(&mut self, href: &str, cx: &mut Context<Self>) {
+        if let Some(anchor) = href.strip_prefix('#') {
+            let target = self
+                .note_preview
+                .as_ref()
+                .and_then(|(_, blocks)| markdown::anchor_index(blocks, anchor));
+            if let Some(ix) = target {
+                self.note_scroll.scroll_to_top_of_item(ix);
+                cx.notify();
+            }
+            return;
+        }
+        if let Err(message) = crate::external::open_url(href) {
+            self.workspace_tools
+                .update(cx, |tools, cx| tools.set_notice(message, true, cx));
+        }
+    }
+
     fn mode_segment(&self, mode: NoteMode, cx: &mut Context<Self>) -> AnyElement {
         segment(
             &self.theme,
@@ -144,7 +166,11 @@ impl Root {
             let blocks = this.note_preview.as_ref().map(|(_, b)| b.as_slice());
             let copy_root = root.clone();
             let toggle_root = root.clone();
+            let link_root = root.clone();
             let hook = markdown_view::CopyHook {
+                on_link: std::rc::Rc::new(move |href, _window, cx| {
+                    link_root.update(cx, |this, cx| this.follow_note_link(&href, cx));
+                }),
                 on_toggle: std::rc::Rc::new(move |range, window, cx| {
                     toggle_root.update(cx, |this, cx| {
                         if let Some((_, _, editor)) = this.open_note.clone() {
@@ -190,17 +216,17 @@ impl Root {
                 .min_h(px(0.0))
                 .min_w(px(0.0))
                 .overflow_y_scroll()
+                .track_scroll(&this.note_scroll)
+                .gap(theme.space_3)
+                .px(theme.space_2)
+                .pt(theme.space_3)
+                .pb(theme.space_6)
                 .when(centred, |d| d.items_center())
-                .child(
-                    div()
-                        .w_full()
-                        .max_w(px(markdown_view::NOTE_MAX_WIDTH))
-                        .mb(theme.space_4)
-                        .px(theme.space_2)
-                        .pt(theme.space_3)
-                        .pb(theme.space_2)
-                        .child(markdown_view::render(blocks.unwrap_or(&[]), &theme, &hook)),
-                )
+                .children(markdown_view::render_blocks(
+                    blocks.unwrap_or(&[]),
+                    &theme,
+                    &hook,
+                ))
                 .into_any_element()
         };
 
