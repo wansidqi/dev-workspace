@@ -584,9 +584,8 @@ fn inline(
                 color: None,
             }),
         });
-        // A supported colour model shows a circle in that colour after the code,
-        // as GitHub does. GitHub outlines it so dark colours stay visible; a text
-        // run cannot draw an outline, so the circle sits on a lighter backing.
+        // A supported colour model shows a plain circle in that colour after the
+        // code, as GitHub does, with no box behind it.
         if let Some([r, g, b]) = span.swatch {
             const GAP: &str = " ";
             const DOT: &str = "\u{25CF}";
@@ -604,7 +603,7 @@ fn inline(
                 len: DOT.len(),
                 font: font(CODE_FONT),
                 color: gpui::rgb(u32::from_be_bytes([0, r, g, b])).into(),
-                background_color: Some(theme.border_strong),
+                background_color: None,
                 underline: None,
                 strikethrough: None,
             });

@@ -373,6 +373,11 @@ impl NoteEditor {
         }
     }
 
+    /// The editor's scroller, so a split view can scroll the preview with it.
+    pub fn scroll_handle(&self) -> ScrollHandle {
+        self.scroll_handle.clone()
+    }
+
     /// Ticks or unticks the task marker at `range` (a click on a preview
     /// checkbox) and persists the note like any other edit. Ignored if the text
     /// no longer matches what the preview saw.

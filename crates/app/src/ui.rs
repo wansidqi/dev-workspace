@@ -16,6 +16,7 @@ use gpui::{
 pub enum Icon {
     Archive,
     ArrowLeft,
+    ArrowLeftRight,
     Check,
     ChevronDown,
     ChevronLeft,
@@ -73,6 +74,7 @@ impl Icon {
         match self {
             Icon::Archive => icon!("archive"),
             Icon::ArrowLeft => icon!("arrow-left"),
+            Icon::ArrowLeftRight => icon!("arrow-left-right"),
             Icon::Check => icon!("check"),
             Icon::ChevronDown => icon!("chevron-down"),
             Icon::ChevronLeft => icon!("chevron-left"),

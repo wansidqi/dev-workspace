@@ -145,6 +145,10 @@ pub fn lookup(name: &str) -> Option<(&'static str, Option<&'static str>)> {
             "A markdown note with a checklist icon.",
         ),
         "task-note-rename" => Some(("Rename note", None)),
+        "note-split-swap" => tip(
+            "Swap sides",
+            "Put the editor on the other side of the preview. Both scroll together.",
+        ),
         "task-collapse" => Some(("Fold or unfold subtasks", None)),
         "tasks-fold-all" => Some(("Fold or unfold every task with subtasks", None)),
 

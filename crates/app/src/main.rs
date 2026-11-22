@@ -110,6 +110,11 @@ struct Root {
     note_copied: Option<usize>,
     /// Scroll position of the rendered note, so `#anchor` links can scroll it.
     note_scroll: gpui::ScrollHandle,
+    /// Last scroll offsets (editor, preview) seen in the split view, to tell
+    /// which side the user moved. See `note_page.rs`.
+    note_scroll_seen: Option<(gpui::Pixels, gpui::Pixels)>,
+    /// Split view: editor on the right, preview on the left.
+    note_split_swapped: bool,
     /// Tasks whose subtasks are folded away in the project's task tree.
     collapsed_tasks: std::collections::HashSet<TaskId>,
     /// The fold or unfold that is animating, so only those rows move.
@@ -441,6 +446,7 @@ impl Root {
         });
         self.open_note = Some((id, title, editor));
         self.note_scroll = gpui::ScrollHandle::new();
+        self.note_scroll_seen = None;
         self.note_mode = mode;
         self.note_preview = None;
         cx.notify();
@@ -727,11 +733,13 @@ impl Root {
         let project = self.state.read(cx).selected_project.map(|p| p.0);
         let task = self.open_task.as_ref().map(|t| t.read(cx).task_id().0);
         let terminal_open = self.terminal_open;
+        let note_split_swapped = self.note_split_swapped;
         self.settings.update(cx, |store, cx| {
             store.update(cx, |s| {
                 s.last_project = project;
                 s.last_task = task;
                 s.terminal_open = terminal_open;
+                s.note_split_swapped = note_split_swapped;
             })
         });
     }
@@ -1117,6 +1125,8 @@ fn main() -> Result<()> {
                         note_mode: note_page::NoteMode::Edit,
                         note_copied: None,
                         note_scroll: gpui::ScrollHandle::new(),
+                        note_scroll_seen: None,
+                        note_split_swapped: saved.note_split_swapped,
                         collapsed_tasks: std::collections::HashSet::new(),
                         tree_motion: None,
                         tree_motion_token: 0,

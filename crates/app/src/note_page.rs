@@ -2,13 +2,16 @@
 //! toolbar and the body. Lives in its own module so `main.rs` stays small.
 
 use crate::theme::TypeScale;
-use gpui::{div, prelude::*, px, AnyElement, Context, IntoElement, SharedString, Window};
+use gpui::{
+    div, point, prelude::*, px, AnyElement, Context, IntoElement, Pixels, ScrollHandle,
+    SharedString, Window,
+};
 
 use crate::markdown;
 use crate::markdown_view;
 use crate::note_format::Format;
 use crate::theme::GlassTheme;
-use crate::ui::{back_button, icon_chip, page_header, segment, segmented, Icon};
+use crate::ui::{back_button, icon_button, icon_chip, page_header, segment, segmented, Icon};
 use crate::Root;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +92,41 @@ impl Root {
         }
     }
 
+    /// Keeps the two halves of the split view scrolled to the same place: when
+    /// one moved since the last frame and the other did not, the other follows,
+    /// by fraction of its scrollable height (the two are different heights).
+    /// Our own correction is recorded as seen so it is not echoed back.
+    fn sync_split_scroll(&mut self, editor: &ScrollHandle) {
+        let preview = self.note_scroll.clone();
+        let (e, p) = (editor.offset().y, preview.offset().y);
+        let Some((last_e, last_p)) = self.note_scroll_seen else {
+            self.note_scroll_seen = Some((e, p));
+            return;
+        };
+        // Where `to` should sit so it is as far down as `from`.
+        let follow = |from: &ScrollHandle, to: &ScrollHandle| -> Option<Pixels> {
+            let (from_max, to_max) = (from.max_offset().y, to.max_offset().y);
+            if from_max <= px(0.0) || to_max <= px(0.0) {
+                return None;
+            }
+            let fraction = (-from.offset().y / from_max).clamp(0.0, 1.0);
+            Some(-(to_max * fraction))
+        };
+        let (mut seen_e, mut seen_p) = (e, p);
+        if e != last_e && p == last_p {
+            if let Some(y) = follow(editor, &preview) {
+                preview.set_offset(point(preview.offset().x, y));
+                seen_p = preview.offset().y;
+            }
+        } else if p != last_p && e == last_e {
+            if let Some(y) = follow(&preview, editor) {
+                editor.set_offset(point(editor.offset().x, y));
+                seen_e = editor.offset().y;
+            }
+        }
+        self.note_scroll_seen = Some((seen_e, seen_p));
+    }
+
     fn mode_segment(&self, mode: NoteMode, cx: &mut Context<Self>) -> AnyElement {
         segment(
             &self.theme,
@@ -104,6 +142,7 @@ impl Root {
 
     pub fn set_note_mode(&mut self, mode: NoteMode, window: &mut Window, cx: &mut Context<Self>) {
         self.note_mode = mode;
+        self.note_scroll_seen = None;
         if let Some((_, _, editor)) = &self.open_note {
             if mode == NoteMode::Preview {
                 // The editor leaves the tree; keep global shortcuts working.
@@ -230,6 +269,11 @@ impl Root {
                 .into_any_element()
         };
 
+        if self.note_mode == NoteMode::Split {
+            let handle = editor.read(cx).scroll_handle();
+            self.sync_split_scroll(&handle);
+        }
+
         let body = match self.note_mode {
             NoteMode::Edit => div().flex().flex_1().min_h(px(0.0)).child(editor.clone()),
             NoteMode::Preview => div()
@@ -237,13 +281,30 @@ impl Root {
                 .flex_1()
                 .min_h(px(0.0))
                 .child(preview(self, true)),
-            NoteMode::Split => div()
-                .flex()
-                .flex_1()
-                .min_h(px(0.0))
-                .gap(theme.space_4)
-                .child(div().flex().flex_1().min_w(px(0.0)).child(editor.clone()))
-                .child(preview(self, false)),
+            NoteMode::Split => {
+                let editor_pane = div()
+                    .flex()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(editor.clone())
+                    .into_any_element();
+                let preview_pane = preview(self, false);
+                let (left, right) = if self.note_split_swapped {
+                    (preview_pane, editor_pane)
+                } else {
+                    (editor_pane, preview_pane)
+                };
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .gap(theme.space_4)
+                    // A wheel turn on either half redraws, which is when the
+                    // other half is brought along (see `sync_split_scroll`).
+                    .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
+                    .child(left)
+                    .child(right)
+            }
         };
 
         let (words, chars) = {
@@ -255,6 +316,20 @@ impl Root {
             .flex()
             .items_center()
             .gap(theme.space_3)
+            .when(self.note_mode == NoteMode::Split, |d| {
+                d.child(
+                    icon_button(
+                        &theme,
+                        Icon::ArrowLeftRight,
+                        "note-split-swap",
+                        theme.text_primary,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.note_split_swapped = !this.note_split_swapped;
+                        cx.notify();
+                    })),
+                )
+            })
             .child(
                 segmented(&theme)
                     .child(self.mode_segment(NoteMode::Edit, cx))

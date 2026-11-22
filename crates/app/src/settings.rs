@@ -33,6 +33,9 @@ pub struct Settings {
     pub last_task: Option<i64>,
     /// Whether the terminal panel was visible.
     pub terminal_open: bool,
+    /// Split note view: the editor sits on the right of the preview instead of
+    /// the left.
+    pub note_split_swapped: bool,
     /// Command (program plus optional fixed arguments) used by "Open in IDE".
     pub ide_command: String,
     /// Width of the terminal panel, in pixels (set by dragging its edge).
@@ -68,6 +71,7 @@ impl Default for Settings {
             last_project: None,
             last_task: None,
             terminal_open: false,
+            note_split_swapped: false,
             ide_command: DEFAULT_IDE_COMMAND.to_string(),
             terminal_width: DEFAULT_TERMINAL_WIDTH,
             terminal_scrollback: DEFAULT_TERMINAL_SCROLLBACK,
@@ -100,6 +104,9 @@ impl Settings {
                 "last_project" => settings.last_project = parse_id(value),
                 "last_task" => settings.last_task = parse_id(value),
                 "terminal_open" => settings.terminal_open = matches!(value, "true" | "1"),
+                "note_split_swapped" => {
+                    settings.note_split_swapped = matches!(value, "true" | "1")
+                }
                 // A blank command keeps the default rather than breaking
                 // "Open in IDE".
                 "ide_command" if !value.is_empty() => settings.ide_command = value.to_string(),
@@ -163,6 +170,7 @@ impl Settings {
             out.push_str(&format!("last_task={id}\n"));
         }
         out.push_str(&format!("terminal_open={}\n", self.terminal_open));
+        out.push_str(&format!("note_split_swapped={}\n", self.note_split_swapped));
         out.push_str(&format!("terminal_width={}\n", self.terminal_width));
         out.push_str(&format!(
             "terminal_scrollback={}\n",
@@ -330,6 +338,7 @@ mod tests {
             last_project: Some(7),
             last_task: Some(42),
             terminal_open: true,
+            note_split_swapped: true,
             ide_command: "code --reuse-window".to_string(),
             terminal_width: 640,
             terminal_scrollback: 5000,
