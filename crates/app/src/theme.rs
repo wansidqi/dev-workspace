@@ -296,6 +296,14 @@ pub fn syntax_color(theme: &GlassTheme, token: crate::highlight::Token) -> Hsla 
     }
 }
 
+/// Fill of a ticked checkbox in rendered notes: the familiar blue of an editor's
+/// markdown preview, with a white tick, so task items read as checkboxes
+/// rather than as the app's lime accent.
+pub fn checkbox_fill(theme: &GlassTheme) -> Hsla {
+    let l = if theme.is_light { 0.50 } else { 0.62 };
+    hsla(215.0 / 360.0, 0.92, l, 1.0)
+}
+
 /// A stable colour for a label (tag or repo name): the same text always gets
 /// the same hue, so chips are recognisable at a glance. Saturation is fixed
 /// and lightness follows the theme, so every hue stays readable on both the

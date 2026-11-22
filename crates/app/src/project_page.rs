@@ -14,7 +14,7 @@ use crate::task_tree::{
 };
 use crate::theme::{GlassTheme, TypeScale};
 use crate::ui::{
-    button, chip, empty_state, filter_chip, icon, icon_button, progress_pill, section_label,
+    button, chip, empty_state, filter_chip, icon, icon_button, section_label,
     status_style,
     ButtonKind, Icon,
 };
@@ -1010,13 +1010,6 @@ impl Root {
         let note_count = notes.len();
         let editing_note_id = self.editing_note.as_ref().map(|(id, _)| *id);
 
-        let progress: HashMap<_, _> = {
-            let state = self.state.read(cx);
-            notes
-                .iter()
-                .filter_map(|n| state.note_progress(n.id).map(|p| (n.id, p)))
-                .collect()
-        };
         let note_rows: Vec<AnyElement> = notes
             .into_iter()
             .map(|note| {
@@ -1068,11 +1061,6 @@ impl Root {
                                 .child(note.kind.label().to_uppercase()),
                         )
                     })
-                    .children(
-                        progress
-                            .get(&id)
-                            .map(|&(done, total)| progress_pill(&theme, done, total)),
-                    )
                     .child(if hovered {
                         div()
                             .flex()

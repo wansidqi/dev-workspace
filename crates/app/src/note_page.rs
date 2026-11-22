@@ -2,7 +2,6 @@
 //! toolbar and the body. Lives in its own module so `main.rs` stays small.
 
 use crate::theme::TypeScale;
-use devspace_core::NoteKind;
 use gpui::{div, prelude::*, px, AnyElement, Context, IntoElement, SharedString, Window};
 
 use crate::markdown;
@@ -21,10 +20,8 @@ pub enum NoteMode {
 
 impl NoteMode {
     /// Notes with content open as a rendered view; empty ones open for typing.
-    pub fn initial(content: &str, kind: NoteKind) -> Self {
-        // Checklists open as the rendered list (with its quick-add row) even
-        // when empty; other empty notes open for typing.
-        if content.trim().is_empty() && kind != NoteKind::Todo {
+    pub fn initial(content: &str) -> Self {
+        if content.trim().is_empty() {
             NoteMode::Edit
         } else {
             NoteMode::Preview
@@ -134,48 +131,24 @@ impl Root {
         if self.note_mode != NoteMode::Edit {
             self.refresh_note_preview(cx);
         }
-        let Some((open_id, title, editor)) = self.open_note.clone() else {
+        let Some((_, title, editor)) = self.open_note.clone() else {
             return div().into_any_element();
         };
 
         // The rendered note reads as a page: a comfortable measure, centred
-        // in the available width.
-        // The quick-add row belongs on checklists, and on any note that already
-        // has tasks; plain prose notes stay uncluttered.
-        let show_add = {
-            let is_todo = self
-                .state
-                .read(cx)
-                .notes
-                .iter()
-                .any(|n| n.id == open_id && n.kind == NoteKind::Todo);
-            let has_tasks = self
-                .note_preview
-                .as_ref()
-                .is_some_and(|(_, blocks)| markdown::task_counts(blocks).1 > 0);
-            is_todo || has_tasks
-        };
+        // in the available width, text left-aligned.
         let root = cx.entity();
-        let preview =|this: &Self, centred: bool| -> AnyElement {
+        let preview = |this: &Self, centred: bool| -> AnyElement {
             let root = root.clone();
             let editable = this.note_mode == NoteMode::Preview;
             let blocks = this.note_preview.as_ref().map(|(_, b)| b.as_slice());
             let copy_root = root.clone();
-            let edit_root = root.clone();
-            let hide_root = root.clone();
+            let toggle_root = root.clone();
             let hook = markdown_view::CopyHook {
-                hide_done: this.note_hide_done,
-                on_toggle_hide_done: std::rc::Rc::new(move |_window, cx| {
-                    hide_root.update(cx, |this, cx| {
-                        this.note_hide_done = !this.note_hide_done;
-                        cx.notify();
-                    });
-                }),
-                add_task: show_add.then(|| this.note_task_input.clone()).flatten(),
-                on_edit: std::rc::Rc::new(move |edit, window, cx| {
-                    edit_root.update(cx, |this, cx| {
+                on_toggle: std::rc::Rc::new(move |range, window, cx| {
+                    toggle_root.update(cx, |this, cx| {
                         if let Some((_, _, editor)) = this.open_note.clone() {
-                            editor.update(cx, |e, cx| e.apply_task_edit(&edit, window, cx));
+                            editor.update(cx, |e, cx| e.toggle_task(&range, window, cx));
                         }
                         cx.notify();
                     });

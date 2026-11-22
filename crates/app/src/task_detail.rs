@@ -24,7 +24,7 @@ use crate::text_input::TextInput;
 use crate::theme::GlassTheme;
 use crate::ui::{
     back_button, button, chip, empty_state, icon, icon_button, icon_chip, notice, section_label,
-    progress_pill, segment, segmented, status_style, tab, tab_bar, ButtonKind, Icon,
+    segment, segmented, status_style, tab, tab_bar, ButtonKind, Icon,
 };
 
 pub type CloseHandler = Box<dyn Fn(&mut Window, &mut App)>;
@@ -843,13 +843,6 @@ impl TaskDetail {
                 "Notes are markdown files: write down decisions, scripts or SQL for this task.",
             ));
         }
-        let progress: std::collections::HashMap<NoteId, (usize, usize)> = {
-            let state = self.state.read(cx);
-            notes
-                .iter()
-                .filter_map(|n| state.note_progress(n.id).map(|p| (n.id, p)))
-                .collect()
-        };
         let editing_note = self.editing_note.clone();
         let rows = notes.into_iter().map(|note| {
             let id = note.id;
@@ -900,11 +893,6 @@ impl TaskDetail {
                                 ),
                             },
                         )),
-                )
-                .children(
-                    progress
-                        .get(&id)
-                        .map(|&(done, total)| progress_pill(&theme, done, total)),
                 )
                 .child(
                     row_actions()

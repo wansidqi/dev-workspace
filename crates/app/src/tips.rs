@@ -142,17 +142,11 @@ pub fn lookup(name: &str) -> Option<(&'static str, Option<&'static str>)> {
         // ---- Notes and checklists ------------------------------------------
         "note-new-todo" => tip(
             "New checklist",
-            "A note that opens as a task list with a quick-add row.",
+            "A markdown note with a checklist icon.",
         ),
         "task-note-rename" => Some(("Rename note", None)),
         "task-collapse" => Some(("Fold or unfold subtasks", None)),
         "tasks-fold-all" => Some(("Fold or unfold every task with subtasks", None)),
-        "task-toggle" => Some(("Tick or untick", None)),
-        "task-priority" => tip(
-            "Priority",
-            "Click to cycle low, med, high, urgent, none. Saved in the note as !high.",
-        ),
-        "note-hide-done" => Some(("Hide or show finished tasks", None)),
 
         _ => None,
     }

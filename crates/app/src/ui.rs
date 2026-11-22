@@ -277,48 +277,6 @@ fn icon_button_inner(
         ))
 }
 
-/// "3/5" with a thin bar, for a note's task progress in lists. The bar turns
-/// success-coloured when every task is done (the count says it too, so colour
-/// is never the only signal).
-pub fn progress_pill(theme: &GlassTheme, done: usize, total: usize) -> Div {
-    let fraction = if total == 0 {
-        0.0
-    } else {
-        done as f32 / total as f32
-    };
-    let fill = if done >= total && total > 0 {
-        theme.success
-    } else {
-        theme.accent
-    };
-    div()
-        .flex()
-        .flex_none()
-        .items_center()
-        .gap(theme.space_2)
-        .child(
-            div()
-                .t_small()
-                .t_code()
-                .text_color(theme.text_secondary)
-                .child(format!("{done}/{total}")),
-        )
-        .child(
-            div()
-                .w(px(36.0))
-                .h(px(3.0))
-                .rounded(px(2.0))
-                .bg(theme.border_light)
-                .child(
-                    div()
-                        .h_full()
-                        .w(gpui::relative(fraction))
-                        .rounded(px(2.0))
-                        .bg(fill),
-                ),
-        )
-}
-
 /// A small coloured pill: status, kind, count. `color` tints both the text and
 /// a faint fill, so it reads on any surface.
 pub fn chip(theme: &GlassTheme, label: impl Into<SharedString>, color: Hsla) -> Div {

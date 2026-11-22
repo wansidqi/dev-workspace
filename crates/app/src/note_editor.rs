@@ -373,20 +373,20 @@ impl NoteEditor {
         }
     }
 
-    /// Applies a task change asked for by the preview (tick, priority, new
-    /// task) and persists the note like any other edit. Ignored if the text no
-    /// longer matches what the preview saw.
-    pub fn apply_task_edit(
+    /// Ticks or unticks the task marker at `range` (a click on a preview
+    /// checkbox) and persists the note like any other edit. Ignored if the text
+    /// no longer matches what the preview saw.
+    pub fn toggle_task(
         &mut self,
-        edit: &crate::markdown::TaskEdit,
+        range: &std::ops::Range<usize>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((range, text)) = crate::markdown::task_edit(&self.content, edit) else {
+        let Some((replace, text)) = crate::markdown::toggle_marker(&self.content, range) else {
             return;
         };
         let mut content = self.content.to_string();
-        content.replace_range(range, &text);
+        content.replace_range(replace, text);
         self.content = content.into();
         let end = self.content.len();
         self.selected_range = end..end;

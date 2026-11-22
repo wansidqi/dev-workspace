@@ -1,14 +1,21 @@
 //! Markdown → a small block model for the note preview.
 //!
 //! Parsing is pure (no GPUI) so it can be unit tested; `markdown_view.rs`
-//! turns the blocks into elements. Raw HTML in a note is shown as plain text,
-//! never interpreted, since notes are untrusted input.
+//! turns the blocks into elements. The target is GitHub's "Basic writing and
+//! formatting syntax" page: headings, bold/italic/strikethrough, `<ins>`,
+//! `<sub>`, `<sup>`, quotes, alerts (`> [!NOTE]`), inline and fenced code,
+//! colour swatches for `#RRGGBB` / `rgb()` / `hsl()` in backticks, links and
+//! bare URLs, line breaks, lists, `- [ ]` task items, tables, footnotes,
+//! `:emoji:` shortcodes and `<!-- hidden comments -->`. Other raw HTML in a
+//! note is shown as plain text, never interpreted, since notes are untrusted
+//! input.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 
-use devspace_core::TaskPriority;
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{
+    BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd,
+};
 
 /// A run of text sharing one style.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -19,6 +26,34 @@ pub struct Span {
     pub strike: bool,
     pub code: bool,
     pub link: bool,
+    /// `<ins>`: underlined text.
+    pub underline: bool,
+    /// For inline code that is a supported colour (`#0969DA`, `rgb(...)`,
+    /// `hsl(...)`): the colour, drawn as a swatch before the text.
+    pub swatch: Option<[u8; 3]>,
+}
+
+/// The five GitHub alert types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlertKind {
+    Note,
+    Tip,
+    Important,
+    Warning,
+    Caution,
+}
+
+impl AlertKind {
+    /// The title shown on the alert.
+    pub fn title(self) -> &'static str {
+        match self {
+            AlertKind::Note => "Note",
+            AlertKind::Tip => "Tip",
+            AlertKind::Important => "Important",
+            AlertKind::Warning => "Warning",
+            AlertKind::Caution => "Caution",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +65,10 @@ pub enum Block {
         text: String,
     },
     Quote(Vec<Block>),
+    Alert {
+        kind: AlertKind,
+        blocks: Vec<Block>,
+    },
     List {
         start: Option<u64>,
         items: Vec<Item>,
@@ -39,19 +78,23 @@ pub enum Block {
         header: Vec<Vec<Span>>,
         rows: Vec<Vec<Vec<Span>>>,
     },
+    /// A footnote definition as written; `parse` gathers these into
+    /// [`Block::Footnotes`] at the end of the note.
+    FootnoteDef {
+        name: String,
+        blocks: Vec<Block>,
+    },
+    /// The footnotes, numbered in order of first reference.
+    Footnotes(Vec<(usize, Vec<Block>)>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
-    /// `Some` for a task-list item (`- [ ]` / `- [x]`).
+    /// `Some` for a task-list item (`- [ ]` / `- [x]`), drawn as a checkbox.
     pub checked: Option<bool>,
     /// Where the `[ ]` / `[x]` marker sits in the note text, so the preview can
-    /// tick it. `None` when it cannot be located reliably.
+    /// tick it. `None` when it cannot be located.
     pub marker: Option<Range<usize>>,
-    /// Priority written after the marker (`[ ] !high text`), already removed from
-    /// the item text, and where that token sits in the note.
-    pub priority: Option<TaskPriority>,
-    pub priority_token: Option<Range<usize>>,
     pub blocks: Vec<Block>,
 }
 
@@ -60,6 +103,25 @@ pub struct Item {
 const MAX_PREVIEW_BYTES: usize = 512 * 1024;
 /// Nesting limit for quotes and lists, against pathological input.
 const MAX_DEPTH: usize = 16;
+
+thread_local! {
+    /// Footnote names in order of first reference, for the current `parse`.
+    static FOOTNOTE_ORDER: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The 1-based number of a footnote, assigned on first use.
+fn footnote_number(name: &str) -> usize {
+    FOOTNOTE_ORDER.with(|order| {
+        let mut order = order.borrow_mut();
+        match order.iter().position(|n| n == name) {
+            Some(i) => i + 1,
+            None => {
+                order.push(name.to_string());
+                order.len()
+            }
+        }
+    })
+}
 
 /// Parses markdown into blocks.
 pub fn parse(source: &str) -> Vec<Block> {
@@ -72,16 +134,33 @@ pub fn parse(source: &str) -> Vec<Block> {
     } else {
         source
     };
-    let options =
-        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    FOOTNOTE_ORDER.with(|order| order.borrow_mut().clear());
+    let options = Options::ENABLE_TABLES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_FOOTNOTES
+        | Options::ENABLE_GFM;
     let pos = Cell::new((0, 0));
     let mut events = Tracked {
         inner: Parser::new_ext(source, options).into_offset_iter(),
         pos: &pos,
     };
-    let mut blocks = parse_blocks(&mut events, None, 0, &pos, true);
-    annotate_priorities(&mut blocks, source);
-    blocks
+    let blocks = parse_blocks(&mut events, None, 0, &pos);
+
+    // Footnote definitions move to the end, numbered by first reference.
+    let mut body = Vec::with_capacity(blocks.len());
+    let mut notes: Vec<(usize, Vec<Block>)> = Vec::new();
+    for block in blocks {
+        match block {
+            Block::FootnoteDef { name, blocks } => notes.push((footnote_number(&name), blocks)),
+            other => body.push(other),
+        }
+    }
+    if !notes.is_empty() {
+        notes.sort_by_key(|(n, _)| *n);
+        body.push(Block::Footnotes(notes));
+    }
+    body
 }
 
 /// Passes events through while remembering the source range of the last one, so
@@ -100,6 +179,21 @@ impl<'a, 'p, I: Iterator<Item = (Event<'a>, Range<usize>)>> Iterator for Tracked
     }
 }
 
+/// Replays buffered events with the range each had, keeping `pos` current.
+struct Replay<'a, 'p> {
+    events: std::vec::IntoIter<(Event<'a>, (usize, usize))>,
+    pos: &'p Cell<(usize, usize)>,
+}
+
+impl<'a, 'p> Iterator for Replay<'a, 'p> {
+    type Item = Event<'a>;
+    fn next(&mut self) -> Option<Event<'a>> {
+        let (event, range) = self.events.next()?;
+        self.pos.set(range);
+        Some(event)
+    }
+}
+
 #[derive(Default)]
 struct Inline {
     spans: Vec<Span>,
@@ -107,28 +201,43 @@ struct Inline {
     italic: u32,
     strike: u32,
     link: u32,
+    ins: u32,
+    sub: u32,
+    sup: u32,
+    /// Inside a `<!-- ... -->` that spans several events.
+    in_comment: bool,
 }
 
 impl Inline {
-    fn push(&mut self, text: &str, code: bool) {
+    fn push_styled(&mut self, text: &str, code: bool, link: bool, swatch: Option<[u8; 3]>) {
         if text.is_empty() {
             return;
         }
+        let text = if !code && (self.sub > 0 || self.sup > 0) {
+            text.chars().map(|c| script_char(c, self.sup > 0)).collect()
+        } else {
+            text.to_string()
+        };
         let span = Span {
-            text: text.to_string(),
+            text,
             bold: self.bold > 0,
             italic: self.italic > 0,
             strike: self.strike > 0,
             code,
-            link: self.link > 0,
+            link: link || self.link > 0,
+            underline: self.ins > 0,
+            swatch,
         };
         // Merge neighbours with identical styling so the view builds fewer runs.
         if let Some(last) = self.spans.last_mut() {
-            if last.bold == span.bold
+            if last.swatch.is_none()
+                && span.swatch.is_none()
+                && last.bold == span.bold
                 && last.italic == span.italic
                 && last.strike == span.strike
                 && last.code == span.code
                 && last.link == span.link
+                && last.underline == span.underline
             {
                 last.text.push_str(&span.text);
                 return;
@@ -137,13 +246,68 @@ impl Inline {
         self.spans.push(span);
     }
 
+    /// Plain text: `:emoji:` shortcodes become emoji and bare URLs become links.
+    fn push_text(&mut self, text: &str) {
+        let text = emojify(text);
+        if self.link > 0 {
+            self.push_styled(&text, false, false, None);
+            return;
+        }
+        let mut rest = text.as_str();
+        while let Some(at) = find_url(rest) {
+            let (before, tail) = rest.split_at(at);
+            let len = url_len(tail);
+            self.push_styled(before, false, false, None);
+            self.push_styled(&tail[..len], false, true, None);
+            rest = &tail[len..];
+        }
+        self.push_styled(rest, false, false, None);
+    }
+
+    /// Inline HTML: the tags GitHub's page documents are honoured, comments are
+    /// hidden, anything else is shown as text.
+    fn html(&mut self, raw: &str) {
+        if self.in_comment {
+            if raw.contains("-->") {
+                self.in_comment = false;
+            }
+            return;
+        }
+        let trimmed = raw.trim();
+        if trimmed.starts_with("<!--") {
+            self.in_comment = !trimmed.contains("-->");
+            return;
+        }
+        match trimmed.to_ascii_lowercase().as_str() {
+            "<ins>" => self.ins += 1,
+            "</ins>" => self.ins = self.ins.saturating_sub(1),
+            "<sub>" => self.sub += 1,
+            "</sub>" => self.sub = self.sub.saturating_sub(1),
+            "<sup>" => self.sup += 1,
+            "</sup>" => self.sup = self.sup.saturating_sub(1),
+            "<br>" | "<br/>" | "<br />" => self.push_styled("\n", false, false, None),
+            _ => self.push_styled(raw, false, false, None),
+        }
+    }
+
     /// Consumes an inline event; returns false when the event is not inline.
     fn handle(&mut self, event: &Event) -> bool {
         match event {
-            Event::Text(t) | Event::Html(t) | Event::InlineHtml(t) => self.push(t, false),
-            Event::Code(t) => self.push(t, true),
-            Event::SoftBreak => self.push(" ", false),
-            Event::HardBreak => self.push("\n", false),
+            Event::Text(t) => {
+                if !self.in_comment {
+                    self.push_text(t);
+                }
+            }
+            Event::Html(t) | Event::InlineHtml(t) => self.html(t),
+            Event::Code(t) => self.push_styled(t, true, false, color_of(t)),
+            Event::SoftBreak => self.push_styled(" ", false, false, None),
+            Event::HardBreak => self.push_styled("\n", false, false, None),
+            Event::FootnoteReference(name) => {
+                let number = footnote_number(name).to_string();
+                self.sup += 1;
+                self.push_styled(&number, false, true, None);
+                self.sup -= 1;
+            }
             Event::Start(Tag::Strong) => self.bold += 1,
             Event::End(TagEnd::Strong) => self.bold = self.bold.saturating_sub(1),
             Event::Start(Tag::Emphasis) => self.italic += 1,
@@ -164,6 +328,171 @@ impl Inline {
     }
 }
 
+/// Superscript or subscript form of `c` where Unicode has one.
+fn script_char(c: char, sup: bool) -> char {
+    const SUP: &str = "0123456789+-=()in";
+    const SUP_TO: &str = "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁱⁿ";
+    const SUB: &str = "0123456789+-=()aehiklmnoprstux";
+    const SUB_TO: &str = "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₕᵢₖₗₘₙₒₚᵣₛₜᵤᵥₓ";
+    let (from, to) = if sup { (SUP, SUP_TO) } else { (SUB, SUB_TO) };
+    match from.chars().position(|f| f == c) {
+        Some(i) => to.chars().nth(i).unwrap_or(c),
+        None => c,
+    }
+}
+
+/// Replaces `:name:` with its emoji for the common GitHub shortcodes; unknown
+/// names are left as written.
+fn emojify(text: &str) -> String {
+    if !text.contains(':') {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find(':') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let name_len = after
+            .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '-')))
+            .unwrap_or(after.len());
+        if name_len > 0 && after[name_len..].starts_with(':') {
+            if let Some(emoji) = emoji_for(&after[..name_len]) {
+                out.push_str(emoji);
+                rest = &after[name_len + 1..];
+                continue;
+            }
+        }
+        out.push(':');
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+fn emoji_for(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "+1" | "thumbsup" => "👍",
+        "-1" | "thumbsdown" => "👎",
+        "tada" => "🎉",
+        "shipit" => "🐿️",
+        "white_check_mark" => "✅",
+        "heavy_check_mark" => "✔️",
+        "x" => "❌",
+        "warning" => "⚠️",
+        "rocket" => "🚀",
+        "fire" => "🔥",
+        "bug" => "🐛",
+        "memo" => "📝",
+        "sparkles" => "✨",
+        "eyes" => "👀",
+        "heart" => "❤️",
+        "smile" => "😄",
+        "bulb" => "💡",
+        "lock" => "🔒",
+        "key" => "🔑",
+        "star" => "⭐",
+        "construction" => "🚧",
+        "hammer" => "🔨",
+        "wrench" => "🔧",
+        "book" => "📖",
+        "pushpin" => "📌",
+        "question" => "❓",
+        "exclamation" => "❗",
+        "zap" => "⚡",
+        "boom" => "💥",
+        "clap" => "👏",
+        "pray" => "🙏",
+        "wave" => "👋",
+        "100" => "💯",
+        "thinking" => "🤔",
+        "point_right" => "👉",
+        "arrow_right" => "➡️",
+        "link" => "🔗",
+        _ => return None,
+    })
+}
+
+/// Byte offset of the next `http://` or `https://` that starts a word.
+fn find_url(text: &str) -> Option<usize> {
+    let mut from = 0;
+    while let Some(i) = text[from..].find("http") {
+        let at = from + i;
+        let tail = &text[at..];
+        let starts_word = text[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| c.is_whitespace() || matches!(c, '(' | '<' | '"' | '\''));
+        let has_scheme = tail.starts_with("http://") || tail.starts_with("https://");
+        let scheme_len = if tail.starts_with("https://") { 8 } else { 7 };
+        if starts_word && has_scheme && tail.len() > scheme_len {
+            return Some(at);
+        }
+        from = at + 4;
+    }
+    None
+}
+
+/// Length of the URL at the start of `tail`: up to whitespace, without the
+/// sentence punctuation that usually follows a pasted link.
+fn url_len(tail: &str) -> usize {
+    let end = tail.find(char::is_whitespace).unwrap_or(tail.len());
+    let url = tail[..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '>', '"', '\'']);
+    url.len()
+}
+
+/// The colour of a supported colour model written as inline code, as RGB:
+/// `#RRGGBB`, `rgb(R,G,B)` or `hsl(H,S%,L%)`. Like GitHub, spaces inside the
+/// backticks (leading or trailing) turn it back into plain code.
+fn color_of(code: &str) -> Option<[u8; 3]> {
+    if code != code.trim() {
+        return None;
+    }
+    if let Some(hex) = code.strip_prefix('#') {
+        if hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            let v = u32::from_str_radix(hex, 16).ok()?;
+            return Some([(v >> 16) as u8, (v >> 8) as u8, v as u8]);
+        }
+        return None;
+    }
+    let lower = code.to_ascii_lowercase();
+    if let Some(args) = lower.strip_prefix("rgb(").and_then(|r| r.strip_suffix(')')) {
+        let parts: Vec<&str> = args.split(',').map(str::trim).collect();
+        if let [r, g, b] = parts[..] {
+            return Some([r.parse().ok()?, g.parse().ok()?, b.parse().ok()?]);
+        }
+        return None;
+    }
+    if let Some(args) = lower.strip_prefix("hsl(").and_then(|r| r.strip_suffix(')')) {
+        let parts: Vec<&str> = args.split(',').map(str::trim).collect();
+        if let [h, s, l] = parts[..] {
+            let h: f32 = h.parse().ok()?;
+            let s: f32 = s.strip_suffix('%')?.parse().ok()?;
+            let l: f32 = l.strip_suffix('%')?.parse().ok()?;
+            if !(0.0..=100.0).contains(&s) || !(0.0..=100.0).contains(&l) {
+                return None;
+            }
+            return Some(hsl_to_rgb(h.rem_euclid(360.0), s / 100.0, l / 100.0));
+        }
+    }
+    None
+}
+
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> [u8; 3] {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = l - c / 2.0;
+    let (r, g, b) = match (h / 60.0) as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let byte = |v: f32| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    [byte(r), byte(g), byte(b)]
+}
+
 fn level(level: HeadingLevel) -> u8 {
     match level {
         HeadingLevel::H1 => 1,
@@ -172,6 +501,16 @@ fn level(level: HeadingLevel) -> u8 {
         HeadingLevel::H4 => 4,
         HeadingLevel::H5 => 5,
         HeadingLevel::H6 => 6,
+    }
+}
+
+fn alert_kind(kind: BlockQuoteKind) -> AlertKind {
+    match kind {
+        BlockQuoteKind::Note => AlertKind::Note,
+        BlockQuoteKind::Tip => AlertKind::Tip,
+        BlockQuoteKind::Important => AlertKind::Important,
+        BlockQuoteKind::Warning => AlertKind::Warning,
+        BlockQuoteKind::Caution => AlertKind::Caution,
     }
 }
 
@@ -187,12 +526,13 @@ fn inline_until<'a>(events: &mut impl Iterator<Item = Event<'a>>, end: TagEnd) -
 }
 
 /// Splits a leading checkbox marker (`[ ]`, `[]`, `[x]`, `[X]`, `[✅]`) off
-/// `text`, returning whether it is ticked and the text after it. Notes are
-/// often written as `[ ] todo` lines with no `- ` in front, which markdown
-/// itself would leave as plain text.
-fn checkbox_prefix(text: &str) -> Option<(bool, &str)> {
+/// `text`: whether it is ticked, the text after it, and the marker's byte
+/// length. Notes are often written as `[ ] todo` lines with no `- ` in front,
+/// which markdown itself would leave as plain text. A space must follow, so
+/// `[x](link)` and `[x]y` stay text.
+fn checkbox_prefix(text: &str) -> Option<(bool, &str, usize)> {
     let rest = text.strip_prefix('[')?;
-    let (done, rest) = if let Some(r) = rest.strip_prefix(']') {
+    let (done, after) = if let Some(r) = rest.strip_prefix(']') {
         (false, r)
     } else if let Some(r) = rest.strip_prefix(" ]") {
         (false, r)
@@ -203,20 +543,19 @@ fn checkbox_prefix(text: &str) -> Option<(bool, &str)> {
             _ => return None,
         }
     };
-    // Require a space after the marker so `[]()` or `[x]y` stay plain text.
-    let rest = rest.strip_prefix(' ')?;
-    Some((done, rest))
+    let after = after.strip_prefix(' ')?;
+    Some((done, after, text.len() - after.len() - 1))
 }
 
 /// A paragraph, or a one-item task list when it starts with a checkbox marker.
-fn paragraph_block(mut spans: Vec<Span>, start: Option<usize>) -> Block {
+/// `start` is where the paragraph begins in the note, to locate the marker.
+fn paragraph_block(mut spans: Vec<Span>, start: usize) -> Block {
     let Some((done, rest, marker_len)) = spans
         .first()
-        .and_then(|s| checkbox_prefix(&s.text).map(|(d, r)| (d, r, s.text.len() - r.len() - 1)))
+        .and_then(|s| checkbox_prefix(&s.text).map(|(d, r, n)| (d, r.to_string(), n)))
     else {
         return Block::Paragraph(spans);
     };
-    let rest = rest.to_string();
     if rest.is_empty() {
         spans.remove(0);
     } else {
@@ -226,9 +565,7 @@ fn paragraph_block(mut spans: Vec<Span>, start: Option<usize>) -> Block {
         start: None,
         items: vec![Item {
             checked: Some(done),
-            marker: start.map(|s| s..s + marker_len),
-            priority: None,
-            priority_token: None,
+            marker: Some(start..start + marker_len),
             blocks: vec![Block::Paragraph(spans)],
         }],
     }
@@ -239,7 +576,6 @@ fn parse_blocks<'a>(
     until: Option<TagEnd>,
     depth: usize,
     pos: &Cell<(usize, usize)>,
-    live: bool,
 ) -> Vec<Block> {
     let mut blocks = Vec::new();
     // Tight list items carry inline events with no paragraph around them.
@@ -249,7 +585,7 @@ fn parse_blocks<'a>(
         () => {
             let spans = pending.take();
             if !spans.is_empty() {
-                blocks.push(paragraph_block(spans, None));
+                blocks.push(Block::Paragraph(spans));
             }
         };
     }
@@ -269,9 +605,8 @@ fn parse_blocks<'a>(
             }
             Event::Start(Tag::Paragraph) => {
                 flush!();
-                // Only valid while events stream straight from the parser (list items
-                // are buffered first, which loses their ranges).
-                let start = live.then(|| pos.get().0);
+                // The start event's range begins where the paragraph does.
+                let start = pos.get().0;
                 let spans = inline_until(events, TagEnd::Paragraph);
                 if !spans.is_empty() {
                     blocks.push(paragraph_block(spans, start));
@@ -296,18 +631,33 @@ fn parse_blocks<'a>(
                 }
                 blocks.push(Block::Code { lang, text });
             }
-            Event::Start(Tag::BlockQuote(_)) => {
+            Event::Start(Tag::BlockQuote(kind)) => {
                 flush!();
                 if depth >= MAX_DEPTH {
-                    skip_until(events, TagEnd::BlockQuote(None));
+                    skip_until(events, TagEnd::BlockQuote(kind));
                 } else {
-                    blocks.push(Block::Quote(parse_blocks(
-                        events,
-                        Some(TagEnd::BlockQuote(None)),
-                        depth + 1,
-                        pos,
-                        live,
-                    )));
+                    let inner =
+                        parse_blocks(events, Some(TagEnd::BlockQuote(kind)), depth + 1, pos);
+                    blocks.push(match kind {
+                        Some(k) => Block::Alert {
+                            kind: alert_kind(k),
+                            blocks: inner,
+                        },
+                        None => Block::Quote(inner),
+                    });
+                }
+            }
+            Event::Start(Tag::FootnoteDefinition(name)) => {
+                flush!();
+                let name = name.to_string();
+                if depth >= MAX_DEPTH {
+                    skip_until(events, TagEnd::FootnoteDefinition);
+                } else {
+                    let inner = parse_blocks(events, Some(TagEnd::FootnoteDefinition), depth + 1, pos);
+                    blocks.push(Block::FootnoteDef {
+                        name,
+                        blocks: inner,
+                    });
                 }
             }
             Event::Start(Tag::List(start)) => {
@@ -325,13 +675,11 @@ fn parse_blocks<'a>(
                                 done: false,
                                 open: 0,
                             };
-                            let (item_blocks, item_checked, marker) =
+                            let (item_blocks, checked, marker) =
                                 parse_item(&mut item_events, depth + 1, pos);
                             items.push(Item {
-                                checked: item_checked,
+                                checked,
                                 marker,
-                                priority: None,
-                                priority_token: None,
                                 blocks: item_blocks,
                             });
                         }
@@ -349,7 +697,7 @@ fn parse_blocks<'a>(
                 flush!();
                 blocks.push(parse_table(events));
             }
-            // Anything else (footnotes, metadata, …) is ignored.
+            // Anything else (metadata, …) is ignored.
             _ => {}
         }
     }
@@ -391,200 +739,29 @@ fn parse_item<'a>(
     depth: usize,
     pos: &Cell<(usize, usize)>,
 ) -> (Vec<Block>, Option<bool>, Option<Range<usize>>) {
-    // The task marker is the first event of the item; peel it off, then parse
-    // the rest as ordinary blocks.
+    // The task marker is the item's first event; peel it off (only that one, so
+    // a nested task cannot change this item's state), then parse the rest as
+    // ordinary blocks. Each buffered event keeps its source range so nested
+    // items can still locate their own markers.
     let mut checked = None;
     let mut marker = None;
-    let mut buffered: Vec<Event<'a>> = Vec::new();
+    let mut buffered: Vec<(Event<'a>, (usize, usize))> = Vec::new();
     for event in events.by_ref() {
         if let Event::TaskListMarker(done) = event {
-            checked = Some(done);
-            let (start, end) = pos.get();
-            marker = Some(start..end);
-            continue;
+            if buffered.is_empty() {
+                checked = Some(done);
+                let (start, end) = pos.get();
+                marker = Some(start..end);
+                continue;
+            }
         }
-        buffered.push(event);
+        buffered.push((event, pos.get()));
     }
-    let mut iter = buffered.into_iter();
-    (parse_blocks(&mut iter, None, depth, pos, false), checked, marker)
-}
-
-/// The word written after `!` for a priority (`!high`).
-pub fn priority_name(priority: TaskPriority) -> &'static str {
-    match priority {
-        TaskPriority::Low => "low",
-        TaskPriority::Medium => "med",
-        TaskPriority::High => "high",
-        TaskPriority::Urgent => "urgent",
-    }
-}
-
-/// What a click on a task's priority chip moves to; none comes after urgent.
-pub fn next_priority(current: Option<TaskPriority>) -> Option<TaskPriority> {
-    match current {
-        None => Some(TaskPriority::Low),
-        Some(TaskPriority::Low) => Some(TaskPriority::Medium),
-        Some(TaskPriority::Medium) => Some(TaskPriority::High),
-        Some(TaskPriority::High) => Some(TaskPriority::Urgent),
-        Some(TaskPriority::Urgent) => None,
-    }
-}
-
-/// The priority token (`!low`, `!med`, `!medium`, `!high`, `!urgent`) written
-/// right after a task marker ending at `marker_end`, with its source range.
-fn priority_after(source: &str, marker_end: usize) -> Option<(TaskPriority, Range<usize>)> {
-    let rest = source.get(marker_end..)?.strip_prefix(' ')?;
-    let token = rest.split(char::is_whitespace).next()?;
-    let priority = match token {
-        "!low" => TaskPriority::Low,
-        "!med" | "!medium" => TaskPriority::Medium,
-        "!high" => TaskPriority::High,
-        "!urgent" => TaskPriority::Urgent,
-        _ => return None,
+    let mut replay = Replay {
+        events: buffered.into_iter(),
+        pos,
     };
-    let start = marker_end + 1;
-    Some((priority, start..start + token.len()))
-}
-
-/// Fills in each task's priority from the source and removes the token from the
-/// text shown, so it renders as a chip instead of literal `!high`.
-fn annotate_priorities(blocks: &mut [Block], source: &str) {
-    for block in blocks {
-        match block {
-            Block::List { items, .. } => {
-                for item in items {
-                    if let (Some(_), Some(marker)) = (item.checked, item.marker.clone()) {
-                        if let Some((priority, token)) = priority_after(source, marker.end) {
-                            item.priority = Some(priority);
-                            item.priority_token = Some(token.clone());
-                            strip_leading_token(&mut item.blocks, source.get(token));
-                        }
-                    }
-                    annotate_priorities(&mut item.blocks, source);
-                }
-            }
-            Block::Quote(inner) => annotate_priorities(inner, source),
-            _ => {}
-        }
-    }
-}
-
-fn strip_leading_token(blocks: &mut [Block], token: Option<&str>) {
-    let (Some(token), Some(Block::Paragraph(spans))) = (token, blocks.first_mut()) else {
-        return;
-    };
-    let Some(first) = spans.first_mut() else {
-        return;
-    };
-    if let Some(rest) = first.text.strip_prefix(token) {
-        first.text = rest.trim_start().to_string();
-        if first.text.is_empty() {
-            spans.remove(0);
-        }
-    }
-}
-
-/// (finished, total) task items anywhere in the note.
-pub fn task_counts(blocks: &[Block]) -> (usize, usize) {
-    let mut counts = (0, 0);
-    for block in blocks {
-        match block {
-            Block::List { items, .. } => {
-                for item in items {
-                    if let Some(done) = item.checked {
-                        counts.1 += 1;
-                        counts.0 += usize::from(done);
-                    }
-                    let inner = task_counts(&item.blocks);
-                    counts = (counts.0 + inner.0, counts.1 + inner.1);
-                }
-            }
-            Block::Quote(inner) => {
-                let inner = task_counts(inner);
-                counts = (counts.0 + inner.0, counts.1 + inner.1);
-            }
-            _ => {}
-        }
-    }
-    counts
-}
-
-/// (finished, total) tasks in raw note text, for the notes lists.
-pub fn note_progress(source: &str) -> Option<(usize, usize)> {
-    let counts = task_counts(&parse(source));
-    (counts.1 > 0).then_some(counts)
-}
-
-/// A change the rendered preview asks the note text to make.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TaskEdit {
-    /// Tick or untick the task whose marker is at this range.
-    Toggle(Range<usize>),
-    /// Move a task to the next priority (see [`next_priority`]).
-    CyclePriority {
-        marker: Range<usize>,
-        token: Option<Range<usize>>,
-        current: Option<TaskPriority>,
-    },
-    /// Append a new unchecked task at the end of the note.
-    Add(String),
-}
-
-/// The replacement a [`TaskEdit`] makes to `source`: byte range and new text.
-/// `None` when the edit no longer applies (stale range, empty text), so a
-/// preview that lags the text can never corrupt the note.
-pub fn task_edit(source: &str, edit: &TaskEdit) -> Option<(Range<usize>, String)> {
-    match edit {
-        TaskEdit::Toggle(range) => {
-            toggle_marker(source, range).map(|(range, text)| (range, text.to_string()))
-        }
-        TaskEdit::CyclePriority {
-            marker,
-            token,
-            current,
-        } => {
-            let (marker, _) = toggle_marker(source, marker)?;
-            if let (Some(token), Some(current)) = (token, current) {
-                if source.get(token.clone())? != format!("!{}", priority_name(*current)) {
-                    return None;
-                }
-            }
-            match (token, next_priority(*current)) {
-                (Some(token), Some(next)) => {
-                    Some((token.clone(), format!("!{}", priority_name(next))))
-                }
-                (Some(token), None) => {
-                    // Drop the token and the space after it.
-                    let space = usize::from(source[token.end..].starts_with(' '));
-                    Some((token.start..token.end + space, String::new()))
-                }
-                (None, Some(next)) => Some((
-                    marker.end..marker.end,
-                    format!(" !{}", priority_name(next)),
-                )),
-                (None, None) => None,
-            }
-        }
-        TaskEdit::Add(text) => {
-            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-            if text.is_empty() {
-                return None;
-            }
-            let body = source.trim_end();
-            // Continue a `- [ ]` list in its own style; otherwise add a bare
-            // task as its own paragraph (the style of the notes this serves).
-            let list_style = body
-                .lines()
-                .next_back()
-                .is_some_and(|l| l.trim_start().starts_with("- ["));
-            let (sep, prefix) = match (body.is_empty(), list_style) {
-                (true, _) => ("", "[ ] "),
-                (false, true) => ("\n", "- [ ] "),
-                (false, false) => ("\n\n", "[ ] "),
-            };
-            Some((body.len()..source.len(), format!("{sep}{prefix}{text}\n")))
-        }
-    }
+    (parse_blocks(&mut replay, None, depth, pos), checked, marker)
 }
 
 /// The text edit that ticks or unticks the task marker inside `range` of
@@ -655,18 +832,21 @@ mod tests {
         spans.iter().map(|s| s.text.as_str()).collect()
     }
 
+    fn para(blocks: &[Block], i: usize) -> &[Span] {
+        match &blocks[i] {
+            Block::Paragraph(s) => s,
+            other => panic!("expected paragraph, got {other:?}"),
+        }
+    }
+
     #[test]
     fn headings_and_paragraphs() {
         let blocks = parse("## FIND long query\n\nhello **bold** and `code`");
         assert!(matches!(&blocks[0], Block::Heading(2, s) if text(s) == "FIND long query"));
-        match &blocks[1] {
-            Block::Paragraph(spans) => {
-                assert_eq!(text(spans), "hello bold and code");
-                assert!(spans.iter().any(|s| s.bold && s.text == "bold"));
-                assert!(spans.iter().any(|s| s.code && s.text == "code"));
-            }
-            other => panic!("expected paragraph, got {other:?}"),
-        }
+        let spans = para(&blocks, 1);
+        assert_eq!(text(spans), "hello bold and code");
+        assert!(spans.iter().any(|s| s.bold && s.text == "bold"));
+        assert!(spans.iter().any(|s| s.code && s.text == "code"));
     }
 
     #[test]
@@ -696,8 +876,9 @@ mod tests {
     }
 
     #[test]
-    fn bare_checkbox_lines_become_tasks() {
-        let blocks = parse("[ ] one\n\n[] two\n\n[x] three\n\n[✅] four\n\n[link](u) five\n\n[x]no\n");
+    fn bare_checkbox_lines_become_clickable_tasks() {
+        let src = "[ ] one\n\n[] two\n\n[x] three\n\n[✅] four\n\n[link](u) five\n\n[x]no\n";
+        let blocks = parse(src);
         let checked: Vec<Option<bool>> = blocks
             .iter()
             .map(|b| match b {
@@ -713,11 +894,14 @@ mod tests {
             panic!("expected task");
         };
         assert!(matches!(&items[0].blocks[0], Block::Paragraph(s) if text(s) == "one"));
+        // Every spelling can be toggled in the note text.
+        assert_eq!(toggled(src, 0), src.replacen("[ ] one", "[x] one", 1));
+        assert_eq!(toggled(src, 1), src.replacen("[] two", "[x] two", 1));
+        assert_eq!(toggled(src, 2), src.replacen("[x] three", "[ ] three", 1));
+        assert_eq!(toggled(src, 3), src.replacen("[✅] four", "[ ] four", 1));
     }
 
-    /// Applies the toggle for the `index`th task found in `source`.
-    fn toggled(source: &str, index: usize) -> String {
-        let mut tasks = Vec::new();
+    fn markers(source: &str) -> Vec<Range<usize>> {
         fn collect(blocks: &[Block], out: &mut Vec<Range<usize>>) {
             for b in blocks {
                 match b {
@@ -729,122 +913,56 @@ mod tests {
                             collect(&item.blocks, out);
                         }
                     }
-                    Block::Quote(inner) => collect(inner, out),
+                    Block::Quote(inner) | Block::Alert { blocks: inner, .. } => collect(inner, out),
                     _ => {}
                 }
             }
         }
-        collect(&parse(source), &mut tasks);
-        let (range, text) = toggle_marker(source, &tasks[index]).expect("marker located");
+        let mut out = Vec::new();
+        collect(&parse(source), &mut out);
+        out
+    }
+
+    fn toggled(source: &str, index: usize) -> String {
+        let (range, text) = toggle_marker(source, &markers(source)[index]).expect("marker");
         let mut out = source.to_string();
         out.replace_range(range, text);
         out
     }
 
     #[test]
-    fn toggling_a_task_rewrites_only_its_marker() {
-        let src = "intro\n\n- [ ] a\n- [x] b\n\n[ ] bare\n\n[✅] done\n\n```\n[ ] not a task\n```\n";
+    fn clicking_a_checkbox_rewrites_only_its_marker() {
+        let src = "intro\n\n- [ ] a\n- [x] b\n  - [ ] nested\n- [X] c\n\n```\n- [ ] not a task\n```\n";
+        assert_eq!(markers(src).len(), 4);
         assert_eq!(toggled(src, 0), src.replacen("- [ ] a", "- [x] a", 1));
         assert_eq!(toggled(src, 1), src.replacen("- [x] b", "- [ ] b", 1));
-        assert_eq!(toggled(src, 2), src.replacen("[ ] bare", "[x] bare", 1));
-        assert_eq!(toggled(src, 3), src.replacen("[✅] done", "[ ] done", 1));
-        // A range that does not hold a marker is refused.
+        assert_eq!(toggled(src, 2), src.replacen("- [ ] nested", "- [x] nested", 1));
+        assert_eq!(toggled(src, 3), src.replacen("- [X] c", "- [ ] c", 1));
         assert!(toggle_marker("hello", &(0..3)).is_none());
         assert!(toggle_marker("hello", &(2..99)).is_none());
     }
 
-    fn first_task(source: &str) -> Item {
-        let blocks = parse(source);
+    #[test]
+    fn a_nested_task_does_not_change_its_parents_state() {
+        let blocks = parse("- [ ] parent\n  - [x] child\n");
         let Block::List { items, .. } = &blocks[0] else {
-            panic!("expected a task");
+            panic!("expected list");
         };
-        items[0].clone()
-    }
-
-    fn applied(source: &str, edit: &TaskEdit) -> String {
-        let (range, text) = task_edit(source, edit).expect("edit applies");
-        let mut out = source.to_string();
-        out.replace_range(range, &text);
-        out
-    }
-
-    #[test]
-    fn priority_is_read_from_the_source_and_hidden_from_the_text() {
-        for (src, want) in [
-            ("[ ] !high fix login", TaskPriority::High),
-            ("- [x] !urgent ship it", TaskPriority::Urgent),
-            ("[] !med look", TaskPriority::Medium),
-            ("[ ] !low later", TaskPriority::Low),
-        ] {
-            let item = first_task(src);
-            assert_eq!(item.priority, Some(want), "{src}");
-            let Block::Paragraph(spans) = &item.blocks[0] else {
-                panic!("expected text");
-            };
-            assert!(!text(spans).contains('!'), "{src}: {}", text(spans));
-        }
-        let plain = first_task("[ ] !hot take");
-        assert_eq!(plain.priority, None);
-        let Block::Paragraph(spans) = &plain.blocks[0] else {
-            panic!("expected text");
+        assert_eq!(items[0].checked, Some(false));
+        let Block::List { items: inner, .. } = &items[0].blocks[1] else {
+            panic!("expected nested list");
         };
-        assert_eq!(text(spans), "!hot take");
+        assert_eq!(inner[0].checked, Some(true));
     }
 
     #[test]
-    fn cycling_priority_walks_none_to_urgent_and_back_to_none() {
-        let mut src = "- [ ] write docs\n".to_string();
-        let mut seen = Vec::new();
-        for _ in 0..5 {
-            let item = first_task(&src);
-            seen.push(item.priority);
-            src = applied(
-                &src,
-                &TaskEdit::CyclePriority {
-                    marker: item.marker.clone().unwrap(),
-                    token: item.priority_token.clone(),
-                    current: item.priority,
-                },
-            );
-        }
-        assert_eq!(
-            seen,
-            vec![
-                None,
-                Some(TaskPriority::Low),
-                Some(TaskPriority::Medium),
-                Some(TaskPriority::High),
-                Some(TaskPriority::Urgent),
-            ]
-        );
-        assert_eq!(src, "- [ ] write docs\n", "back to no priority, text intact");
-    }
-
-    #[test]
-    fn stale_priority_edits_are_refused() {
-        let item = first_task("[ ] !high a");
-        let edit = TaskEdit::CyclePriority {
-            marker: item.marker.clone().unwrap(),
-            token: item.priority_token.clone(),
-            current: Some(TaskPriority::Low),
+    fn task_item_may_start_with_an_escaped_parenthesis() {
+        let blocks = parse("- [ ] \\(Optional) Open a followup issue\n");
+        let Block::List { items, .. } = &blocks[0] else {
+            panic!("expected list");
         };
-        assert!(task_edit("[ ] !high a", &edit).is_none());
-    }
-
-    #[test]
-    fn adding_a_task_appends_in_the_notes_own_style() {
-        let add = |s: &str| applied(s, &TaskEdit::Add("  new   thing ".into()));
-        assert_eq!(add(""), "[ ] new thing\n");
-        assert_eq!(add("[ ] a\n"), "[ ] a\n\n[ ] new thing\n");
-        assert_eq!(add("- [x] a\n- [ ] b\n\n"), "- [x] a\n- [ ] b\n- [ ] new thing\n");
-        assert_eq!(add("intro"), "intro\n\n[ ] new thing\n");
-        assert!(task_edit("x", &TaskEdit::Add("   ".into())).is_none());
-    }
-
-    #[test]
-    fn counts_and_progress() {
-        assert_eq!(note_progress("no tasks here"), None);
-        assert_eq!(note_progress("[ ] a\n\n[x] b\n\n- [x] c\n"), Some((2, 3)));
+        assert_eq!(items[0].checked, Some(false));
+        assert!(matches!(&items[0].blocks[0], Block::Paragraph(s) if text(s).starts_with("(Optional)")));
     }
 
     #[test]
@@ -875,7 +993,96 @@ mod tests {
     }
 
     #[test]
-    fn html_is_shown_as_text_not_interpreted() {
+    fn colour_models_in_backticks_get_a_swatch() {
+        let blocks = parse(
+            "`#0969DA` `rgb(9, 105, 218)` `hsl(212, 92%, 45%)` `#fff` `rgb(1,2)` ` #0969DA` #0969DA\n",
+        );
+        let swatches: Vec<Option<[u8; 3]>> = para(&blocks, 0)
+            .iter()
+            .filter(|s| s.code)
+            .map(|s| s.swatch)
+            .collect();
+        assert_eq!(swatches[0], Some([9, 105, 218]));
+        assert_eq!(swatches[1], Some([9, 105, 218]));
+        // hsl(212, 92%, 45%) is GitHub's blue: close to the hex above.
+        let [r, g, b] = swatches[2].expect("hsl swatch");
+        assert!(r < 20 && (95..115).contains(&g) && (215..230).contains(&b));
+        // Shorthand hex, too few channels and padded spaces are not colours.
+        assert_eq!(&swatches[3..], &[None, None, None]);
+        // Without backticks it stays plain text.
+        assert!(para(&blocks, 0).last().is_some_and(|s| !s.code && s.swatch.is_none()));
+    }
+
+    #[test]
+    fn alerts_use_the_five_github_types() {
+        for (word, kind) in [
+            ("NOTE", AlertKind::Note),
+            ("TIP", AlertKind::Tip),
+            ("IMPORTANT", AlertKind::Important),
+            ("WARNING", AlertKind::Warning),
+            ("CAUTION", AlertKind::Caution),
+        ] {
+            let blocks = parse(&format!("> [!{word}]\n> Useful information.\n"));
+            match &blocks[0] {
+                Block::Alert { kind: k, blocks } => {
+                    assert_eq!(*k, kind);
+                    assert!(matches!(&blocks[0], Block::Paragraph(s) if text(s) == "Useful information."));
+                }
+                other => panic!("expected alert for {word}, got {other:?}"),
+            }
+        }
+        assert!(matches!(parse("> [!BOGUS]\n> x\n")[0], Block::Quote(_)));
+    }
+
+    #[test]
+    fn footnotes_are_numbered_by_reference_and_collected_at_the_end() {
+        let blocks = parse("A[^b] and B[^a].\n\n[^a]: Second.\n\n[^b]: First.\n");
+        assert_eq!(blocks.len(), 2);
+        let spans = para(&blocks, 0);
+        assert_eq!(text(spans), "A¹ and B².");
+        let Block::Footnotes(notes) = &blocks[1] else {
+            panic!("expected footnotes");
+        };
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[0].0, 1);
+        assert!(matches!(&notes[0].1[0], Block::Paragraph(s) if text(s) == "First."));
+        assert_eq!(notes[1].0, 2);
+    }
+
+    #[test]
+    fn html_comments_are_hidden() {
+        let blocks = parse("a <!-- secret --> b\n\n<!-- multi\nline -->\n\nafter\n");
+        assert_eq!(text(para(&blocks, 0)), "a  b");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(text(para(&blocks, 1)), "after");
+    }
+
+    #[test]
+    fn documented_html_tags_style_text() {
+        let blocks = parse("<ins>under</ins> x<sub>2</sub> x<sup>2</sup> a<br/>b");
+        let spans = para(&blocks, 0);
+        assert!(spans.iter().any(|s| s.underline && s.text == "under"));
+        assert_eq!(text(spans), "under x₂ x² a\nb");
+    }
+
+    #[test]
+    fn emoji_shortcodes_and_bare_urls() {
+        let blocks = parse("Ship it :tada: :unknown: see https://example.com/a, ok");
+        let spans = para(&blocks, 0);
+        assert_eq!(text(spans), "Ship it 🎉 :unknown: see https://example.com/a, ok");
+        let link = spans.iter().find(|s| s.link).expect("autolink");
+        assert_eq!(link.text, "https://example.com/a");
+    }
+
+    #[test]
+    fn escapes_and_line_breaks_follow_commonmark() {
+        let blocks = parse("Let's rename \\*our-new-project\\* now\n\nfirst  \nsecond\n");
+        assert_eq!(text(para(&blocks, 0)), "Let's rename *our-new-project* now");
+        assert_eq!(text(para(&blocks, 1)), "first\nsecond");
+    }
+
+    #[test]
+    fn other_html_is_shown_as_text_not_interpreted() {
         let blocks = parse("<script>alert(1)</script>\n\nhi <b>x</b>");
         let joined: String = blocks
             .iter()

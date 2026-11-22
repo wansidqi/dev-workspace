@@ -3,7 +3,7 @@ use crate::{NoteId, ProjectId, TaskId};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoteKind {
     Note,
-    /// A checklist: opens as a rendered task list with a quick-add row.
+    /// A checklist-style note: only the icon differs from a plain note.
     Todo,
     Script,
     Sql,
