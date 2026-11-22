@@ -94,6 +94,18 @@ pub(crate) enum ChangesScope {
     Project,
 }
 
+/// The scope the Changes view opens in: the selected project's repos whenever a
+/// project is selected, and every project's only when none is. It is not
+/// remembered between visits, so opening Changes from a project always shows
+/// that project first (the other scope is one click away).
+fn default_scope(has_project: bool) -> ChangesScope {
+    if has_project {
+        ChangesScope::Project
+    } else {
+        ChangesScope::All
+    }
+}
+
 /// Which repos a branch action applies to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Scope {
@@ -266,12 +278,13 @@ impl ChangesView {
         })
         .detach();
 
+        let scope = default_scope(state.read(cx).selected_project.is_some());
         let mut view = Self {
             state,
             settings,
             theme,
             on_close: None,
-            scope: ChangesScope::All,
+            scope,
             repos: Vec::new(),
             repo_filter: Vec::new(),
             list_scroll: UniformListScrollHandle::new(),
@@ -1516,5 +1529,16 @@ impl ChangesView {
 impl ChangesView {
     fn qa_apply(&mut self, _cx: &mut Context<Self>) {
         self.qa = None;
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::{default_scope, ChangesScope};
+
+    #[test]
+    fn opens_on_this_project_unless_none_is_selected() {
+        assert_eq!(default_scope(true), ChangesScope::Project);
+        assert_eq!(default_scope(false), ChangesScope::All);
     }
 }
