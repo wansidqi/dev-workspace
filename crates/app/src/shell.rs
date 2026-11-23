@@ -310,22 +310,18 @@ impl Root {
             })
             .collect();
 
-        let history = has_project.then(|| {
-            self.nav_row(
-                crate::NAV_HISTORY,
-                self.open_history.is_some(),
-                None,
-                |this, cx| this.toggle_history(cx),
-                cx,
-            )
-            .into_any_element()
-        });
         let changes = self
             .nav_row(
-                crate::NAV_CHANGES,
-                self.open_changes.is_some(),
+                crate::NAV_GIT,
+                self.git_open(),
                 None,
-                |this, cx| this.toggle_changes(cx),
+                |this, cx| {
+                    if this.git_open() {
+                        this.close_git(cx);
+                    } else {
+                        this.open_git(crate::GitTab::Changes, cx);
+                    }
+                },
                 cx,
             )
             .into_any_element();
@@ -392,7 +388,6 @@ impl Root {
                             .child(section_label(&theme, "Workspace")),
                     )
                     .child(changes)
-                    .children(history)
                     .children(run)
                     .child(timesheet)
                     .children(credentials)

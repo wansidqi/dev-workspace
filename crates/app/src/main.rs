@@ -12,6 +12,7 @@ mod changes_model;
 mod changes_view;
 mod clipboard_html;
 mod commit_browser;
+mod commit_detail;
 mod credentials_panel;
 mod date;
 mod external;
@@ -132,6 +133,8 @@ struct Root {
     /// The git Changes view (working copy of every linked repo), replacing the
     /// main content while open.
     open_changes: Option<Entity<ChangesView>>,
+    /// Which page of the Git section (Changes or History) is showing.
+    git_tab: GitTab,
     /// The task/subtask detail page (notes, attachments, commits). Stays
     /// open underneath the note editor so closing a note returns to it.
     open_task: Option<Entity<TaskDetail>>,
@@ -210,18 +213,19 @@ pub(crate) struct NavItem {
     pub shortcut: &'static str,
 }
 
-pub(crate) const NAV_HISTORY: NavItem = NavItem {
-    id: "open-history",
-    hover_key: 1,
-    icon: ui::Icon::GitCommit,
-    label: "Commit history",
-    shortcut: "Ctrl+Shift+H",
-};
-pub(crate) const NAV_CHANGES: NavItem = NavItem {
-    id: "open-changes",
+/// The pages of the Git section: the working copy and the commit history.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GitTab {
+    Changes,
+    History,
+}
+
+/// The one sidebar row for everything git: Changes and History are its tabs.
+pub(crate) const NAV_GIT: NavItem = NavItem {
+    id: "open-git",
     hover_key: 6,
-    icon: ui::Icon::GitMerge,
-    label: "Changes",
+    icon: ui::Icon::GitBranch,
+    label: "Git",
     shortcut: "Ctrl+Shift+G",
 };
 pub(crate) const NAV_RUN: NavItem = NavItem {
@@ -476,9 +480,7 @@ impl Root {
             detail.on_open_history = Some(Box::new(move |_window, cx| {
                 history_root.update(cx, |root, cx| {
                     root.open_task = None;
-                    if root.open_history.is_none() {
-                        root.toggle_history(cx);
-                    }
+                    root.open_git(GitTab::History, cx);
                 });
             }));
             detail
@@ -548,67 +550,78 @@ impl Root {
         .detach();
     }
 
-    /// Opens the commit history browser in place of the main content, or
-    /// closes it if already open.
-    fn toggle_history(&mut self, cx: &mut Context<Self>) {
-        if self.open_history.take().is_some() {
-            cx.notify();
-            return;
-        }
-        let theme = self.theme;
-        let state = self.state.clone();
-        let root = cx.entity();
-        let browser = cx.new(|cx| {
-            let mut browser = CommitBrowser::new(cx, state, theme);
-            browser.on_close = Some(Box::new(move |_window, cx| {
-                root.update(cx, |root, cx| {
-                    root.open_history = None;
-                    cx.notify();
-                });
-            }));
-            browser
-        });
-        self.open_note = None;
-        self.settings_open = false;
-        self.open_task = None;
-        self.run_open = false;
-        self.timesheet_open = false;
-        self.credentials_open = false;
+    /// Whether the Git section (its Changes and History pages) is showing.
+    pub(crate) fn git_open(&self) -> bool {
+        self.open_changes.is_some() || self.open_history.is_some()
+    }
+
+    /// Leaves the Git section. Both pages are dropped, as every other view is
+    /// when it closes.
+    pub(crate) fn close_git(&mut self, cx: &mut Context<Self>) {
         self.open_changes = None;
-        self.open_history = Some(browser);
+        self.open_history = None;
         cx.notify();
     }
 
-    /// Opens the git Changes view in place of the main content, or closes it
-    /// if already open.
-    pub(crate) fn toggle_changes(&mut self, cx: &mut Context<Self>) {
-        if self.open_changes.take().is_some() {
-            cx.notify();
-            return;
-        }
+    /// Opens the Git section on `tab`, building that page the first time. The
+    /// other page stays alive, so switching tabs keeps a half-written commit
+    /// message and the selected file.
+    pub(crate) fn open_git(&mut self, tab: GitTab, cx: &mut Context<Self>) {
         let theme = self.theme;
         let state = self.state.clone();
         let root = cx.entity();
-        let settings = self.settings.clone();
-        let view = cx.new(|cx| {
-            let mut view = ChangesView::new(cx, state, settings, theme);
-            view.on_close = Some(Box::new(move |_window, cx| {
-                root.update(cx, |root, cx| {
-                    root.open_changes = None;
-                    cx.notify();
+        match tab {
+            GitTab::History if self.open_history.is_none() => {
+                let browser = cx.new(|cx| {
+                    let mut browser = CommitBrowser::new(cx, state, theme);
+                    browser.on_close = Some(Box::new(move |_window, cx| {
+                        root.update(cx, |root, cx| root.close_git(cx));
+                    }));
+                    browser
                 });
-            }));
-            view
-        });
+                self.open_history = Some(browser);
+            }
+            GitTab::Changes if self.open_changes.is_none() => {
+                let settings = self.settings.clone();
+                let view = cx.new(|cx| {
+                    let mut view = ChangesView::new(cx, state, settings, theme);
+                    view.on_close = Some(Box::new(move |_window, cx| {
+                        root.update(cx, |root, cx| root.close_git(cx));
+                    }));
+                    view
+                });
+                self.open_changes = Some(view);
+            }
+            _ => {}
+        }
         self.open_note = None;
         self.settings_open = false;
         self.open_task = None;
         self.run_open = false;
         self.timesheet_open = false;
         self.credentials_open = false;
-        self.open_history = None;
-        self.open_changes = Some(view);
+        self.git_tab = tab;
         cx.notify();
+    }
+
+    /// The shortcut and palette behaviour: open the tab, or close the Git
+    /// section when that tab is already showing.
+    fn toggle_git_tab(&mut self, tab: GitTab, cx: &mut Context<Self>) {
+        if self.git_open() && self.git_tab == tab {
+            self.close_git(cx);
+        } else {
+            self.open_git(tab, cx);
+        }
+    }
+
+    /// Ctrl+Shift+H: the History tab of Git.
+    fn toggle_history(&mut self, cx: &mut Context<Self>) {
+        self.toggle_git_tab(GitTab::History, cx);
+    }
+
+    /// Ctrl+Shift+G: the Changes tab of Git.
+    pub(crate) fn toggle_changes(&mut self, cx: &mut Context<Self>) {
+        self.toggle_git_tab(GitTab::Changes, cx);
     }
 
     /// A sidebar navigation row (icon, label, optional badge, shortcut hint on
@@ -813,10 +826,60 @@ impl Render for Root {
             && self.open_history.is_none()
             && self.open_changes.is_none())
         .then(|| self.note_page(cx));
-        let view = if let Some(history) = &self.open_history {
-            fill(("view-history", history.entity_id()), history.clone())
-        } else if let Some(changes) = &self.open_changes {
-            fill(("view-changes", changes.entity_id()), changes.clone())
+        let view = if self.git_open() {
+            let tab = self.git_tab;
+            let body = match (tab, &self.open_history, &self.open_changes) {
+                (GitTab::History, Some(history), _) | (_, Some(history), None) => {
+                    history.clone().into_any_element()
+                }
+                (_, _, Some(changes)) => changes.clone().into_any_element(),
+                _ => div().into_any_element(),
+            };
+            let tabs = div()
+                .flex()
+                .flex_none()
+                .items_end()
+                .gap(theme.space_6)
+                .px(theme.space_6)
+                .border_b_1()
+                .border_color(theme.border_subtle)
+                .child(
+                    ui::tab(
+                        &theme,
+                        "git-tab-changes",
+                        "Changes",
+                        None,
+                        tab == GitTab::Changes,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.open_git(GitTab::Changes, cx))),
+                )
+                .child(
+                    ui::tab(
+                        &theme,
+                        "git-tab-history",
+                        "History",
+                        None,
+                        tab == GitTab::History,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.open_git(GitTab::History, cx))),
+                );
+            let page = div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w(px(0.0))
+                .min_h(px(0.0))
+                .child(tabs)
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .overflow_hidden()
+                        .child(body),
+                );
+            fill("view-git", page)
         } else if let (Some(detail), None) = (&self.open_task, &self.open_note) {
             fill(("view-task", detail.entity_id()), detail.clone())
         } else if let Some(page) = note_page.take() {
@@ -1137,6 +1200,7 @@ fn main() -> Result<()> {
                         focus_handle,
                         open_history: None,
                         open_changes: None,
+                        git_tab: GitTab::Changes,
                         open_task: None,
                         confirm_unlink_repo: None,
                         tag_filter: None,

@@ -172,6 +172,8 @@ pub struct CommitBrowser {
     new_status: CommitLinkStatus,
     /// Result of the last map action: (message, is_error).
     notice: Option<(String, bool)>,
+    /// The open commit-detail view (files and diff), which replaces the list.
+    detail: Option<Entity<crate::commit_detail::CommitDetail>>,
 }
 
 fn status_label(status: CommitLinkStatus) -> &'static str {
@@ -334,6 +336,7 @@ impl CommitBrowser {
             anchor: None,
             new_status: CommitLinkStatus::Linked,
             notice: None,
+            detail: None,
         };
         browser.reload_branches(cx);
         browser.load_more(cx);
@@ -1156,6 +1159,19 @@ impl CommitBrowser {
                             )),
                     );
             }
+            panel = panel.child(
+                button(
+                    &theme,
+                    "commit-view-changes",
+                    ButtonKind::Secondary,
+                    Some(Icon::Code),
+                    "View changes",
+                )
+                .on_click({
+                    let key = key.clone();
+                    cx.listener(move |this, _, _, cx| this.open_detail(key.clone(), cx))
+                }),
+            );
             let existing: Vec<&CommitLink> = links
                 .iter()
                 .filter(|l| l.repo_id == key.0 && l.hash == key.1)
@@ -1357,6 +1373,64 @@ impl CommitBrowser {
 
 impl Render for CommitBrowser {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(detail) = self.detail.clone() {
+            return div()
+                .flex()
+                .flex_col()
+                .size_full()
+                .child(detail)
+                .into_any_element();
+        }
+        self.render_browser(window, cx).into_any_element()
+    }
+}
+
+impl CommitBrowser {
+    /// Opens the files and diff of one commit in place of the list.
+    fn open_detail(&mut self, key: CommitKey, cx: &mut Context<Self>) {
+        let Some(entry) = self
+            .commits
+            .iter()
+            .find(|c| c.repo_id == key.0 && c.commit.hash == key.1)
+        else {
+            return;
+        };
+        let Some(path) = self
+            .state
+            .read(cx)
+            .repos
+            .iter()
+            .find(|r| r.id == key.0)
+            .map(|r| std::path::PathBuf::from(&r.path))
+        else {
+            return;
+        };
+        let title = entry.commit.summary.clone();
+        let meta = format!(
+            "{} · {} · {} · {}",
+            entry.repo_name,
+            &entry.commit.hash[..10.min(entry.commit.hash.len())],
+            entry.commit.author,
+            format_date(entry.commit.time)
+        );
+        let hash = key.1.clone();
+        let theme = self.theme;
+        let detail = cx
+            .new(|cx| crate::commit_detail::CommitDetail::new(cx, theme, path, hash, title, meta));
+        let me = cx.entity();
+        detail.update(cx, |d, _| {
+            d.on_close = Some(Box::new(move |_window, cx| {
+                me.update(cx, |this, cx| {
+                    this.detail = None;
+                    cx.notify();
+                });
+            }));
+        });
+        self.detail = Some(detail);
+        cx.notify();
+    }
+
+    fn render_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.theme = crate::theme::current(cx);
         let theme = self.theme;
         let (repos, project_name) = {

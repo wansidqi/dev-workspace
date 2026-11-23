@@ -10,6 +10,7 @@ mod branches;
 mod changes;
 mod cli;
 mod commit;
+mod commit_diff;
 mod diff;
 mod integrate;
 mod patchid;
@@ -30,6 +31,7 @@ pub use changes::{
 };
 pub use cli::git_executable;
 pub use commit::{commit_staged, last_commit_message, CommitRequest};
+pub use commit_diff::{commit_changes, commit_file_diff, CommitChanges, CommitFile};
 pub use diff::{
     discard_lines, file_diff, stage_lines, unstage_lines, DiffHunk, DiffLine, DiffSide, FileDiff,
     LineKind, LineSelection,

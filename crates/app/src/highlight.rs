@@ -163,6 +163,32 @@ fn is_ident(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
+/// The language to highlight a file as, from its name. `None` for prose,
+/// data and generated files, where colouring strings and numbers would only
+/// add noise.
+pub fn language_for_path(path: &str) -> Option<&'static str> {
+    let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    let ext = name.rsplit_once('.').map(|(_, e)| e)?;
+    Some(match ext {
+        "rs" => "rust",
+        "js" | "jsx" | "mjs" | "cjs" => "js",
+        "ts" | "tsx" => "ts",
+        "php" => "php",
+        "py" => "python",
+        "rb" => "ruby",
+        "go" => "go",
+        "java" | "kt" => "java",
+        "c" | "h" | "cc" | "cpp" | "hpp" | "cs" => "c",
+        "swift" | "dart" | "scala" => "swift",
+        "sh" | "bash" | "zsh" => "sh",
+        "yaml" | "yml" => "yaml",
+        "toml" => "toml",
+        "sql" => "sql",
+        "css" | "scss" | "less" => "css",
+        _ => return None,
+    })
+}
+
 /// Tokens of `text` as byte ranges, in order and non-overlapping.
 pub fn tokenize(lang: &str, text: &str) -> Vec<(Range<usize>, Token)> {
     let lang = lang.trim().to_ascii_lowercase();
@@ -273,6 +299,16 @@ mod tests {
             .into_iter()
             .map(|(r, t)| (text[r].to_string(), t))
             .collect()
+    }
+
+    #[test]
+    fn languages_come_from_the_file_name() {
+        assert_eq!(language_for_path("src/app/main.rs"), Some("rust"));
+        assert_eq!(language_for_path("a/b/Component.TSX"), Some("ts"));
+        assert_eq!(language_for_path("db/seed.sql"), Some("sql"));
+        assert_eq!(language_for_path("README.md"), None);
+        assert_eq!(language_for_path("Cargo.lock"), None);
+        assert_eq!(language_for_path("Makefile"), None);
     }
 
     #[test]

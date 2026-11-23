@@ -1,8 +1,9 @@
-# Builds the optimised app and archives it under releases/<yyyy-MM-dd>_<name>/ so
-# a new release never overwrites an older one. <name> is a short feature name
-# (kebab-case), e.g. releases/2026-11-22_github-markdown/. If that folder already
-# exists, -2, -3 ... is appended. Without -Name the folder is just the date, and
-# a repeat on the same day gets a time suffix instead.
+# Builds the optimised app and archives it under
+# releases/<yyyy-MM-dd>_<HHmmss>_<name>/ so a new release never overwrites an
+# older one and the folders sort by build time. <name> is a short feature name
+# (kebab-case), e.g. releases/2026-11-22_153045_github-markdown/. Without -Name
+# the folder is just <yyyy-MM-dd>_<HHmmss>. If that folder already exists (the
+# same second), -2, -3 ... is appended.
 #
 # Usage (from the repository root):
 #   powershell -File scripts\release.ps1 -Name github-markdown
@@ -21,20 +22,12 @@ if (-not (Test-Path $exe)) { throw "missing $exe" }
 
 # Keep the feature name safe as a folder name: lowercase, letters, digits, hyphens.
 $feature = ($Name.ToLower() -replace '[^a-z0-9]+', '-').Trim('-')
-$date = Get-Date -Format 'yyyy-MM-dd'
-$base = if ($feature) { "${date}_$feature" } else { $date }
+$stamp = Get-Date -Format 'yyyy-MM-dd_HHmmss'
+$base = if ($feature) { "${stamp}_$feature" } else { $stamp }
 $name = $base
+$n = 2
+while (Test-Path (Join-Path $root "releases\$name")) { $name = "$base-$n"; $n++ }
 $dir = Join-Path $root "releases\$name"
-if (Test-Path $dir) {
-    if ($feature) {
-        $n = 2
-        while (Test-Path (Join-Path $root "releases\$base-$n")) { $n++ }
-        $name = "$base-$n"
-    } else {
-        $name = Get-Date -Format 'yyyy-MM-dd_HHmmss'
-    }
-    $dir = Join-Path $root "releases\$name"
-}
 New-Item -ItemType Directory -Path $dir | Out-Null
 Copy-Item $exe $dir
 

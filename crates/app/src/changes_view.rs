@@ -348,6 +348,10 @@ pub struct ChangesView {
     clone_url: Entity<TextInput>,
     /// Focus of the file list itself, so the arrow keys step through files.
     list_focus: FocusHandle,
+    /// Focus of the diff, so the arrow keys move between its changed lines.
+    diff_focus: FocusHandle,
+    /// The changed line the keyboard is on (`(hunk, line)`).
+    line_cursor: Option<(usize, usize)>,
 }
 
 impl ChangesView {
@@ -457,6 +461,8 @@ impl ChangesView {
             reword_input,
             clone_url,
             list_focus: cx.focus_handle(),
+            diff_focus: cx.focus_handle(),
+            line_cursor: None,
         };
         view.sync_repos(cx);
         view.start_background_fetch(cx);
@@ -643,6 +649,7 @@ impl ChangesView {
                     return;
                 }
                 pane.loading = false;
+                let previous_branch = pane.status.as_ref().and_then(|s| s.branch.clone());
                 match status {
                     Ok(status) => {
                         pane.status = Some(status);
@@ -654,6 +661,29 @@ impl ChangesView {
                     }
                 }
                 pane.shelf = shelf.ok().flatten();
+                // Arriving on a branch that has stashed work: say so, since
+                // nothing brings it back by itself.
+                let arrived = pane.status.as_ref().and_then(|s| s.branch.clone());
+                let reminder = match (&previous_branch, &arrived, &pane.shelf) {
+                    (Some(before), Some(now), Some(shelf))
+                        if before != now && !shelf.files.is_empty() =>
+                    {
+                        Some(format!(
+                            "{}: {} stashed file{} on {now}. Use Restore in Stashed changes to bring {} back.",
+                            pane.repo.name,
+                            shelf.files.len(),
+                            if shelf.files.len() == 1 { "" } else { "s" },
+                            if shelf.files.len() == 1 { "it" } else { "them" },
+                        ))
+                    }
+                    _ => None,
+                };
+                if let Some(text) = reminder {
+                    this.notice.push(NoticeLine::warn(text));
+                }
+                let Some(pane) = this.pane_mut(id) else {
+                    return;
+                };
                 let kept: HashSet<String> = pane
                     .shelf
                     .iter()
@@ -771,6 +801,7 @@ impl ChangesView {
         self.selected = Some((repo, path));
         self.line_sel.clear();
         self.line_anchor = None;
+        self.line_cursor = None;
         self.diff = None;
         self.reload_diff(cx);
         cx.notify();
@@ -952,13 +983,35 @@ impl ChangesView {
         if files.is_empty() {
             return;
         }
-        self.mutate(repo, cx, move |path| {
-            if stage {
-                git::stage_files(path, &files)
-            } else {
-                git::unstage_files(path, &files)
-            }
-        });
+        let Some(pane) = self.pane(repo) else { return };
+        let path = pane.path();
+        let name = pane.repo.name.clone();
+        let label = format!(
+            "{} {} file{}…",
+            if stage { "Staging" } else { "Unstaging" },
+            files.len(),
+            if files.len() == 1 { "" } else { "s" }
+        );
+        if !self.begin_work(&[repo], &label, cx) {
+            return;
+        }
+        self.run(
+            cx,
+            move || {
+                if stage {
+                    git::stage_files(&path, &files)
+                } else {
+                    git::unstage_files(&path, &files)
+                }
+            },
+            move |this, result, cx| {
+                this.end_work(&[repo]);
+                if let Err(e) = result {
+                    this.error_notice(&name, e, cx);
+                }
+                this.refresh_repo(repo, cx);
+            },
+        );
     }
 
     fn apply_lines(&mut self, op: LineOp, selection: LineSelection, cx: &mut Context<Self>) {
@@ -1015,6 +1068,64 @@ impl ChangesView {
             count: self.line_sel.len(),
         });
         cx.notify();
+    }
+
+    /// Arrow keys in the diff: move the cursor to the next or previous changed
+    /// line; with `extend` (Shift) everything between the old and new line
+    /// joins the selection.
+    fn step_diff_cursor(&mut self, delta: i32, extend: bool, cx: &mut Context<Self>) {
+        let Some(loaded) = &self.diff else { return };
+        let Some(next) = changes_model::step_changed_line(&loaded.diff, self.line_cursor, delta)
+        else {
+            return;
+        };
+        let previous = self.line_cursor;
+        if let Some(ix) = loaded.rows.iter().position(|r| {
+            *r == DiffRow::Line {
+                hunk: next.0,
+                line: next.1,
+            }
+        }) {
+            self.diff_scroll
+                .scroll_to_item(ix, gpui::ScrollStrategy::Nearest);
+        }
+        if extend {
+            if self.line_anchor.is_none() {
+                if let Some(p) = previous {
+                    self.line_sel.insert(p);
+                    self.line_anchor = Some(p);
+                }
+            }
+            self.click_line(next.0, next.1, true, cx);
+            // A shift-click on a selected line clears the range; walking along
+            // it with the keys should always grow it.
+            self.line_sel.insert(next);
+        }
+        self.line_cursor = Some(next);
+        cx.notify();
+    }
+
+    /// Space in the diff: tick or untick the cursor's line.
+    fn toggle_cursor_line(&mut self, cx: &mut Context<Self>) {
+        if let Some((h, l)) = self.line_cursor {
+            self.click_line(h, l, false, cx);
+        }
+    }
+
+    /// Enter in the diff: stage (or unstage) the ticked lines, or the whole hunk
+    /// the cursor is in when none are ticked.
+    fn apply_by_keyboard(&mut self, cx: &mut Context<Self>) {
+        if !self.line_sel.is_empty() {
+            let op = if self.side == DiffSide::Staged {
+                LineOp::Unstage
+            } else {
+                LineOp::Stage
+            };
+            let selection = self.line_sel.clone();
+            self.apply_lines(op, selection, cx);
+        } else if let Some((hunk, _)) = self.line_cursor {
+            self.stage_hunk(hunk, cx);
+        }
     }
 
     fn click_line(&mut self, hunk: usize, line: usize, shift: bool, cx: &mut Context<Self>) {
@@ -1218,6 +1329,10 @@ impl ChangesView {
             self.set_notice(vec![NoticeLine::err("Nothing is staged.")], cx);
             return;
         }
+        let target_ids: Vec<RepoId> = targets.iter().map(|t| t.0).collect();
+        if !self.begin_work(&target_ids, "Committing…", cx) {
+            return;
+        }
         self.busy = true;
         cx.notify();
         self.run(
@@ -1241,6 +1356,8 @@ impl ChangesView {
             },
             move |this, results, cx| {
                 this.busy = false;
+                let done: Vec<RepoId> = results.iter().map(|r| r.0).collect();
+                this.end_work(&done);
                 let mut lines = Vec::new();
                 let mut made: Vec<(RepoId, String)> = Vec::new();
                 for (id, name, result) in &results {

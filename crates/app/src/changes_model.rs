@@ -156,6 +156,29 @@ pub fn changed_lines(diff: &FileDiff) -> Vec<(usize, usize)> {
         .collect()
 }
 
+/// The changed line `delta` places after `current` (`(hunk, line)`), for the
+/// arrow keys in the diff. Starts at the first (or last) changed line when
+/// nothing is selected, and stays at the ends.
+pub fn step_changed_line(
+    diff: &FileDiff,
+    current: Option<(usize, usize)>,
+    delta: i32,
+) -> Option<(usize, usize)> {
+    let lines = changed_lines(diff);
+    if lines.is_empty() {
+        return None;
+    }
+    let Some(at) = current.and_then(|c| lines.iter().position(|l| *l == c)) else {
+        return Some(if delta >= 0 {
+            lines[0]
+        } else {
+            lines[lines.len() - 1]
+        });
+    };
+    let next = (at as i64 + i64::from(delta)).clamp(0, lines.len() as i64 - 1) as usize;
+    Some(lines[next])
+}
+
 /// Applies a click on a changed line: a plain click toggles it, a Shift-click
 /// selects (or clears, if the clicked line was selected) everything between
 /// the anchor and it. Returns the new anchor.
@@ -607,6 +630,26 @@ mod tests {
         // Plain click toggles off.
         click_line(&d, &mut sel, None, (1, 0), false);
         assert!(sel.is_empty());
+    }
+
+    #[test]
+    fn arrow_keys_step_between_changed_lines_only() {
+        let d = sample_diff();
+        assert_eq!(step_changed_line(&d, None, 1), Some((0, 1)));
+        assert_eq!(step_changed_line(&d, None, -1), Some((1, 1)));
+        assert_eq!(
+            step_changed_line(&d, Some((0, 2)), 1),
+            Some((0, 4)),
+            "skips the marker"
+        );
+        assert_eq!(
+            step_changed_line(&d, Some((0, 4)), 1),
+            Some((1, 0)),
+            "crosses hunks"
+        );
+        assert_eq!(step_changed_line(&d, Some((1, 1)), 1), Some((1, 1)));
+        assert_eq!(step_changed_line(&d, Some((0, 1)), -1), Some((0, 1)));
+        assert_eq!(step_changed_line(&FileDiff::default(), None, 1), None);
     }
 
     #[test]

@@ -12,8 +12,9 @@
 //! Restoring is a three-way merge of (what the file was, what it is now, what
 //! was stashed), so edits made since are kept; if both sides changed the same
 //! lines the file is left alone and reported. Contents are stored in
-//! repository form (LF endings when `core.autocrlf` is on) and converted back
-//! on restore.
+//! repository form (LF endings) and converted back on restore. Which files
+//! have their endings converted follows `.gitattributes` (`text`, `-text`,
+//! `eol=`) and falls back to `core.autocrlf`. A file's executable bit is kept.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -29,6 +30,7 @@ const NAMESPACE: &str = "refs/devspace/stash/";
 /// Key used while HEAD is detached.
 const DETACHED: &str = "_detached";
 const BLOB_MODE: u32 = 0o100644;
+const EXEC_MODE: u32 = 0o100755;
 const TREE_MODE: i32 = 0o040000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +69,9 @@ pub struct ShelfOutcome {
 struct Entry {
     base: Option<Oid>,
     new: Option<Oid>,
+    /// The file was executable on that side (unix mode 755).
+    base_exec: bool,
+    new_exec: bool,
 }
 
 type Entries = BTreeMap<String, Entry>;
@@ -114,6 +119,70 @@ fn eol_mode(repo: &Repository) -> Eol {
     }
 }
 
+/// The attribute `name` of `path` as git's attribute machinery reports it.
+fn attr(repo: &Repository, path: &str, name: &str) -> Option<String> {
+    repo.get_attr(Path::new(path), name, git2::AttrCheckFlags::FILE_THEN_INDEX)
+        .ok()
+        .flatten()
+        .map(str::to_owned)
+}
+
+/// How `path`'s line endings are handled: `.gitattributes` first (`-text`
+/// leaves the file alone, `eol=crlf` / `eol=lf` pick the working-tree ending,
+/// `text` / `text=auto` use the platform's native one), then `core.autocrlf`
+/// (`default`).
+fn eol_for(repo: &Repository, path: &str, default: Eol) -> Eol {
+    let text = attr(repo, path, "text");
+    let eol = attr(repo, path, "eol");
+    let by_eol = match eol.as_deref() {
+        Some("crlf") => Some(Eol::Crlf),
+        Some("lf") => Some(Eol::ToRepo),
+        _ => None,
+    };
+    match text.as_deref() {
+        Some("[internal]__FALSE__") => Eol::Keep,
+        Some("[internal]__TRUE__") | Some("auto") => by_eol.unwrap_or(if default == Eol::Keep {
+            if cfg!(windows) {
+                Eol::Crlf
+            } else {
+                Eol::ToRepo
+            }
+        } else {
+            default
+        }),
+        _ => by_eol.unwrap_or(default),
+    }
+}
+
+/// Marks `path` executable (or not) where the platform has such a bit.
+#[cfg(unix)]
+fn set_exec(path: &Path, exec: bool) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(path)?.permissions().mode();
+    let wanted = if exec { mode | 0o111 } else { mode & !0o111 };
+    if wanted != mode {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(wanted))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_exec(_path: &Path, _exec: bool) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Whether the file on disk is executable (always `fallback` where there is no such bit).
+#[cfg(unix)]
+fn is_exec(meta: &std::fs::Metadata, _fallback: bool) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn is_exec(_meta: &std::fs::Metadata, fallback: bool) -> bool {
+    fallback
+}
+
 fn is_text(bytes: &[u8]) -> bool {
     !bytes.iter().take(8000).any(|b| *b == 0)
 }
@@ -150,7 +219,11 @@ fn to_worktree_form(bytes: Vec<u8>, eol: Eol) -> Vec<u8> {
 
 // ---- reading and writing the record ----------------------------------
 
-fn read_side(repo: &Repository, tree: &git2::Tree<'_>, name: &str) -> BTreeMap<String, Oid> {
+fn read_side(
+    repo: &Repository,
+    tree: &git2::Tree<'_>,
+    name: &str,
+) -> BTreeMap<String, (Oid, bool)> {
     let mut out = BTreeMap::new();
     let Some(sub) = tree
         .get_name(name)
@@ -161,7 +234,10 @@ fn read_side(repo: &Repository, tree: &git2::Tree<'_>, name: &str) -> BTreeMap<S
     };
     let _ = sub.walk(TreeWalkMode::PreOrder, |root, entry| {
         if entry.kind() == Some(ObjectType::Blob) {
-            out.insert(format!("{root}{}", entry.name().unwrap_or("")), entry.id());
+            out.insert(
+                format!("{root}{}", entry.name().unwrap_or("")),
+                (entry.id(), entry.filemode() == 0o100755),
+            );
         }
         TreeWalkResult::Ok
     });
@@ -184,8 +260,10 @@ fn load<'r>(
     let mut entries = Entries::new();
     for path in base.keys().chain(new.keys()) {
         entries.entry(path.clone()).or_insert(Entry {
-            base: base.get(path).copied(),
-            new: new.get(path).copied(),
+            base: base.get(path).map(|b| b.0),
+            new: new.get(path).map(|n| n.0),
+            base_exec: base.get(path).is_some_and(|b| b.1),
+            new_exec: new.get(path).is_some_and(|n| n.1),
         });
     }
     Ok(Some((entries, commit)))
@@ -194,17 +272,17 @@ fn load<'r>(
 fn side_tree(
     repo: &Repository,
     entries: &Entries,
-    pick: impl Fn(&Entry) -> Option<Oid>,
+    pick: impl Fn(&Entry) -> Option<(Oid, bool)>,
 ) -> Result<Oid, GitError> {
     let mut index = Index::new()?;
     for (path, entry) in entries {
-        if let Some(id) = pick(entry) {
+        if let Some((id, exec)) = pick(entry) {
             index.add(&IndexEntry {
                 ctime: IndexTime::new(0, 0),
                 mtime: IndexTime::new(0, 0),
                 dev: 0,
                 ino: 0,
-                mode: BLOB_MODE,
+                mode: if exec { EXEC_MODE } else { BLOB_MODE },
                 uid: 0,
                 gid: 0,
                 file_size: 0,
@@ -234,8 +312,16 @@ fn save(
         return Ok(());
     }
     let mut root = repo.treebuilder(None)?;
-    root.insert("base", side_tree(repo, entries, |e| e.base)?, TREE_MODE)?;
-    root.insert("new", side_tree(repo, entries, |e| e.new)?, TREE_MODE)?;
+    root.insert(
+        "base",
+        side_tree(repo, entries, |e| e.base.map(|b| (b, e.base_exec)))?,
+        TREE_MODE,
+    )?;
+    root.insert(
+        "new",
+        side_tree(repo, entries, |e| e.new.map(|n| (n, e.new_exec)))?,
+        TREE_MODE,
+    )?;
     let tree = repo.find_tree(root.write()?)?;
     let sig = repo
         .signature()
@@ -303,9 +389,11 @@ struct Pending {
 /// the working tree (and the index) back to HEAD for those files. New files
 /// are deleted from disk, deleted files come back; both return on restore.
 ///
-/// Files already in this branch's stash are skipped (restore or discard
-/// them first), as are files with no changes, symlinks and submodules. The
-/// stash record is written before the working tree is touched.
+/// A file already in this branch's stash can be stashed again: the new edits
+/// are merged into what is stashed (and skipped, with the file left alone,
+/// when they touch the same lines). Files with no changes, symlinks and
+/// submodules are skipped too. The stash record is written before the
+/// working tree is touched.
 pub fn shelf_stash(path: &Path, files: &[String]) -> Result<ShelfOutcome, GitError> {
     for file in files {
         check_rel_path(file)?;
@@ -332,8 +420,40 @@ pub fn shelf_stash(path: &Path, files: &[String]) -> Result<ShelfOutcome, GitErr
             continue;
         }
         let mut skip = |reason: &str| outcome.skipped.push((file.clone(), reason.to_owned()));
-        if entries.contains_key(file) {
-            skip("already in this branch's stash; restore or discard it first");
+        if let Some(existing) = entries.get(file).copied() {
+            // Stashing it again: fold today's edits into what is stashed.
+            let full = workdir.join(file);
+            let (Some(base), Some(stashed), true) = (existing.base, existing.new, full.is_file())
+            else {
+                skip("already in this branch's stash; restore or discard it first");
+                continue;
+            };
+            let current = repo.blob(&to_repo_form(
+                std::fs::read(&full)?,
+                eol_for(&repo, file, eol),
+            ))?;
+            if current == base {
+                skip("no changes to stash");
+                continue;
+            }
+            let Some(merged) = merge3(&repo, base, stashed, current)? else {
+                skip("changed in the same place as what is already stashed");
+                continue;
+            };
+            let in_head = head_tree
+                .as_ref()
+                .is_some_and(|t| t.get_path(Path::new(file)).is_ok());
+            entries.insert(
+                file.clone(),
+                Entry {
+                    new: Some(repo.blob(&merged)?),
+                    ..existing
+                },
+            );
+            pending.push(Pending {
+                path: file.clone(),
+                in_head,
+            });
             continue;
         }
         let full = workdir.join(file);
@@ -356,19 +476,31 @@ pub fn shelf_stash(path: &Path, files: &[String]) -> Result<ShelfOutcome, GitErr
             skip("not a regular file in HEAD (a folder or submodule)");
             continue;
         }
+        let base_exec = head_entry
+            .as_ref()
+            .is_some_and(|e| e.filemode() == EXEC_MODE as i32);
         let base = head_entry.map(|e| e.id());
+        let new_exec = meta.as_ref().is_some_and(|m| is_exec(m, base_exec));
         let new = match meta {
             Some(_) => {
                 let bytes = std::fs::read(&full)?;
-                Some(repo.blob(&to_repo_form(bytes, eol))?)
+                Some(repo.blob(&to_repo_form(bytes, eol_for(&repo, file, eol)))?)
             }
             None => None,
         };
-        if base == new {
+        if base == new && base_exec == new_exec {
             skip("no changes to stash");
             continue;
         }
-        entries.insert(file.clone(), Entry { base, new });
+        entries.insert(
+            file.clone(),
+            Entry {
+                base,
+                new,
+                base_exec,
+                new_exec,
+            },
+        );
         pending.push(Pending {
             path: file.clone(),
             in_head: base.is_some(),
@@ -513,7 +645,10 @@ pub fn shelf_restore(path: &Path, files: &[String]) -> Result<ShelfOutcome, GitE
             continue;
         }
         let current = match full.symlink_metadata() {
-            Ok(_) => Some(repo.blob(&to_repo_form(std::fs::read(&full)?, eol))?),
+            Ok(_) => Some(repo.blob(&to_repo_form(
+                std::fs::read(&full)?,
+                eol_for(&repo, file, eol),
+            ))?),
             Err(_) => None,
         };
         match plan_restore(&repo, &entry, current)? {
@@ -521,7 +656,8 @@ pub fn shelf_restore(path: &Path, files: &[String]) -> Result<ShelfOutcome, GitE
                 if let Some(parent) = full.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                std::fs::write(&full, to_worktree_form(bytes, eol))?;
+                std::fs::write(&full, to_worktree_form(bytes, eol_for(&repo, file, eol)))?;
+                set_exec(&full, entry.new_exec)?;
             }
             Ok(Restore::Delete) => std::fs::remove_file(&full)?,
             Ok(Restore::Nothing) => {}
@@ -698,6 +834,21 @@ mod tests {
     }
 
     #[test]
+    fn stashing_a_stashed_file_again_adds_the_new_edits() {
+        let f = Fixture::with_files(&[("a.txt", "a\nb\nc\n")]);
+        f.write("a.txt", "A\nb\nc\n");
+        shelf_stash(f.path(), &s(&["a.txt"])).unwrap();
+        assert_eq!(f.read("a.txt"), "a\nb\nc\n");
+        f.write("a.txt", "a\nb\nC\n");
+        let out = shelf_stash(f.path(), &s(&["a.txt"])).unwrap();
+        assert_eq!(out.done, ["a.txt"], "{out:?}");
+        assert_eq!(f.read("a.txt"), "a\nb\nc\n", "back to HEAD");
+        let out = shelf_restore(f.path(), &s(&["a.txt"])).unwrap();
+        assert_eq!(out.done, ["a.txt"]);
+        assert_eq!(f.read("a.txt"), "A\nb\nC\n", "both edits come back");
+    }
+
+    #[test]
     fn a_file_already_stashed_is_not_stashed_over() {
         let f = Fixture::with_files(&[("a.txt", "1\n")]);
         f.write("a.txt", "first\n");
@@ -705,7 +856,7 @@ mod tests {
         f.write("a.txt", "second\n");
         let out = shelf_stash(f.path(), &s(&["a.txt"])).unwrap();
         assert!(out.done.is_empty());
-        assert!(out.skipped[0].1.contains("already in this branch's stash"));
+        assert!(out.skipped[0].1.contains("same place"), "{out:?}");
         assert_eq!(f.read("a.txt"), "second\n", "left alone");
         // Restoring over a different edit must not silently overwrite it.
         let out = shelf_restore(f.path(), &s(&["a.txt"])).unwrap();
@@ -862,6 +1013,71 @@ mod tests {
         assert_eq!(
             std::fs::read(f.path().join("a.txt")).unwrap(),
             b"a\r\nB\r\nc\r\nd\r\nE\r\n"
+        );
+    }
+
+    fn stored_blob(f: &Fixture, side: &str, file: &str) -> Vec<u8> {
+        let repo = git2::Repository::open(f.path()).unwrap();
+        let branch = f.branch_name().unwrap();
+        let tree = repo
+            .find_reference(&format!("refs/devspace/stash/{branch}"))
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .tree()
+            .unwrap();
+        let entry = tree.get_path(Path::new(&format!("{side}/{file}"))).unwrap();
+        let content = repo.find_blob(entry.id()).unwrap().content().to_vec();
+        content
+    }
+
+    #[test]
+    fn gitattributes_decide_which_files_have_their_endings_converted() {
+        let f = Fixture::with_files(&[
+            ("a.txt", "one\n"),
+            ("raw.dat", "one\n"),
+            (".gitattributes", "*.txt text eol=crlf\n*.dat -text\n"),
+        ]);
+        // autocrlf stays off: only the attributes ask for conversion.
+        f.write("a.txt", "one\r\ntwo\r\n");
+        f.write("raw.dat", "one\r\ntwo\r\n");
+        shelf_stash(f.path(), &s(&["a.txt", "raw.dat"])).unwrap();
+        assert_eq!(
+            stored_blob(&f, "new", "a.txt"),
+            b"one\ntwo\n",
+            "text file stored with LF"
+        );
+        assert_eq!(
+            stored_blob(&f, "new", "raw.dat"),
+            b"one\r\ntwo\r\n",
+            "-text file stored as it is"
+        );
+        shelf_restore(f.path(), &s(&["a.txt", "raw.dat"])).unwrap();
+        assert_eq!(
+            f.read("a.txt"),
+            "one\r\ntwo\r\n",
+            "eol=crlf brings CRLF back"
+        );
+        assert_eq!(f.read("raw.dat"), "one\r\ntwo\r\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_executable_bit_survives_stash_and_restore() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::with_files(&[("run.sh", "echo 1\n")]);
+        let path = f.path().join("run.sh");
+        std::fs::write(&path, "echo 2\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        shelf_stash(f.path(), &s(&["run.sh"])).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o111,
+            0
+        );
+        shelf_restore(f.path(), &s(&["run.sh"])).unwrap();
+        assert_ne!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o111,
+            0
         );
     }
 

@@ -652,16 +652,8 @@ impl Root {
                 self.terminal_panel
                     .update(cx, |panel, cx| panel.new_tab(window, cx));
             }
-            Command::OpenChanges => {
-                if self.open_changes.is_none() {
-                    self.toggle_changes(cx);
-                }
-            }
-            Command::OpenHistory => {
-                if self.open_history.is_none() {
-                    self.toggle_history(cx);
-                }
-            }
+            Command::OpenChanges => self.open_git(crate::GitTab::Changes, cx),
+            Command::OpenHistory => self.open_git(crate::GitTab::History, cx),
             Command::OpenRunCommands => {
                 if !self.run_open {
                     self.toggle_run_view(cx);
@@ -719,11 +711,7 @@ impl Root {
                 }
                 self.open_note(note, title.into(), cx);
             }
-            Target::Commit => {
-                if self.open_history.is_none() {
-                    self.toggle_history(cx);
-                }
-            }
+            Target::Commit => self.open_git(crate::GitTab::History, cx),
         }
         cx.notify();
     }

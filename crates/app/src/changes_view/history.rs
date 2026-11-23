@@ -23,6 +23,35 @@ fn action_color(theme: &GlassTheme, action: &PlanAction) -> Hsla {
     }
 }
 
+/// What is being dragged from the commit list: the commits (oldest first,
+/// ready for `git cherry-pick`) and a label for the drag preview.
+pub(crate) struct DraggedCommits {
+    pub hashes: Vec<String>,
+    pub label: String,
+}
+
+/// The little pill that follows the pointer while commits are dragged.
+struct DragPreview {
+    label: String,
+    theme: GlassTheme,
+}
+
+impl Render for DragPreview {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.theme;
+        div()
+            .px(theme.space_3)
+            .py(theme.space_1)
+            .rounded(theme.radius_sm)
+            .border_1()
+            .border_color(theme.accent)
+            .bg(theme.surface_solid)
+            .t_small()
+            .text_color(theme.text_primary)
+            .child(self.label.clone())
+    }
+}
+
 impl ChangesView {
     // ---- shared --------------------------------------------------------
 
@@ -55,6 +84,7 @@ impl ChangesView {
         let path = pane.path();
         self.popover = Some(Popover::History);
         self.confirm = None;
+        self.load_branches(repo, cx);
         self.history = Some(HistoryState {
             repo,
             loading: true,
@@ -268,7 +298,6 @@ impl ChangesView {
         let Some(h) = self.history.as_ref() else {
             return;
         };
-        let repo = h.repo;
         // The plan is newest first; git wants oldest first.
         let hashes: Vec<String> = h
             .plan
@@ -277,6 +306,19 @@ impl ChangesView {
             .filter(|p| h.picked.contains(&p.hash))
             .map(|p| p.hash.clone())
             .collect();
+        self.cherry_pick_hashes(target, hashes, cx);
+    }
+
+    /// Applies `hashes` (oldest first) onto `target`: the ticked commits, or
+    /// the ones dropped on a branch.
+    fn cherry_pick_hashes(&mut self, target: String, hashes: Vec<String>, cx: &mut Context<Self>) {
+        let Some(h) = self.history.as_ref() else {
+            return;
+        };
+        if hashes.is_empty() {
+            return;
+        }
+        let repo = h.repo;
         let Some(pane) = self.pane(repo) else { return };
         let path = pane.path();
         let name = pane.repo.name.clone();
@@ -521,6 +563,7 @@ impl ChangesView {
                         .text_color(theme.text_muted)
                         .child("Newest first. Click a tag to cycle Pick, Squash, Fixup, Drop; Squash and Fixup join the commit below."),
                 )
+                .child(self.branch_drop_strip(repo, current.as_deref(), cx))
                 .when(changed && pushed, |d| {
                     d.child(
                         div()
@@ -603,6 +646,77 @@ impl ChangesView {
             .into_any_element()
     }
 
+    /// Branch chips to drop commits on: a drop cherry-picks them onto that
+    /// branch (and switches to it).
+    fn branch_drop_strip(
+        &self,
+        repo: RepoId,
+        current: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = self.theme;
+        let branches: Vec<String> = self
+            .pane(repo)
+            .map(|p| p.branches.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|b| Some(b.as_str()) != current)
+            .take(24)
+            .collect();
+        if branches.is_empty() {
+            return div().into_any_element();
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(theme.space_1)
+            .child(section_label(
+                &theme,
+                "Drag commits onto a branch to cherry-pick",
+            ))
+            .child(
+                div()
+                    .id("drop-branches")
+                    .flex()
+                    .flex_wrap()
+                    .gap(theme.space_1)
+                    .max_h(px(76.0))
+                    .overflow_y_scroll()
+                    .children(branches.into_iter().enumerate().map(|(ix, name)| {
+                        let target = name.clone();
+                        div()
+                            .id(("drop-branch", ix as u64))
+                            .flex()
+                            .items_center()
+                            .gap(theme.space_1)
+                            .h(px(24.0))
+                            .px(theme.space_2)
+                            .rounded(theme.radius_sm)
+                            .border_1()
+                            .border_color(theme.border_light)
+                            .t_small()
+                            .text_color(theme.text_secondary)
+                            .drag_over::<DraggedCommits>(move |s, _, _, _| {
+                                s.bg(theme.accent.opacity(0.22))
+                                    .border_color(theme.accent)
+                                    .text_color(theme.text_primary)
+                            })
+                            .on_drop(cx.listener(
+                                move |this, dragged: &DraggedCommits, _window, cx| {
+                                    this.cherry_pick_hashes(
+                                        target.clone(),
+                                        dragged.hashes.clone(),
+                                        cx,
+                                    );
+                                },
+                            ))
+                            .child(icon(Icon::GitBranch, 12.0, theme.text_muted))
+                            .child(name)
+                    })),
+            )
+            .into_any_element()
+    }
+
     fn history_row(
         &self,
         ix: usize,
@@ -620,11 +734,41 @@ impl ChangesView {
         let key = ix as u64;
         let hash = item.hash.clone();
         let short: String = item.hash.chars().take(7).collect();
+        // Dragging a ticked row takes every ticked commit with it; any other
+        // row goes alone. Oldest first, as cherry-pick wants them.
+        let dragged = {
+            let take_all = picked;
+            let hashes: Vec<String> = self
+                .history
+                .as_ref()
+                .map(|h| {
+                    h.plan
+                        .iter()
+                        .rev()
+                        .filter(|p| {
+                            if take_all {
+                                h.picked.contains(&p.hash)
+                            } else {
+                                p.hash == item.hash
+                            }
+                        })
+                        .map(|p| p.hash.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let label = if hashes.len() == 1 {
+                item.summary.clone()
+            } else {
+                format!("{} commits", hashes.len())
+            };
+            DraggedCommits { hashes, label }
+        };
         let summary = match &item.action {
             PlanAction::Reword(m) => m.clone(),
             _ => item.summary.clone(),
         };
         div()
+            .id(("history-row", key))
             .flex()
             .items_center()
             .gap(theme.space_2)
@@ -633,6 +777,10 @@ impl ChangesView {
             .px(theme.space_1)
             .border_b_1()
             .border_color(theme.border_subtle)
+            .on_drag(dragged, move |d, _pos, _window, cx| {
+                let label = d.label.clone();
+                cx.new(|_| DragPreview { label, theme })
+            })
             .child(
                 checkbox(
                     &theme,

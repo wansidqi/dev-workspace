@@ -308,7 +308,11 @@ screenshot (see "Not verified by hand" below).
         browser's branch dropdown); the task picker is the same tree as the
         commit browser's, without status icons
 - Not done / known gaps in Phase 1:
-  - [ ] Syntax highlighting in the diff (colouring is +/- only)
+  - [x] Diff look like GitHub Desktop: whole rows washed green / red, line-number
+        gutters in a deeper shade (brighter numbers on changed lines), ticked
+        lines turn their gutters to the accent, and syntax colours from the
+        file's extension (`highlight::language_for_path`; prose and data files
+        are left plain)
   - [x] Multi-line commit description: `TextInput` has a multiline mode
         (Enter inserts a line, Up/Down move between lines, the box grows)
   - [x] Git hooks run on commit: when the repo has an active hook
@@ -317,12 +321,23 @@ screenshot (see "Not verified by hand" below).
         hook's output is shown; without hooks libgit2 commits directly
   - [x] Keyboard navigation in the file list: Up/Down (or J/K) select the
         previous / next file, Space stages or unstages it, once the list has
-        focus (click a row). Not in the diff itself
-  - [ ] Shelf: line-ending handling covers `core.autocrlf` (true/input) only,
-        not `.gitattributes` rules; a file already in the stash can't be
-        stashed again until restored or discarded; the stash doesn't keep the
-        executable bit; no automatic restore when switching back to a branch
-  - [ ] Commit-detail diff in the history browser (the diff code is reusable)
+        focus (click a row); Right moves into the diff
+  - [x] Keyboard in the diff: Up/Down (or J/K) walk the changed lines,
+        Shift+Up/Down extends the ticked range, Space ticks a line, Enter
+        stages (or unstages) the ticked lines or, with none ticked, the hunk;
+        Left / Escape return to the file list
+  - [x] Shelf: line endings follow `.gitattributes` (`text`, `-text`, `eol=`)
+        and fall back to `core.autocrlf`; stashing a file that is already
+        stashed merges the new edits into it (refused only when they touch
+        the same lines); the executable bit is kept (unix; not testable on
+        Windows, where git keeps it in the index); arriving on a branch that
+        has stashed files says so (nothing is restored behind your back)
+  - [x] Commit-detail diff in the history browser: select one commit, "View
+        changes" shows its files and the diff of each (`commit_detail.rs`,
+        `devspace-git` `commit_diff.rs`; merges against the first parent,
+        renames detected)
+  - [x] Spinner and a "working" label for commit, stage-all / unstage-all
+        and every other slow action (per-file checkboxes stay instant)
 - Not verified by hand: clicks. The environment forbids synthetic input on
   the live desktop, so the click handlers are wired to tested git functions
   but not exercised in the running app. Screenshots checked: file list, diff,
@@ -374,7 +389,9 @@ Phase 4 — history rewriting (git CLI). Built 2026-11-23.
 - [x] Cherry-pick: tick commits in the history list, "Cherry-pick N to…"
       picks the branch (switches to it, carrying or stashing changes per the
       branch popover's setting), applies oldest first, stops on conflicts
-- [ ] Drag-to-cherry-pick (done as tick + choose branch instead)
+- [x] Drag-to-cherry-pick: drag a commit (or all ticked commits, if you drag a
+      ticked one) from the history list onto a branch chip below it; tick +
+      "Cherry-pick N to…" still works
 - [x] Commit links follow a rewrite by patch-id (`devspace-git` `patchid.rs`):
       after an in-app rebase, a pull that rebased, or continuing a rebase,
       each link whose commit left every branch is re-pointed to the commit

@@ -4,7 +4,7 @@
 use std::ops::Range;
 
 use devspace_git::{ChangeKind, ChangedFile, DiffSide, LineKind};
-use gpui::{div, px, uniform_list, AnyElement, Hsla, SharedString};
+use gpui::{div, px, uniform_list, AnyElement, HighlightStyle, Hsla, SharedString, StyledText};
 
 use super::*;
 use crate::changes_model::{DiffRow, RepoRows, Row};
@@ -387,6 +387,7 @@ impl Render for ChangesView {
                     "down" | "j" => this.step_selection(1, cx),
                     "up" | "k" => this.step_selection(-1, cx),
                     "space" => this.toggle_selected(cx),
+                    "right" => window.focus(&this.diff_focus, cx),
                     _ => return,
                 }
                 cx.stop_propagation();
@@ -1459,12 +1460,30 @@ impl ChangesView {
                     .flex_col()
                     .flex_1()
                     .min_h(px(0.0))
+                    .track_focus(&self.diff_focus)
+                    // Arrow keys walk the changed lines, Space ticks one, Enter
+                    // stages what is ticked (or the hunk), Left / Escape go
+                    // back to the file list.
+                    .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                        let shift = event.keystroke.modifiers.shift;
+                        match event.keystroke.key.as_str() {
+                            "down" | "j" => this.step_diff_cursor(1, shift, cx),
+                            "up" | "k" => this.step_diff_cursor(-1, shift, cx),
+                            "space" => this.toggle_cursor_line(cx),
+                            "enter" => this.apply_by_keyboard(cx),
+                            "left" | "escape" => window.focus(&this.list_focus, cx),
+                            _ => return,
+                        }
+                        cx.stop_propagation();
+                    }))
                     .child(
                         uniform_list(
                             "diff-rows",
                             loaded.rows.len(),
-                            cx.processor(|this, range: Range<usize>, _window, cx| {
-                                range.map(|ix| this.render_diff_row(ix, cx)).collect::<Vec<_>>()
+                            cx.processor(|this, range: Range<usize>, window, cx| {
+                                range
+                                    .map(|ix| this.render_diff_row(ix, window, cx))
+                                    .collect::<Vec<_>>()
                             }),
                         )
                         .track_scroll(&self.diff_scroll)
@@ -1497,7 +1516,12 @@ impl ChangesView {
         }
     }
 
-    pub(super) fn render_diff_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_diff_row(
+        &self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = self.theme;
         let Some(loaded) = &self.diff else {
             return div().into_any_element();
@@ -1582,11 +1606,28 @@ impl ChangesView {
                 let changed =
                     !loaded.readonly && matches!(l.kind, LineKind::Added | LineKind::Removed);
                 let picked = self.line_sel.contains(&(hunk, line));
+                // Like GitHub Desktop: the whole row is washed green or red, the
+                // line-number gutters are a deeper shade of the same colour, and a
+                // ticked line turns its gutters to the accent.
                 let (bg, marker, marker_color) = match l.kind {
-                    LineKind::Added => (theme.success.opacity(0.12), "+", theme.success),
-                    LineKind::Removed => (theme.danger.opacity(0.12), "−", theme.danger),
+                    LineKind::Added => (theme.success.opacity(0.24), "+", theme.success),
+                    LineKind::Removed => (theme.danger.opacity(0.26), "−", theme.danger),
                     _ => (gpui::transparent_black(), " ", theme.text_muted),
                 };
+                let is_cursor_now =
+                    self.line_cursor == Some((hunk, line)) && self.diff_focus.is_focused(window);
+                let gutter_tint = if picked {
+                    theme.accent.opacity(0.55)
+                } else if is_cursor_now {
+                    theme.accent.opacity(0.30)
+                } else {
+                    match l.kind {
+                        LineKind::Added => theme.success.opacity(0.40),
+                        LineKind::Removed => theme.danger.opacity(0.44),
+                        _ => theme.surface_sunken,
+                    }
+                };
+                let is_change = matches!(l.kind, LineKind::Added | LineKind::Removed);
                 let text: SharedString = l
                     .text
                     .replace('\t', "    ")
@@ -1594,14 +1635,33 @@ impl ChangesView {
                     .to_string()
                     .into();
                 let key = ((hunk as u64) << 32) | line as u64;
+                let is_cursor =
+                    self.line_cursor == Some((hunk, line)) && self.diff_focus.is_focused(window);
+                let highlights: Vec<(Range<usize>, HighlightStyle)> =
+                    crate::highlight::language_for_path(&loaded.diff.path)
+                        .map(|lang| {
+                            crate::highlight::tokenize(lang, &text)
+                                .into_iter()
+                                .map(|(range, token)| {
+                                    (
+                                        range,
+                                        HighlightStyle {
+                                            color: Some(crate::theme::syntax_color(&theme, token)),
+                                            ..Default::default()
+                                        },
+                                    )
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
                 div()
                     .id(("diff-line", key))
                     .flex()
                     .items_center()
                     .w_full()
                     .h(px(DIFF_ROW_HEIGHT))
-                    .bg(if picked {
-                        theme.accent.opacity(0.22)
+                    .bg(if is_cursor && !is_change {
+                        theme.accent.opacity(0.12)
                     } else {
                         bg
                     })
@@ -1609,7 +1669,9 @@ impl ChangesView {
                     .t_small()
                     .when(changed, |d| {
                         d.cursor_pointer().on_click(cx.listener(
-                            move |this, event: &gpui::ClickEvent, _window, cx| {
+                            move |this, event: &gpui::ClickEvent, window, cx| {
+                                window.focus(&this.diff_focus, cx);
+                                this.line_cursor = Some((hunk, line));
                                 this.click_line(hunk, line, event.modifiers().shift, cx);
                             },
                         ))
@@ -1621,6 +1683,8 @@ impl ChangesView {
                             .items_center()
                             .justify_center()
                             .w(px(28.0))
+                            .h_full()
+                            .bg(gutter_tint)
                             .when(changed, |d| {
                                 d.child(checkbox(
                                     &theme,
@@ -1633,8 +1697,8 @@ impl ChangesView {
                                 ))
                             }),
                     )
-                    .child(gutter(&theme, l.old_lineno))
-                    .child(gutter(&theme, l.new_lineno))
+                    .child(gutter(&theme, l.old_lineno, gutter_tint, is_change))
+                    .child(gutter(&theme, l.new_lineno, gutter_tint, is_change))
                     .child(
                         div()
                             .flex_none()
@@ -1649,7 +1713,7 @@ impl ChangesView {
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_color(theme.text_primary)
-                            .child(text),
+                            .child(StyledText::new(text).with_highlights(highlights)),
                     )
                     .into_any_element()
             }
@@ -1658,13 +1722,23 @@ impl ChangesView {
     }
 }
 
-fn gutter(theme: &GlassTheme, n: Option<u32>) -> gpui::Div {
+/// A line-number column: tinted like its row, and brighter on changed lines.
+fn gutter(theme: &GlassTheme, n: Option<u32>, tint: Hsla, changed: bool) -> gpui::Div {
     div()
+        .flex()
+        .items_center()
+        .justify_end()
         .flex_none()
         .w(px(GUTTER_WIDTH))
+        .h_full()
         .pr(theme.space_2)
-        .text_right()
-        .text_color(theme.text_muted)
+        .bg(tint)
+        .text_color(if changed {
+            theme.text_primary
+        } else {
+            theme.text_muted
+        })
+        .when(changed, |d| d.t_strong())
         .child(n.map(|n| n.to_string()).unwrap_or_default())
 }
 
