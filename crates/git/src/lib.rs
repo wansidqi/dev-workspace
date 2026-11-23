@@ -8,8 +8,13 @@ use git2::Repository;
 
 mod branches;
 mod changes;
+mod cli;
 mod commit;
 mod diff;
+mod integrate;
+mod patchid;
+mod rebase;
+mod remote;
 mod shelf;
 mod stash;
 #[cfg(test)]
@@ -23,10 +28,26 @@ pub use branches::{
 pub use changes::{
     discard_files, repo_status, stage_files, unstage_files, ChangeKind, ChangedFile, RepoStatus,
 };
+pub use cli::git_executable;
 pub use commit::{commit_staged, last_commit_message, CommitRequest};
 pub use diff::{
     discard_lines, file_diff, stage_lines, unstage_lines, DiffHunk, DiffLine, DiffSide, FileDiff,
     LineKind, LineSelection,
+};
+pub use integrate::{
+    abort_operation, cherry_pick, continue_operation, has_conflict_markers, last_commit_is_pushed,
+    merge_branch, merge_preview, resolve_conflict, revert_commit, skip_commit, undo_last_commit,
+    MergeOutcome, MergePreview, Resolution, UndoneCommit,
+};
+pub use patchid::{find_rewritten, patch_id, Rewritten};
+pub use rebase::{
+    rebase_candidates, rebase_interactive, validate_plan, RebaseAction, RebaseCandidate,
+    RebaseEntry, RebaseOutcome,
+};
+pub use remote::{
+    clone_folder_name, clone_repo, configured_pull_mode, default_base_branch, fetch, has_remote,
+    is_clonable_url, next_sync_step, pull, push, remote_names, remote_url, sync, PullMode,
+    RemoteOutcome, SyncStep,
 };
 pub use shelf::{
     shelf_discard, shelf_file_diff, shelf_list, shelf_restore, shelf_stash, Shelf, ShelfFile,

@@ -24,6 +24,9 @@ use gpui::{
     Styled,
 };
 
+/// One full turn of a spinner.
+pub const SPIN: Duration = Duration::from_millis(900);
+
 /// Press and hover feedback.
 pub const MICRO: Duration = Duration::from_millis(140);
 /// Small components: tooltips, popovers, a toast leaving.
@@ -191,6 +194,16 @@ where
         } else {
             entrance_style(el, t, RISE)
         }
+    })
+}
+
+/// Turns an SVG round and round: the activity spinner. Only a rotation, so it
+/// costs no layout; with reduced motion it simply stays still.
+pub fn spin(el: gpui::Svg, id: impl Into<ElementId>) -> impl IntoElement {
+    el.with_animation(id, Animation::new(SPIN).repeat(), |el, t| {
+        el.with_transformation(gpui::Transformation::rotate(gpui::radians(
+            t * std::f32::consts::TAU,
+        )))
     })
 }
 

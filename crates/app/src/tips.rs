@@ -44,6 +44,83 @@ pub fn lookup(name: &str) -> Option<(&'static str, Option<&'static str>)> {
             "Change branch",
             "Switch, create, rename or delete branches in this repo.",
         ),
+        "changes-fetch" => tip(
+            "Fetch",
+            "Checks every shown repo's remote for new commits without changing your files.",
+        ),
+        "changes-pull" => tip(
+            "Pull",
+            "Brings new remote commits into the current branch of every shown repo.",
+        ),
+        "changes-push" => tip(
+            "Push",
+            "Sends your commits to the remote; publishes a branch the first time.",
+        ),
+        "changes-clone" => tip(
+            "Clone a repository",
+            "Downloads a repo and links it to this project.",
+        ),
+        "repo-sync" => tip(
+            "Sync",
+            "Fetch, pull what is new and push what is yours, for this repo.",
+        ),
+        "repo-history" => tip(
+            "History, merge and rewrite",
+            "Squash, reorder, reword, revert, cherry-pick, undo or merge a branch.",
+        ),
+        "op-continue" => tip(
+            "Continue",
+            "Finishes the operation once every conflict is resolved.",
+        ),
+        "op-skip" => tip(
+            "Skip this commit",
+            "Leaves out the commit it stopped on and goes on.",
+        ),
+        "op-abort" => tip(
+            "Abort",
+            "Stops and puts the repo back as it was before it started.",
+        ),
+        "conflict-mine" => tip(
+            "Keep my version",
+            "Uses the file as it is on the branch you are on.",
+        ),
+        "conflict-theirs" => tip(
+            "Take their version",
+            "Uses the incoming branch's file.",
+        ),
+        "conflict-resolved" => tip(
+            "Mark resolved",
+            "Use after editing the file by hand; refused while conflict markers remain.",
+        ),
+        "history-action" => tip(
+            "Change what happens",
+            "Cycles Pick, Squash, Fixup, Drop. Squash and Fixup join the commit below.",
+        ),
+        "repo-ci" => tip(
+            "CI checks",
+            "Status of this branch's checks on GitHub. Click for pull requests.",
+        ),
+        "history-prs" => tip(
+            "Pull requests",
+            "See open pull requests or open one from this branch (GitHub, if enabled in Settings).",
+        ),
+        "history-up" => Some(("Move newer", None)),
+        "history-down" => Some(("Move older", None)),
+        "history-reword" => Some(("Change the message", None)),
+        "history-revert" => tip(
+            "Revert this commit",
+            "Adds a new commit that undoes it; history is not rewritten.",
+        ),
+        "history-pick" => Some(("Select for cherry-pick", None)),
+        "history-undo" => tip(
+            "Undo last commit",
+            "Moves the branch back one commit and keeps its changes staged.",
+        ),
+        "history-merge" => Some(("Merge a branch into this one", None)),
+        "history-force-push" => tip(
+            "Force push",
+            "Replaces the remote branch with yours, but only if nobody pushed since your last fetch.",
+        ),
         "repo-stash-now" => tip(
             "Stash all changes",
             "Sets every change aside for this branch; restore from Stashed.",

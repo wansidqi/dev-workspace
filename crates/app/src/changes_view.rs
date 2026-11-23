@@ -15,7 +15,9 @@ use devspace_core::{CommitLinkStatus, Repo, RepoId, TaskId};
 use devspace_git::{
     self as git, DiffSide, FileDiff, GitError, LineSelection, RepoStatus, Shelf, SwitchMode,
 };
-use gpui::{prelude::*, App, Context, Entity, UniformListScrollHandle, WeakEntity, Window};
+use gpui::{
+    prelude::*, App, Context, Entity, FocusHandle, UniformListScrollHandle, WeakEntity, Window,
+};
 
 use crate::changes_model::{self, DiffRow};
 use crate::settings::SettingsStore;
@@ -23,7 +25,10 @@ use crate::state::AppState;
 use crate::text_input::TextInput;
 use crate::theme::GlassTheme;
 
+mod github;
+mod history;
 mod popovers;
+mod remote;
 mod render;
 mod stash;
 
@@ -61,6 +66,13 @@ struct RepoPane {
     recent: Vec<git::RecentBranch>,
     /// Bumped per refresh so a slow answer can't overwrite a newer one.
     generation: u64,
+    /// CI state of the branch on GitHub (only with the integration on).
+    ci: Option<devspace_github::CheckState>,
+    ci_checked: Option<std::time::Instant>,
+    /// What this repo is busy doing ("Switching to staging…"). While set, its
+    /// buttons are hidden, other actions on it are refused and status reads
+    /// wait, so nothing reads or touches a half-switched working tree.
+    working: Option<String>,
 }
 
 impl RepoPane {
@@ -77,6 +89,9 @@ impl RepoPane {
             branches: Vec::new(),
             recent: Vec::new(),
             generation: 0,
+            ci: None,
+            ci_checked: None,
+            working: None,
         }
     }
 
@@ -116,14 +131,103 @@ pub(crate) enum Scope {
 pub(crate) enum Popover {
     Branches(Scope),
     Tasks,
+    /// Commits of one repo: rewrite, revert, undo, cherry-pick, force push.
+    History,
+    /// Merge another branch into one repo's current branch.
+    Merge,
+    /// Clone a repository and link it to the project.
+    Clone,
+    /// Open pull requests of one repo, and a form to open another.
+    PullRequests,
 }
 
 /// A destructive action waiting for a second click.
 pub(crate) enum Confirm {
-    DiscardFiles { repo: RepoId, files: Vec<String> },
-    DiscardLines { count: usize },
-    DeleteBranch { repo: RepoId, name: String },
-    DiscardStash { repo: RepoId, files: Vec<String> },
+    DiscardFiles {
+        repo: RepoId,
+        files: Vec<String>,
+    },
+    DiscardLines {
+        count: usize,
+    },
+    DeleteBranch {
+        repo: RepoId,
+        name: String,
+    },
+    DiscardStash {
+        repo: RepoId,
+        files: Vec<String>,
+    },
+    /// Move the branch back one commit, keeping its changes staged.
+    UndoCommit {
+        repo: RepoId,
+        pushed: bool,
+    },
+    /// Abandon the merge, rebase, cherry-pick or revert in progress.
+    AbortOperation {
+        repo: RepoId,
+        op: &'static str,
+    },
+    /// Push over the remote branch (with a lease), after the remote refused.
+    ForcePush {
+        repo: RepoId,
+    },
+    /// Rewrite history with the plan from the History popover.
+    RunRebase {
+        repo: RepoId,
+    },
+}
+
+/// Which remote action a header button runs on every shown repo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RemoteAction {
+    Fetch,
+    Pull,
+    Push,
+    /// Fetch, pull what's new, push what's ours.
+    Sync,
+}
+
+impl RemoteAction {
+    fn present(self) -> &'static str {
+        match self {
+            RemoteAction::Fetch => "Fetching",
+            RemoteAction::Pull => "Pulling",
+            RemoteAction::Push => "Pushing",
+            RemoteAction::Sync => "Syncing",
+        }
+    }
+}
+
+/// How often the optional background fetch runs.
+const BACKGROUND_FETCH_EVERY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+/// Repos fetched, pulled or pushed at the same time.
+const REMOTE_CONCURRENCY: usize = 4;
+/// Commits listed in the History popover.
+const HISTORY_LIMIT: usize = 30;
+
+/// The History popover's contents for one repo.
+pub(crate) struct HistoryState {
+    pub repo: RepoId,
+    pub loading: bool,
+    pub error: Option<String>,
+    /// Hashes in their original (newest first) order, to tell what changed.
+    pub original: Vec<String>,
+    pub plan: Vec<changes_model::PlanItem>,
+    /// Ticked rows, for cherry-pick.
+    pub picked: HashSet<String>,
+    /// Row being reworded (its text is in `reword_input`).
+    pub rewording: Option<usize>,
+    /// Choosing the branch to cherry-pick onto.
+    pub choosing_target: bool,
+}
+
+/// The Merge popover: the branch looked at and what merging it would do.
+pub(crate) struct MergeState {
+    pub repo: RepoId,
+    pub branch: Option<String>,
+    pub loading: bool,
+    pub preview: Option<Result<git::MergePreview, String>>,
 }
 
 /// What the branch text box does on Enter.
@@ -232,6 +336,18 @@ pub struct ChangesView {
     switch_mode: SwitchMode,
     confirm: Option<Confirm>,
     notice: Vec<NoticeLine>,
+
+    /// A fetch, pull or push is running (its buttons ignore clicks).
+    remote_busy: bool,
+    history: Option<HistoryState>,
+    merge: Option<MergeState>,
+    prs: Option<github::PrState>,
+    pr_title: Entity<TextInput>,
+    pr_body: Entity<TextInput>,
+    reword_input: Entity<TextInput>,
+    clone_url: Entity<TextInput>,
+    /// Focus of the file list itself, so the arrow keys step through files.
+    list_focus: FocusHandle,
 }
 
 impl ChangesView {
@@ -243,16 +359,32 @@ impl ChangesView {
     ) -> Self {
         let summary = cx.new(|cx| TextInput::new(cx, "Summary (required)", theme));
         let description = cx.new(|cx| TextInput::new(cx, "Description", theme));
+        description.update(cx, |input, _| {
+            input.multiline = true;
+            input.min_rows = 3;
+        });
         let co_authors = cx.new(|cx| TextInput::new(cx, "Co-authors: Name <email>, …", theme));
         let branch_filter = cx.new(|cx| TextInput::new(cx, "Filter branches…", theme));
         let branch_input = cx.new(|cx| TextInput::new(cx, "New branch name", theme));
         let task_filter = cx.new(|cx| TextInput::new(cx, "Search tasks…", theme));
+        let reword_input = cx.new(|cx| TextInput::new(cx, "New commit message", theme));
+        let clone_url = cx.new(|cx| TextInput::new(cx, "https://github.com/owner/repo.git", theme));
+        let pr_title = cx.new(|cx| TextInput::new(cx, "Title", theme));
+        let pr_body = cx.new(|cx| TextInput::new(cx, "Description (optional)", theme));
+        pr_body.update(cx, |input, _| {
+            input.multiline = true;
+            input.min_rows = 4;
+        });
         for input in [
             &summary,
             &description,
             &co_authors,
             &branch_filter,
             &task_filter,
+            &reword_input,
+            &clone_url,
+            &pr_title,
+            &pr_body,
         ] {
             cx.observe(input, |_, _, cx| cx.notify()).detach();
         }
@@ -316,8 +448,19 @@ impl ChangesView {
             switch_mode: SwitchMode::Bring,
             confirm: None,
             notice: Vec::new(),
+            remote_busy: false,
+            history: None,
+            merge: None,
+            prs: None,
+            pr_title,
+            pr_body,
+            reword_input,
+            clone_url,
+            list_focus: cx.focus_handle(),
         };
         view.sync_repos(cx);
+        view.start_background_fetch(cx);
+        view.wire_inputs(cx);
         view
     }
 
@@ -336,6 +479,38 @@ impl ChangesView {
             let _ = this.update(cx, |this, cx| done(this, result, cx));
         })
         .detach();
+    }
+
+    /// Marks the repos busy with `label`. Refuses (with a notice) when one of
+    /// them is already busy, so two operations never overlap on one repo.
+    fn begin_work(&mut self, ids: &[RepoId], label: &str, cx: &mut Context<Self>) -> bool {
+        let busy = ids.iter().find_map(|id| {
+            self.pane(*id)
+                .and_then(|p| p.working.as_ref().map(|w| (p.repo.name.clone(), w.clone())))
+        });
+        if let Some((name, what)) = busy {
+            self.set_notice(
+                vec![NoticeLine::warn(format!("{name} is busy: {what}"))],
+                cx,
+            );
+            return false;
+        }
+        for id in ids {
+            if let Some(p) = self.pane_mut(*id) {
+                p.working = Some(label.to_owned());
+            }
+        }
+        cx.notify();
+        true
+    }
+
+    /// Clears the busy mark; callers refresh the repo right after.
+    fn end_work(&mut self, ids: &[RepoId]) {
+        for id in ids {
+            if let Some(p) = self.pane_mut(*id) {
+                p.working = None;
+            }
+        }
     }
 
     fn pane(&self, id: RepoId) -> Option<&RepoPane> {
@@ -448,6 +623,11 @@ impl ChangesView {
         let Some(pane) = self.pane_mut(id) else {
             return;
         };
+        // Reading status mid-switch would show a half-updated tree; the
+        // operation refreshes the repo itself when it is done.
+        if pane.working.is_some() {
+            return;
+        }
         pane.loading = true;
         pane.generation += 1;
         let generation = pane.generation;
@@ -488,6 +668,7 @@ impl ChangesView {
 
     /// The selected file may have vanished or changed sides after a refresh.
     fn after_status(&mut self, id: RepoId, cx: &mut Context<Self>) {
+        self.refresh_ci(id, cx);
         if self.qa.is_some() && self.selected.is_none() {
             self.qa_apply(cx);
             return;
@@ -533,6 +714,46 @@ impl ChangesView {
         self.diff_generation += 1;
         self.line_sel.clear();
         self.line_anchor = None;
+    }
+
+    /// Arrow keys in the file list: select the next or previous file.
+    fn step_selection(&mut self, delta: i32, cx: &mut Context<Self>) {
+        let current = self.selected.as_ref().and_then(|(repo, path)| {
+            let ri = self.repos.iter().position(|p| p.repo.id == *repo)?;
+            let fi = self.repos[ri]
+                .status
+                .as_ref()?
+                .files
+                .iter()
+                .position(|f| f.path == *path)?;
+            Some((ri, fi))
+        });
+        let Some((ri, fi)) = changes_model::step_file(&self.rows, current, delta) else {
+            return;
+        };
+        let Some(pane) = self.repos.get(ri) else {
+            return;
+        };
+        let Some(file) = pane.status.as_ref().and_then(|s| s.files.get(fi)) else {
+            return;
+        };
+        let (repo, path) = (pane.repo.id, file.path.clone());
+        if let Some(ix) = self
+            .rows
+            .iter()
+            .position(|r| *r == changes_model::Row::File { repo: ri, file: fi })
+        {
+            self.list_scroll
+                .scroll_to_item(ix, gpui::ScrollStrategy::Center);
+        }
+        self.select_file(repo, path, cx);
+    }
+
+    /// Space in the file list: stage or unstage the selected file.
+    fn toggle_selected(&mut self, cx: &mut Context<Self>) {
+        if let Some((repo, path)) = self.selected.clone() {
+            self.toggle_file(repo, path, cx);
+        }
     }
 
     fn select_file(&mut self, repo: RepoId, path: String, cx: &mut Context<Self>) {
@@ -854,6 +1075,10 @@ impl ChangesView {
                 self.apply_lines(LineOp::Discard, selection, cx);
             }
             Confirm::DeleteBranch { repo, name } => self.delete_branch(repo, name, true, cx),
+            Confirm::UndoCommit { repo, .. } => self.undo_commit(repo, cx),
+            Confirm::AbortOperation { repo, .. } => self.abort_operation(repo, cx),
+            Confirm::ForcePush { repo } => self.push_one(repo, true, cx),
+            Confirm::RunRebase { repo } => self.run_rebase(repo, cx),
             Confirm::DiscardStash { repo, files } => {
                 let Some(pane) = self.pane(repo) else { return };
                 let path = pane.path();
@@ -1107,6 +1332,9 @@ impl ChangesView {
 
     pub(crate) fn close_popover(&mut self, cx: &mut Context<Self>) {
         self.popover = None;
+        self.history = None;
+        self.merge = None;
+        self.prs = None;
         cx.notify();
     }
 
@@ -1116,6 +1344,10 @@ impl ChangesView {
         let targets = self.scope_repos(scope);
         let mode = self.switch_mode;
         self.popover = None;
+        let ids: Vec<RepoId> = targets.iter().map(|t| t.0).collect();
+        if !self.begin_work(&ids, &format!("Switching to {name}…"), cx) {
+            return;
+        }
         self.run(
             cx,
             move || {
@@ -1143,6 +1375,10 @@ impl ChangesView {
         let targets = self.scope_repos(scope);
         let mode = self.switch_mode;
         self.popover = None;
+        let ids: Vec<RepoId> = targets.iter().map(|t| t.0).collect();
+        if !self.begin_work(&ids, &format!("Creating {name}…"), cx) {
+            return;
+        }
         self.run(
             cx,
             move || {
@@ -1169,6 +1405,10 @@ impl ChangesView {
         let targets = self.scope_repos(Scope::All);
         let mode = self.switch_mode;
         self.popover = None;
+        let ids: Vec<RepoId> = targets.iter().map(|t| t.0).collect();
+        if !self.begin_work(&ids, &format!("Switching to {name}…"), cx) {
+            return;
+        }
         self.run(
             cx,
             move || {
@@ -1196,6 +1436,8 @@ impl ChangesView {
         results: Vec<(RepoId, String, Result<git::SwitchOutcome, GitError>, String)>,
         cx: &mut Context<Self>,
     ) {
+        let done: Vec<RepoId> = results.iter().map(|r| r.0).collect();
+        self.end_work(&done);
         let mut lines = Vec::new();
         for (id, repo, result, branch) in &results {
             lines.push(match result {

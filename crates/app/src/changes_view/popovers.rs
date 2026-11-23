@@ -28,13 +28,23 @@ use crate::ui::{
 };
 
 const POPOVER_WIDTH: f32 = 372.0;
+/// The history list carries a row of controls per commit, so it is wider.
+const HISTORY_POPOVER_WIDTH: f32 = 560.0;
 
 impl ChangesView {
     pub(super) fn render_popover(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = self.theme;
+        let width = match self.popover.as_ref()? {
+            Popover::History | Popover::PullRequests => HISTORY_POPOVER_WIDTH,
+            _ => POPOVER_WIDTH,
+        };
         let content = match self.popover.as_ref()? {
             Popover::Branches(scope) => self.branches_popover(*scope, cx),
             Popover::Tasks => self.tasks_popover(cx),
+            Popover::History => self.history_popover(cx),
+            Popover::Merge => self.merge_popover(cx),
+            Popover::Clone => self.clone_popover(cx),
+            Popover::PullRequests => self.pull_requests_popover(cx),
         };
         Some(
             gpui::deferred(motion::enter_by(
@@ -42,7 +52,7 @@ impl ChangesView {
                     .absolute()
                     .top(px(8.0))
                     .left(px(8.0))
-                    .w(px(POPOVER_WIDTH))
+                    .w(px(width))
                     .flex()
                     .flex_col()
                     .gap(theme.space_2)
@@ -65,7 +75,7 @@ impl ChangesView {
         )
     }
 
-    fn popover_title(&self, title: String, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn popover_title(&self, title: String, cx: &mut Context<Self>) -> AnyElement {
         let theme = self.theme;
         div()
             .flex()

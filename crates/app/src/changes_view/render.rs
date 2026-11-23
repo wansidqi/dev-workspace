@@ -76,6 +76,7 @@ impl Render for ChangesView {
                 failed: p.error.is_some(),
                 stash_files: p.shelf.as_ref().map_or(0, |s| s.files.len()),
                 stash_collapsed: p.shelf_collapsed,
+                operation: p.status.as_ref().is_some_and(|s| s.in_progress.is_some()),
             })
             .collect();
         self.rows = changes_model::rows(&layout, &self.repo_filter);
@@ -105,6 +106,52 @@ impl Render for ChangesView {
                     .child(
                         button(
                             &theme,
+                            "changes-fetch",
+                            ButtonKind::Ghost,
+                            Some(Icon::Download),
+                            "Fetch",
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.remote_all(RemoteAction::Fetch, cx);
+                        })),
+                    )
+                    .child(
+                        button(
+                            &theme,
+                            "changes-pull",
+                            ButtonKind::Ghost,
+                            Some(Icon::ChevronDown),
+                            "Pull",
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.remote_all(RemoteAction::Pull, cx);
+                        })),
+                    )
+                    .child(
+                        button(
+                            &theme,
+                            "changes-push",
+                            ButtonKind::Ghost,
+                            Some(Icon::Upload),
+                            "Push",
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.remote_all(RemoteAction::Push, cx);
+                        })),
+                    )
+                    .child(
+                        button(
+                            &theme,
+                            "changes-clone",
+                            ButtonKind::Ghost,
+                            Some(Icon::Plus),
+                            "Clone",
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.open_clone(cx))),
+                    )
+                    .child(
+                        button(
+                            &theme,
                             "changes-all-branches",
                             ButtonKind::Secondary,
                             Some(Icon::GitBranch),
@@ -127,6 +174,36 @@ impl Render for ChangesView {
                     .into_any_element(),
             ),
         );
+
+        // Something is running: say what, with a spinner, where it can't be missed.
+        let activity = {
+            let working: Vec<String> = self
+                .repos
+                .iter()
+                .filter_map(|p| p.working.as_ref().map(|w| format!("{}: {w}", p.repo.name)))
+                .collect();
+            (!working.is_empty()).then(|| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(theme.space_3)
+                    .px(theme.space_6)
+                    .py(theme.space_2)
+                    .border_b_1()
+                    .border_color(theme.border_subtle)
+                    .bg(theme.accent.opacity(0.08))
+                    .child(crate::ui::spinner(&theme, 14.0, "changes-activity-spin"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .truncate()
+                            .t_small()
+                            .text_color(theme.text_primary)
+                            .child(working.join("   ·   ")),
+                    )
+            })
+        };
 
         let notices = (!self.notice.is_empty()).then(|| {
             div()
@@ -299,7 +376,23 @@ impl Render for ChangesView {
             .flex_1()
             .size_full()
             .min_h(px(0.0))
+            .track_focus(&self.list_focus)
+            // Only while the list itself has focus: typing in a text box must not
+            // move the selection.
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                if !this.list_focus.is_focused(window) {
+                    return;
+                }
+                match event.keystroke.key.as_str() {
+                    "down" | "j" => this.step_selection(1, cx),
+                    "up" | "k" => this.step_selection(-1, cx),
+                    "space" => this.toggle_selected(cx),
+                    _ => return,
+                }
+                cx.stop_propagation();
+            }))
             .child(header)
+            .children(activity)
             .children(notices)
             .child(tab_strip)
             .children(
@@ -326,6 +419,7 @@ impl ChangesView {
             Some(Row::Note(ri)) => self.render_note_row(ri),
             Some(Row::StashHeader(ri)) => self.render_stash_header(ri, cx),
             Some(Row::StashFile { repo, file }) => self.render_stash_row(repo, file, cx),
+            Some(Row::Operation(ri)) => self.render_operation_row(ri, cx),
             None => div().into_any_element(),
         }
     }
@@ -361,6 +455,8 @@ impl ChangesView {
         let id = pane.repo.id;
         let tint = label_color(&theme, &pane.repo.name);
         let files = pane.status.as_ref().map(|s| s.files.len()).unwrap_or(0);
+        let working = pane.working.clone();
+        let busy = working.is_some();
         let check = match &pane.status {
             Some(s) if !s.files.is_empty() => {
                 if s.files.iter().all(|f| f.is_fully_staged()) {
@@ -494,7 +590,50 @@ impl ChangesView {
                 d.child(chip(&theme, op, theme.warning))
             })
             .child(branch_button)
-            .when(files > 0, |d| {
+            .children(self.ci_mark(id, cx))
+            .when_some(working.clone(), |d, label| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(theme.space_1)
+                        .max_w(px(170.0))
+                        .child(crate::ui::spinner(&theme, 13.0, ("repo-spin", id.0 as u64)))
+                        .child(
+                            div()
+                                .truncate()
+                                .t_small()
+                                .text_color(theme.text_secondary)
+                                .child(label),
+                        ),
+                )
+            })
+            .when(!busy, |d| {
+                d.child(
+                    icon_button(
+                        &theme,
+                        Icon::ArrowLeftRight,
+                        ("repo-sync", id.0 as u64),
+                        theme.accent,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.sync_one(id, cx);
+                    })),
+                )
+                .child(
+                    icon_button(
+                        &theme,
+                        Icon::GitMerge,
+                        ("repo-history", id.0 as u64),
+                        theme.accent,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_history(id, cx);
+                    })),
+                )
+            })
+            .when(files > 0 && !busy, |d| {
                 d.child(
                     icon_button(
                         &theme,
@@ -507,7 +646,7 @@ impl ChangesView {
                     })),
                 )
             })
-            .when(files > 0, |d| {
+            .when(files > 0 && !busy, |d| {
                 d.child(
                     icon_button(
                         &theme,
@@ -525,6 +664,155 @@ impl ChangesView {
                     })),
                 )
             })
+            .into_any_element()
+    }
+
+    /// "Mine / Theirs / Resolved" for a conflicted file, in place of stash.
+    fn conflict_buttons(
+        &self,
+        repo: RepoId,
+        path: String,
+        key: u64,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let theme = self.theme;
+        let small = |label: &'static str, id: &'static str| {
+            div()
+                .id((id, key))
+                .flex_none()
+                .px(theme.space_2)
+                .h(px(22.0))
+                .flex()
+                .items_center()
+                .rounded(theme.radius_sm)
+                .border_1()
+                .border_color(theme.border_subtle)
+                .t_micro()
+                .t_strong()
+                .text_color(theme.text_secondary)
+                .cursor_pointer()
+                .hover(move |s| s.bg(theme.surface_hover).text_color(theme.text_primary))
+                .tooltip(crate::ui::tip(&theme, id))
+                .child(label)
+        };
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(theme.space_1)
+            .child(small("Mine", "conflict-mine").on_click({
+                let path = path.clone();
+                cx.listener(move |this, _, _, cx| {
+                    this.resolve_file(repo, path.clone(), git::Resolution::KeepCurrent, cx);
+                    cx.stop_propagation();
+                })
+            }))
+            .child(small("Theirs", "conflict-theirs").on_click({
+                let path = path.clone();
+                cx.listener(move |this, _, _, cx| {
+                    this.resolve_file(repo, path.clone(), git::Resolution::TakeIncoming, cx);
+                    cx.stop_propagation();
+                })
+            }))
+            .child(
+                icon_button(
+                    &theme,
+                    Icon::Check,
+                    ("conflict-resolved", key),
+                    theme.success,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.resolve_file(repo, path.clone(), git::Resolution::MarkResolved, cx);
+                    cx.stop_propagation();
+                })),
+            )
+    }
+
+    /// The banner under a repo header while a merge, rebase, cherry-pick or
+    /// revert is unfinished: how many files conflict, and how to go on.
+    fn render_operation_row(&self, ri: usize, cx: &mut Context<Self>) -> AnyElement {
+        let theme = self.theme;
+        let Some(pane) = self.repos.get(ri) else {
+            return div().into_any_element();
+        };
+        let id = pane.repo.id;
+        let (op, conflicts) = pane
+            .status
+            .as_ref()
+            .map(|s| (s.in_progress.unwrap_or("operation"), s.conflict_count()))
+            .unwrap_or(("operation", 0));
+        let can_skip = matches!(op, "rebase" | "cherry-pick");
+        let text = if conflicts == 0 {
+            format!("{op} in progress: ready to continue")
+        } else {
+            format!(
+                "{op} in progress: {conflicts} file{} to resolve",
+                if conflicts == 1 { "" } else { "s" }
+            )
+        };
+        div()
+            .id(("repo-operation", id.0 as u64))
+            .flex()
+            .items_center()
+            .gap(theme.space_2)
+            .w_full()
+            .h(px(LIST_ROW_HEIGHT + 4.0))
+            .pl(theme.space_6)
+            .pr(theme.space_3)
+            .bg(theme.warning.opacity(0.10))
+            .border_b_1()
+            .border_color(theme.border_subtle)
+            .child(icon(Icon::Alert, 14.0, theme.warning))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .truncate()
+                    .t_small()
+                    .text_color(theme.text_primary)
+                    .child(text),
+            )
+            .child(
+                button(
+                    &theme,
+                    ("op-continue", id.0 as u64),
+                    ButtonKind::Primary,
+                    None,
+                    "Continue",
+                )
+                .when(conflicts > 0, |b| b.opacity(0.45).cursor_default())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let ready = this
+                        .pane(id)
+                        .and_then(|p| p.status.as_ref())
+                        .is_some_and(|s| s.conflict_count() == 0);
+                    if ready {
+                        this.continue_operation(id, cx);
+                    }
+                })),
+            )
+            .when(can_skip, |d| {
+                d.child(
+                    button(
+                        &theme,
+                        ("op-skip", id.0 as u64),
+                        ButtonKind::Ghost,
+                        None,
+                        "Skip",
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.skip_operation(id, cx))),
+                )
+            })
+            .child(
+                button(
+                    &theme,
+                    ("op-abort", id.0 as u64),
+                    ButtonKind::Danger,
+                    None,
+                    "Abort",
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.ask_abort(id, cx))),
+            )
             .into_any_element()
     }
 
@@ -567,7 +855,8 @@ impl ChangesView {
             })
             .on_click({
                 let path = path.clone();
-                cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    window.focus(&this.list_focus, cx);
                     // A double-click opens the file in the IDE; the first click of it
                     // has already selected the file.
                     if event.click_count() >= 2 {
@@ -621,17 +910,23 @@ impl ChangesView {
                         )
                     }),
             )
-            .child(
-                icon_button(&theme, Icon::Download, ("file-stash", key), theme.accent).on_click({
-                    let paths: Vec<String> = std::iter::once(path.clone())
-                        .chain(file.old_path.clone())
-                        .collect();
-                    cx.listener(move |this, _, _, cx| {
-                        this.stash_files(repo, paths.clone(), cx);
-                        cx.stop_propagation();
-                    })
-                }),
-            )
+            .when(file.is_conflicted(), |d| {
+                d.child(self.conflict_buttons(repo, path.clone(), key, cx))
+            })
+            .when(!file.is_conflicted(), |d| {
+                d.child(
+                    icon_button(&theme, Icon::Download, ("file-stash", key), theme.accent)
+                        .on_click({
+                            let paths: Vec<String> = std::iter::once(path.clone())
+                                .chain(file.old_path.clone())
+                                .collect();
+                            cx.listener(move |this, _, _, cx| {
+                                this.stash_files(repo, paths.clone(), cx);
+                                cx.stop_propagation();
+                            })
+                        }),
+                )
+            })
             .child(
                 icon_button(&theme, Icon::Code, ("file-open", key), theme.text_primary).on_click({
                     let path = path.clone();
@@ -833,6 +1128,39 @@ impl ChangesView {
                     self.repo_name(*repo)
                 ),
                 "Discard",
+            ),
+            Confirm::UndoCommit { repo, pushed } => (
+                format!(
+                    "Undo the last commit in {}? Its changes stay staged and its message goes back in the box.{}",
+                    self.repo_name(*repo),
+                    if *pushed {
+                        " It is already pushed, so you would need to force push after committing again."
+                    } else {
+                        ""
+                    }
+                ),
+                "Undo commit",
+            ),
+            Confirm::AbortOperation { repo, op } => (
+                format!(
+                    "Abort the {op} in {}? Everything it did so far is thrown away and the repo goes back to how it was before.",
+                    self.repo_name(*repo)
+                ),
+                "Abort",
+            ),
+            Confirm::ForcePush { repo } => (
+                format!(
+                    "Force push {}? The remote branch is replaced by yours. It is refused if someone else pushed since your last fetch.",
+                    self.repo_name(*repo)
+                ),
+                "Force push",
+            ),
+            Confirm::RunRebase { repo } => (
+                format!(
+                    "This rewrites commits in {} that are already pushed. You will need to force push afterwards. Continue?",
+                    self.repo_name(*repo)
+                ),
+                "Rewrite",
             ),
         };
         Some(

@@ -15,6 +15,7 @@ mod commit_browser;
 mod credentials_panel;
 mod date;
 mod external;
+mod github_panel;
 mod highlight;
 mod ide;
 mod markdown;

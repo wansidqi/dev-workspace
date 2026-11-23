@@ -149,6 +149,11 @@ pub fn icon(icon: Icon, size: f32, color: Hsla) -> Svg {
         .text_color(color)
 }
 
+/// A small spinning mark for work in progress. `id` must be unique on screen.
+pub fn spinner(theme: &GlassTheme, size: f32, id: impl Into<ElementId>) -> impl IntoElement {
+    crate::motion::spin(icon(Icon::Refresh, size, theme.accent), id)
+}
+
 /// An icon that changes colour while the pointer is over the parent element
 /// marked `.group(group)`: an SVG does not inherit its parent's text colour,
 /// so hover tinting has to be stated on the icon itself.

@@ -5,8 +5,8 @@
 
 use crate::theme::GlassTheme;
 use devspace_core::{Task, TaskId};
-use std::collections::HashSet;
 use gpui::{div, prelude::*, px, Div, Pixels};
+use std::collections::HashSet;
 
 /// Row geometry the guides must line up with.
 #[derive(Clone, Copy)]
@@ -271,7 +271,11 @@ mod tests {
         assert_eq!(out[4].1, RowMotion::Still);
         // Rows already hidden by a nested fold do not flash while the outer one leaves.
         let out = shown(&[0, 1], Some((&[0], true)));
-        assert_eq!(rows(&out), vec![0, 1, 3, 4], "A1a stays hidden under folded A1");
+        assert_eq!(
+            rows(&out),
+            vec![0, 1, 3, 4],
+            "A1a stays hidden under folded A1"
+        );
     }
 
     use devspace_core::{ProjectId, Task, TaskId};

@@ -192,7 +192,7 @@ impl AppState {
         if let Some(max) = self.notes.iter().map(|n| n.id.0).max() {
             self.next_note_id = self.next_note_id.max(max + 1);
         }
-        self.repos =RepoRepo::list_for_project(&self.conn, id).unwrap_or_default();
+        self.repos = RepoRepo::list_for_project(&self.conn, id).unwrap_or_default();
         if let Some(max) = self.repos.iter().map(|r| r.id.0).max() {
             self.next_repo_id = self.next_repo_id.max(max + 1);
         }
@@ -416,6 +416,70 @@ impl AppState {
         if CommitLinkRepo::delete(&self.conn, id).is_ok() {
             self.commit_links.retain(|l| l.id != id);
         }
+    }
+
+    /// Hashes of the project's links in one repo, for finding which of them a
+    /// history rewrite replaced.
+    pub fn link_hashes(&self, repo: RepoId) -> Vec<String> {
+        let mut hashes: Vec<String> = self
+            .commit_links
+            .iter()
+            .filter(|l| l.repo_id == repo)
+            .map(|l| l.hash.clone())
+            .collect();
+        hashes.sort();
+        hashes.dedup();
+        hashes
+    }
+
+    /// Applies the result of [`devspace_git::find_rewritten`]: links follow
+    /// their commit to its new hash; those with no match are flagged Missing.
+    /// Returns `(followed, missing)`.
+    pub fn apply_rewritten(
+        &mut self,
+        repo: RepoId,
+        rewritten: &[devspace_git::Rewritten],
+    ) -> (usize, usize) {
+        let (mut followed, mut missing) = (0, 0);
+        let ids: Vec<(CommitLinkId, String, CommitLinkStatus, Option<String>)> = self
+            .commit_links
+            .iter()
+            .filter(|l| l.repo_id == repo)
+            .map(|l| (l.id, l.hash.clone(), l.status, l.note.clone()))
+            .collect();
+        for (id, hash, status, note) in ids {
+            let Some(r) = rewritten.iter().find(|r| r.old_hash == hash) else {
+                continue;
+            };
+            match &r.found {
+                Some((new_hash, patch_id)) => {
+                    if CommitLinkRepo::relink(&self.conn, id, new_hash, patch_id).is_ok() {
+                        followed += 1;
+                        if status == CommitLinkStatus::Missing {
+                            let _ = CommitLinkRepo::update_status_and_note(
+                                &self.conn,
+                                id,
+                                CommitLinkStatus::Linked,
+                                note.as_deref(),
+                            );
+                        }
+                    }
+                }
+                None => {
+                    if status != CommitLinkStatus::Missing {
+                        let _ = CommitLinkRepo::update_status_and_note(
+                            &self.conn,
+                            id,
+                            CommitLinkStatus::Missing,
+                            note.as_deref(),
+                        );
+                    }
+                    missing += 1;
+                }
+            }
+        }
+        self.reload_commit_links();
+        (followed, missing)
     }
 
     /// Advances a link's label: Linked -> Needs migration -> Cherry-picked

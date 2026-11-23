@@ -309,10 +309,15 @@ screenshot (see "Not verified by hand" below).
         commit browser's, without status icons
 - Not done / known gaps in Phase 1:
   - [ ] Syntax highlighting in the diff (colouring is +/- only)
-  - [ ] Multi-line commit description (the input is single-line)
-  - [ ] Git hooks do not run on commit (libgit2 doesn't run them; GitHub
-        Desktop does). Phase 2 can route commits through the CLI if wanted
-  - [ ] Keyboard navigation in the file list and diff
+  - [x] Multi-line commit description: `TextInput` has a multiline mode
+        (Enter inserts a line, Up/Down move between lines, the box grows)
+  - [x] Git hooks run on commit: when the repo has an active hook
+        (pre-commit, prepare-commit-msg, commit-msg, post-commit, or a
+        `core.hooksPath`) the commit goes through the git CLI and a rejecting
+        hook's output is shown; without hooks libgit2 commits directly
+  - [x] Keyboard navigation in the file list: Up/Down (or J/K) select the
+        previous / next file, Space stages or unstages it, once the list has
+        focus (click a row). Not in the diff itself
   - [ ] Shelf: line-ending handling covers `core.autocrlf` (true/input) only,
         not `.gitattributes` rules; a file already in the stash can't be
         stashed again until restored or discarded; the stash doesn't keep the
@@ -325,31 +330,84 @@ screenshot (see "Not verified by hand" below).
   `DEVSPACE_VIEW=changes[:select|branches|repo-branches|stash|tasks|confirm|lines]`
   with `DEVSPACE_QA_REPOS=<path>;<path>` reproduces them (debug builds).
 
-Phase 2 — remotes (git CLI)
-- [ ] "Fetch all" / "Pull all" / "Push all" across the project's repos,
-      run in parallel with a small concurrency cap, per-repo progress and
-      errors
-- [ ] Resolve the git executable once; clear error when it is missing
-- [ ] Fetch, pull (fast-forward / merge per config), push (set upstream on
-      first push), ahead/behind counts, one "sync" button, periodic background
-      fetch (off by default)
-- [ ] Clone a repository and link it to the project
+Phase 2 — remotes (git CLI). Built 2026-11-23; logic tested against a local
+bare remote (tests skip when `git` isn't installed).
+- [x] "Fetch" / "Pull" / "Push" buttons in the Changes header run on every
+      shown repo, at most 4 at a time, one result line per repo; a failing
+      repo never stops the others. A per-repo sync icon on each repo header
+- [x] `devspace-git` `cli.rs`: git resolved once (`git_executable`), clear
+      error when missing; arguments as a list, `GIT_TERMINAL_PROMPT=0`, no
+      editor, timeouts, no console window on Windows, credentials in remote
+      URLs scrubbed from error text
+- [x] Fetch (--prune), pull (merge / rebase / ff-only taken from the user's
+      `pull.rebase` / `pull.ff` config), push (publishes with
+      `--set-upstream` the first time, `--force-with-lease` on request),
+      sync (fetch, pull, push). A rejected push offers the safe force push
+- [x] Optional periodic background fetch: Settings → Git, off by default,
+      every 5 minutes
+- [x] Clone: "Clone" in the header, repo address then a folder picker; the
+      clone is linked to the selected project (refuses an existing folder,
+      option-looking addresses and `ext::` transports)
 
-Phase 3 — integration
-- [ ] Merge a branch into the current one; conflict list with "open in IDE",
-      mark resolved, abort
-- [ ] Revert a commit; undo last commit (soft reset, confirmation)
+Phase 3 — integration. Built 2026-11-23.
+- [x] Merge a branch into the current one (repo history popover → "Merge a
+      branch…"), with a preview first: commits to merge, files that would
+      conflict (libgit2, nothing touched)
+- [x] Unfinished merge / rebase / cherry-pick / revert shows a banner under
+      the repo header with Continue (enabled once nothing conflicts), Skip
+      (rebase, cherry-pick) and Abort (asks first)
+- [x] Conflicted files get Mine / Theirs / Mark resolved on their row (sides
+      are swapped for you during a rebase; a file deleted on the chosen side
+      is removed); "Mark resolved" refuses while conflict markers remain;
+      double-click opens the file in the IDE
+- [x] Revert a commit (new commit, history kept); undo last commit (soft
+      reset, asks first, says if it was pushed, puts the message back in the
+      commit box)
 
-Phase 4 — history rewriting (git CLI)
-- [ ] Interactive rebase: squash, reorder, edit message; drag-to-cherry-pick
-      onto a branch; abort/continue on conflict
-- [ ] After a rewrite, re-match commit links by patch-id (finishes the
-      missing-commit item above)
+Phase 4 — history rewriting (git CLI). Built 2026-11-23.
+- [x] Interactive rebase of the newest 30 commits: squash, fixup, drop,
+      reorder (arrows), reword; the todo is generated and given to git
+      through `GIT_SEQUENCE_EDITOR`, so no editor opens. Needs a clean
+      working copy; warns when pushed commits are rewritten (force push
+      follows); stops on conflicts into the same banner (Continue / Skip /
+      Abort)
+- [x] Cherry-pick: tick commits in the history list, "Cherry-pick N to…"
+      picks the branch (switches to it, carrying or stashing changes per the
+      branch popover's setting), applies oldest first, stops on conflicts
+- [ ] Drag-to-cherry-pick (done as tick + choose branch instead)
+- [x] Commit links follow a rewrite by patch-id (`devspace-git` `patchid.rs`):
+      after an in-app rebase, a pull that rebased, or continuing a rebase,
+      each link whose commit left every branch is re-pointed to the commit
+      with the same patch-id; links with no match (squashed away, dropped,
+      edited) are flagged Missing. No schema change was needed:
+      `commit_links.patch_id` already existed and now holds a real patch-id
 
-Phase 5 — optional GitHub integration (off by default, network + account)
-- [ ] Sign in with OAuth device flow; token in the OS keychain
-- [ ] Pull request list for the current repo, create PR from a branch, CI
-      check status on branches and commits
+Phase 5 — optional GitHub integration (off by default, network + account).
+Built 2026-11-23 in `crates/github` (blocking `ureq` + rustls, the one new
+dependency, approved) and `changes_view/github.rs`.
+- [x] Settings → GitHub: a switch (off by default; nothing contacts GitHub
+      while it is off), the OAuth app's public client id, "Sign in with
+      GitHub" (device flow: shows the code, opens the device page, polls
+      until approved, honours slow_down / expiry / denial) or a pasted
+      personal access token; Sign out
+- [x] The token lives only in the OS keychain (`devspace-storage`
+      `github_token.rs`, next to the vault key), never in `settings.txt`, a
+      log or an error message
+- [x] Pull requests for a repo whose remote is on GitHub: list the open ones,
+      create one from the current branch (title, description, base, draft);
+      History popover → "Pull requests…"
+- [x] CI check status of a repo's branch: an icon beside the branch on the
+      repo header (passed / running / failed), read at most once a minute;
+      click for the pull requests
+- Needs from you: an OAuth app with "Enable Device Flow" ticked (this app has
+  no registered app of its own, so the client id is a setting), or a token.
+  Request building and answer parsing are unit tested; no real sign-in
+  against github.com was done from here.
+- Not verified by hand (Phases 2-5): clicks in the running app, as for
+  Phase 1. The git logic has tests (merge, conflicts, revert, undo,
+  cherry-pick, rebase squash / reorder / reword / drop, fetch / pull / push /
+  sync / clone against a local bare remote).
+
 
 ## Developer tools
 

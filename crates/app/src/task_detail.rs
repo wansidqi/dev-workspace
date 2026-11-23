@@ -502,7 +502,11 @@ impl TaskDetail {
     /// Creates a checklist note, titled from the input (or "Todo") and opens it.
     fn create_todo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let typed = self.new_note_input.read(cx).content.trim().to_string();
-        let title = if typed.is_empty() { "Todo".into() } else { typed };
+        let title = if typed.is_empty() {
+            "Todo".into()
+        } else {
+            typed
+        };
         self.new_note_input
             .update(cx, |input, cx| input.reset(window, cx));
         self.create_note_of(&title, NoteKind::Todo, window, cx);
@@ -816,7 +820,12 @@ impl TaskDetail {
             .flex()
             .items_center()
             .gap(theme.space_2)
-            .child(div().flex_1().min_w(px(0.0)).child(self.new_note_input.clone()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(self.new_note_input.clone()),
+            )
             .child(
                 button(
                     &theme,
@@ -903,10 +912,12 @@ impl TaskDetail {
                                 ("task-note-rename", id.0 as u64),
                                 theme.text_primary,
                             )
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.start_rename_note(id, rename_title.clone(), window, cx);
-                                cx.stop_propagation();
-                            })),
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    this.start_rename_note(id, rename_title.clone(), window, cx);
+                                    cx.stop_propagation();
+                                },
+                            )),
                         )
                         .child(
                             icon_button(
@@ -915,13 +926,15 @@ impl TaskDetail {
                                 ("task-note-delete", id.0 as u64),
                                 theme.danger,
                             )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.state.update(cx, |state, cx| {
-                                    state.delete_note(id);
-                                    cx.notify();
-                                });
-                                cx.stop_propagation();
-                            })),
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.state.update(cx, |state, cx| {
+                                        state.delete_note(id);
+                                        cx.notify();
+                                    });
+                                    cx.stop_propagation();
+                                },
+                            )),
                         ),
                 )
                 .into_any_element()

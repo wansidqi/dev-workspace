@@ -19,6 +19,8 @@ pub enum Row {
     StashHeader(usize),
     /// File `file` of that repo's stash.
     StashFile { repo: usize, file: usize },
+    /// Banner under the header of a repo with an unfinished operation.
+    Operation(usize),
 }
 
 /// What the list needs to know about one repo to lay itself out.
@@ -31,6 +33,8 @@ pub struct RepoRows<'a> {
     /// Files in this repo's stash for the current branch (0 = no section).
     pub stash_files: usize,
     pub stash_collapsed: bool,
+    /// A merge, rebase, cherry-pick or revert is unfinished (a banner row is shown).
+    pub operation: bool,
 }
 
 /// Rows for every repo in `filter` (all of them when it is empty):
@@ -46,6 +50,9 @@ pub fn rows(repos: &[RepoRows<'_>], filter: &[RepoId]) -> Vec<Row> {
         if repo.collapsed {
             continue;
         }
+        if repo.operation && !repo.failed {
+            out.push(Row::Operation(ri));
+        }
         let files = repo.status.map(|s| s.files.len()).unwrap_or(0);
         if files == 0 || repo.failed {
             out.push(Row::Note(ri));
@@ -60,6 +67,35 @@ pub fn rows(repos: &[RepoRows<'_>], filter: &[RepoId]) -> Vec<Row> {
         }
     }
     out
+}
+
+/// The file row `delta` places after `current` (`(repo, file)` indexes), skipping
+/// headers and notes. Starts at the first file when nothing is selected, and
+/// stays on the last or first file at the ends.
+pub fn step_file(
+    rows: &[Row],
+    current: Option<(usize, usize)>,
+    delta: i32,
+) -> Option<(usize, usize)> {
+    let files: Vec<(usize, usize)> = rows
+        .iter()
+        .filter_map(|r| match r {
+            Row::File { repo, file } => Some((*repo, *file)),
+            _ => None,
+        })
+        .collect();
+    if files.is_empty() {
+        return None;
+    }
+    let Some(at) = current.and_then(|c| files.iter().position(|f| *f == c)) else {
+        return Some(if delta >= 0 {
+            files[0]
+        } else {
+            files[files.len() - 1]
+        });
+    };
+    let next = (at as i64 + i64::from(delta)).clamp(0, files.len() as i64 - 1) as usize;
+    Some(files[next])
 }
 
 /// Whether a header checkbox should stage everything or unstage everything:
@@ -181,6 +217,114 @@ pub fn join_names(names: &[String]) -> String {
     }
 }
 
+/// What the history popover plans for one commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanAction {
+    Pick,
+    Squash,
+    Fixup,
+    Drop,
+    Reword(String),
+}
+
+impl PlanAction {
+    pub fn label(&self) -> &'static str {
+        match self {
+            PlanAction::Pick => "Pick",
+            PlanAction::Squash => "Squash",
+            PlanAction::Fixup => "Fixup",
+            PlanAction::Drop => "Drop",
+            PlanAction::Reword(_) => "Reword",
+        }
+    }
+}
+
+/// One commit of the rewrite plan. The plan is listed newest first (like
+/// history); "squash" folds a commit into the one *below* it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanItem {
+    pub hash: String,
+    pub summary: String,
+    pub unpushed: bool,
+    pub action: PlanAction,
+}
+
+/// Cycles the action of row `ix` through pick, squash, fixup and drop. The
+/// oldest row (last) has nothing below it to join, so it skips squash and
+/// fixup. A reword goes back to pick.
+pub fn cycle_action(plan: &mut [PlanItem], ix: usize) {
+    let last = plan.len().saturating_sub(1);
+    let Some(item) = plan.get_mut(ix) else { return };
+    item.action = match (&item.action, ix == last) {
+        (PlanAction::Pick | PlanAction::Reword(_), false) => PlanAction::Squash,
+        (PlanAction::Pick | PlanAction::Reword(_), true) => PlanAction::Drop,
+        (PlanAction::Squash, _) => PlanAction::Fixup,
+        (PlanAction::Fixup, _) => PlanAction::Drop,
+        (PlanAction::Drop, _) => PlanAction::Pick,
+    };
+}
+
+/// Moves row `ix` one place up (`up`) or down. Returns the new index.
+pub fn move_item(plan: &mut [PlanItem], ix: usize, up: bool) -> usize {
+    let to = if up { ix.checked_sub(1) } else { Some(ix + 1) };
+    match to {
+        Some(to) if ix < plan.len() && to < plan.len() => {
+            plan.swap(ix, to);
+            to
+        }
+        _ => ix,
+    }
+}
+
+/// Whether running the plan would change anything.
+pub fn plan_changes_history(plan: &[PlanItem], original: &[String]) -> bool {
+    plan.iter().any(|p| p.action != PlanAction::Pick)
+        || plan
+            .iter()
+            .map(|p| p.hash.as_str())
+            .ne(original.iter().map(String::as_str))
+}
+
+/// Whether the plan rewrites a commit that is already on the remote (so the
+/// branch will need a force push afterwards).
+pub fn plan_touches_pushed(plan: &[PlanItem], original: &[String]) -> bool {
+    // Pushed commits are the oldest (last) rows. A rebase replays every row
+    // from the oldest changed one up to the newest, so the push is rewritten
+    // when the first pushed row is at or above the last changed row.
+    // A squash or fixup also rewrites the commit below it, which it joins.
+    let reach = |ix: usize| -> Option<usize> {
+        let moved = original.get(ix) != Some(&plan[ix].hash);
+        match plan[ix].action {
+            PlanAction::Squash | PlanAction::Fixup => Some(ix + 1),
+            PlanAction::Pick if !moved => None,
+            _ => Some(ix),
+        }
+    };
+    let Some(last_changed) = (0..plan.len()).filter_map(reach).max() else {
+        return false;
+    };
+    plan.iter()
+        .position(|p| !p.unpushed)
+        .is_some_and(|first_pushed| first_pushed <= last_changed)
+}
+
+/// The plan as git wants it: oldest first.
+pub fn plan_entries(plan: &[PlanItem]) -> Vec<devspace_git::RebaseEntry> {
+    plan.iter()
+        .rev()
+        .map(|p| devspace_git::RebaseEntry {
+            hash: p.hash.clone(),
+            action: match &p.action {
+                PlanAction::Pick => devspace_git::RebaseAction::Pick,
+                PlanAction::Squash => devspace_git::RebaseAction::Squash,
+                PlanAction::Fixup => devspace_git::RebaseAction::Fixup,
+                PlanAction::Drop => devspace_git::RebaseAction::Drop,
+                PlanAction::Reword(m) => devspace_git::RebaseAction::Reword(m.clone()),
+            },
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,6 +361,7 @@ mod tests {
                 failed: false,
                 stash_files: 0,
                 stash_collapsed: false,
+                operation: false,
             },
             RepoRows {
                 id: RepoId(2),
@@ -225,6 +370,7 @@ mod tests {
                 failed: false,
                 stash_files: 0,
                 stash_collapsed: false,
+                operation: false,
             },
         ];
         assert_eq!(
@@ -259,6 +405,7 @@ mod tests {
                 failed: false,
                 stash_files: 2,
                 stash_collapsed: false,
+                operation: false,
             },
             RepoRows {
                 id: RepoId(2),
@@ -267,6 +414,7 @@ mod tests {
                 failed: false,
                 stash_files: 1,
                 stash_collapsed: true,
+                operation: false,
             },
         ];
         assert_eq!(
@@ -302,6 +450,7 @@ mod tests {
                 failed: false,
                 stash_files: 0,
                 stash_collapsed: false,
+                operation: false,
             },
             RepoRows {
                 id: RepoId(2),
@@ -310,12 +459,53 @@ mod tests {
                 failed: true,
                 stash_files: 0,
                 stash_collapsed: false,
+                operation: false,
             },
         ];
         assert_eq!(
             rows(&repos, &[]),
             [Row::Repo(0), Row::Repo(1), Row::Note(1)]
         );
+    }
+
+    #[test]
+    fn an_unfinished_operation_gets_a_banner_under_the_header() {
+        let fe = status(vec![file("a.ts", None, Some(ChangeKind::Conflicted))]);
+        let repos = [RepoRows {
+            id: RepoId(1),
+            status: Some(&fe),
+            collapsed: false,
+            failed: false,
+            stash_files: 0,
+            stash_collapsed: false,
+            operation: true,
+        }];
+        assert_eq!(
+            rows(&repos, &[]),
+            [
+                Row::Repo(0),
+                Row::Operation(0),
+                Row::File { repo: 0, file: 0 }
+            ]
+        );
+    }
+
+    #[test]
+    fn arrow_keys_step_over_headers_to_the_next_file() {
+        let rows = [
+            Row::Repo(0),
+            Row::File { repo: 0, file: 0 },
+            Row::File { repo: 0, file: 1 },
+            Row::Repo(1),
+            Row::Note(1),
+            Row::File { repo: 2, file: 0 },
+        ];
+        assert_eq!(step_file(&rows, None, 1), Some((0, 0)));
+        assert_eq!(step_file(&rows, None, -1), Some((2, 0)));
+        assert_eq!(step_file(&rows, Some((0, 1)), 1), Some((2, 0)));
+        assert_eq!(step_file(&rows, Some((2, 0)), 1), Some((2, 0)));
+        assert_eq!(step_file(&rows, Some((0, 0)), -1), Some((0, 0)));
+        assert_eq!(step_file(&[Row::Repo(0)], None, 1), None);
     }
 
     #[test]
@@ -434,6 +624,78 @@ mod tests {
         assert_eq!(pick_side(Staged, true, true), Staged);
         assert_eq!(pick_side(Unstaged, false, true), Staged);
         assert_eq!(pick_side(Staged, true, false), Unstaged);
+    }
+
+    fn item(hash: &str, unpushed: bool, action: PlanAction) -> PlanItem {
+        PlanItem {
+            hash: hash.into(),
+            summary: hash.into(),
+            unpushed,
+            action,
+        }
+    }
+
+    #[test]
+    fn actions_cycle_and_the_oldest_row_cannot_squash() {
+        let mut plan = vec![
+            item("c", true, PlanAction::Pick),
+            item("b", true, PlanAction::Pick),
+        ];
+        let seen: Vec<_> = (0..4)
+            .map(|_| {
+                cycle_action(&mut plan, 0);
+                plan[0].action.label()
+            })
+            .collect();
+        assert_eq!(seen, ["Squash", "Fixup", "Drop", "Pick"]);
+        cycle_action(&mut plan, 1);
+        assert_eq!(
+            plan[1].action,
+            PlanAction::Drop,
+            "nothing below to squash into"
+        );
+        cycle_action(&mut plan, 9);
+    }
+
+    #[test]
+    fn rows_move_within_bounds_and_the_plan_is_built_oldest_first() {
+        let mut plan = vec![
+            item("c", true, PlanAction::Pick),
+            item("b", true, PlanAction::Squash),
+        ];
+        assert_eq!(move_item(&mut plan, 0, true), 0);
+        assert_eq!(move_item(&mut plan, 1, false), 1);
+        assert_eq!(move_item(&mut plan, 0, false), 1);
+        assert_eq!(plan[0].hash, "b");
+        let entries = plan_entries(&plan);
+        assert_eq!(entries[0].hash, "c");
+        assert_eq!(entries[1].action, devspace_git::RebaseAction::Squash);
+    }
+
+    #[test]
+    fn a_rewrite_that_reaches_pushed_commits_is_flagged() {
+        let original: Vec<String> = ["c", "b", "a"].map(String::from).to_vec();
+        let plan = |actions: [PlanAction; 3]| -> Vec<PlanItem> {
+            vec![
+                item("c", true, actions[0].clone()),
+                item("b", true, actions[1].clone()),
+                item("a", false, actions[2].clone()),
+            ]
+        };
+        use PlanAction::*;
+        let untouched = plan([Pick, Pick, Pick]);
+        assert!(!plan_changes_history(&untouched, &original));
+        assert!(!plan_touches_pushed(&untouched, &original));
+        let local_only = plan([Squash, Pick, Pick]);
+        assert!(plan_changes_history(&local_only, &original));
+        assert!(
+            !plan_touches_pushed(&local_only, &original),
+            "only unpushed rows change"
+        );
+        let reaches = plan([Pick, Squash, Pick]);
+        assert!(plan_touches_pushed(&reaches, &original)); // joins the pushed commit below it
+        let touches = plan([Pick, Pick, Drop]);
+        assert!(plan_touches_pushed(&touches, &original));
     }
 
     #[test]

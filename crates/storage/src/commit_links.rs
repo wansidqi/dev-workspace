@@ -132,6 +132,32 @@ impl CommitLinkRepo {
         Ok(())
     }
 
+    /// Points a link at the commit that replaced its old one after a history
+    /// rewrite, and records its patch-id. When the task already links the new
+    /// commit, the old link is dropped instead (a task can't link a commit
+    /// twice). Returns `true` when the link was kept.
+    pub fn relink(
+        conn: &Connection,
+        id: CommitLinkId,
+        new_hash: &str,
+        patch_id: &str,
+    ) -> Result<bool, StorageError> {
+        let result = conn.execute(
+            "UPDATE commit_links SET hash = ?2, patch_id = ?3 WHERE id = ?1",
+            params![id.0, new_hash, patch_id],
+        );
+        match result {
+            Ok(_) => Ok(true),
+            Err(e) => match map_constraint_error(e) {
+                StorageError::CommitLink(CommitLinkError::AlreadyLinked) => {
+                    Self::delete(conn, id)?;
+                    Ok(false)
+                }
+                other => Err(other),
+            },
+        }
+    }
+
     pub fn delete(conn: &Connection, id: CommitLinkId) -> Result<(), StorageError> {
         conn.execute("DELETE FROM commit_links WHERE id = ?1", params![id.0])?;
         Ok(())
@@ -267,6 +293,27 @@ mod tests {
             CommitLinkRepo::get(&conn, CommitLinkId(1)).unwrap(),
             Some(l)
         );
+    }
+
+    #[test]
+    fn relink_follows_a_rewritten_commit_and_merges_duplicates() {
+        let conn = setup();
+        CommitLinkRepo::insert(&conn, &link(1, 1, 1, "old", 1)).unwrap();
+        assert!(CommitLinkRepo::relink(&conn, CommitLinkId(1), "new", "pid").unwrap());
+        let l = CommitLinkRepo::get(&conn, CommitLinkId(1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (l.hash.as_str(), l.patch_id.as_deref()),
+            ("new", Some("pid"))
+        );
+
+        // The task already links the new commit: the old row goes away.
+        CommitLinkRepo::insert(&conn, &link(2, 1, 1, "old2", 2)).unwrap();
+        assert!(!CommitLinkRepo::relink(&conn, CommitLinkId(2), "new", "pid").unwrap());
+        assert!(CommitLinkRepo::get(&conn, CommitLinkId(2))
+            .unwrap()
+            .is_none());
     }
 
     #[test]

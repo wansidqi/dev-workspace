@@ -148,6 +148,9 @@ mod tests {
         ] {
             assert!(!is_openable_url(bad), "{bad:?} should be refused");
         }
-        assert!(!is_openable_url(&format!("https://e.com/{}", "a".repeat(3000))));
+        assert!(!is_openable_url(&format!(
+            "https://e.com/{}",
+            "a".repeat(3000)
+        )));
     }
 }

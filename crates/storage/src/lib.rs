@@ -4,6 +4,7 @@
 mod attachments;
 mod commit_links;
 mod credentials;
+mod github_token;
 mod import;
 mod migrations;
 mod notes;
@@ -22,6 +23,7 @@ mod vault;
 pub use attachments::AttachmentRepo;
 pub use commit_links::CommitLinkRepo;
 pub use credentials::CredentialRepo;
+pub use github_token::{clear_github_token, load_github_token, save_github_token};
 pub use import::{import_project, import_project_with_limits, ImportLimits, ImportReport};
 pub use migrations::run_migrations;
 pub use notes::NoteRepo;

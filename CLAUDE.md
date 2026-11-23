@@ -68,6 +68,7 @@ Suggested layout:
 │   ├── core/        # domain models, rules, no UI
 │   ├── storage/     # sqlite, migrations, crypto, file store
 │   ├── git/         # git2 wrapper, commit linking, patch-id
+│   ├── github/      # optional GitHub client (device flow, PRs, checks); ureq, no tokio
 │   ├── terminal/    # pty + alacritty_terminal wrapper
 │   ├── runner/      # std-only process runner for per-project run commands
 │   └── app/         # GPUI app, views, actions, main.rs

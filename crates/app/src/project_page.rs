@@ -14,8 +14,7 @@ use crate::task_tree::{
 };
 use crate::theme::{GlassTheme, TypeScale};
 use crate::ui::{
-    button, chip, empty_state, filter_chip, icon, icon_button, section_label,
-    status_style,
+    button, chip, empty_state, filter_chip, icon, icon_button, section_label, status_style,
     ButtonKind, Icon,
 };
 use crate::{date, flatten_tasks, shell, status_label, Root};
@@ -984,7 +983,11 @@ impl Root {
     /// input (or "Todo"), and opens it.
     fn create_project_todo(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
         let typed = self.new_note_input.read(cx).content.trim().to_string();
-        let title = if typed.is_empty() { "Todo".into() } else { typed };
+        let title = if typed.is_empty() {
+            "Todo".into()
+        } else {
+            typed
+        };
         self.new_note_input
             .update(cx, |input, cx| input.reset(window, cx));
         let created = self.state.update(cx, |state, cx| {
@@ -1145,9 +1148,9 @@ impl Root {
                             Some(Icon::ListChecks),
                             "Todo",
                         )
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.create_project_todo(window, cx)
-                        })),
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.create_project_todo(window, cx)),
+                        ),
                     ),
             );
 

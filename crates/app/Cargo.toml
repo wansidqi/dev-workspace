@@ -11,6 +11,7 @@ path = "src/main.rs"
 devspace-core = { path = "../core" }
 devspace-storage = { path = "../storage" }
 devspace-git = { path = "../git" }
+devspace-github = { path = "../github" }
 devspace-terminal = { path = "../terminal" }
 devspace-runner = { path = "../runner" }
 rusqlite = { version = "0.31", features = ["bundled"] }

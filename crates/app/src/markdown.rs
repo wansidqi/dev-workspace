@@ -678,7 +678,8 @@ fn parse_blocks<'a>(
                 if depth >= MAX_DEPTH {
                     skip_until(events, TagEnd::FootnoteDefinition);
                 } else {
-                    let inner = parse_blocks(events, Some(TagEnd::FootnoteDefinition), depth + 1, pos);
+                    let inner =
+                        parse_blocks(events, Some(TagEnd::FootnoteDefinition), depth + 1, pos);
                     blocks.push(Block::FootnoteDef {
                         name,
                         blocks: inner,
@@ -805,7 +806,10 @@ pub fn toggle_marker(source: &str, range: &Range<usize>) -> Option<(Range<usize>
     let tail = &slice[offset..];
     let (marker, done) = MARKERS.iter().find(|(m, _)| tail.starts_with(m))?;
     let start = range.start + offset;
-    Some((start..start + marker.len(), if *done { "[ ]" } else { "[x]" }))
+    Some((
+        start..start + marker.len(),
+        if *done { "[ ]" } else { "[x]" },
+    ))
 }
 
 fn skip_until<'a>(events: &mut impl Iterator<Item = Event<'a>>, end: TagEnd) {
@@ -997,11 +1001,15 @@ mod tests {
 
     #[test]
     fn clicking_a_checkbox_rewrites_only_its_marker() {
-        let src = "intro\n\n- [ ] a\n- [x] b\n  - [ ] nested\n- [X] c\n\n```\n- [ ] not a task\n```\n";
+        let src =
+            "intro\n\n- [ ] a\n- [x] b\n  - [ ] nested\n- [X] c\n\n```\n- [ ] not a task\n```\n";
         assert_eq!(markers(src).len(), 4);
         assert_eq!(toggled(src, 0), src.replacen("- [ ] a", "- [x] a", 1));
         assert_eq!(toggled(src, 1), src.replacen("- [x] b", "- [ ] b", 1));
-        assert_eq!(toggled(src, 2), src.replacen("- [ ] nested", "- [x] nested", 1));
+        assert_eq!(
+            toggled(src, 2),
+            src.replacen("- [ ] nested", "- [x] nested", 1)
+        );
         assert_eq!(toggled(src, 3), src.replacen("- [X] c", "- [ ] c", 1));
         assert!(toggle_marker("hello", &(0..3)).is_none());
         assert!(toggle_marker("hello", &(2..99)).is_none());
@@ -1065,8 +1073,8 @@ mod tests {
     /// honest. Skipped when the samples folder is not there.
     #[test]
     fn the_demo_note_exercises_every_feature() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../samples/markdown-demo.md");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/markdown-demo.md");
         let Ok(source) = std::fs::read_to_string(path) else {
             return;
         };
@@ -1083,7 +1091,10 @@ mod tests {
             anchors += 1;
             rest = &tail[end..];
         }
-        assert!(anchors >= 15, "expected the contents list and more, got {anchors}");
+        assert!(
+            anchors >= 15,
+            "expected the contents list and more, got {anchors}"
+        );
 
         let alerts = blocks
             .iter()
@@ -1108,7 +1119,9 @@ mod tests {
             panic!("expected list");
         };
         assert_eq!(items[0].checked, Some(false));
-        assert!(matches!(&items[0].blocks[0], Block::Paragraph(s) if text(s).starts_with("(Optional)")));
+        assert!(
+            matches!(&items[0].blocks[0], Block::Paragraph(s) if text(s).starts_with("(Optional)"))
+        );
     }
 
     #[test]
@@ -1156,7 +1169,9 @@ mod tests {
         // Shorthand hex, too few channels and padded spaces are not colours.
         assert_eq!(&swatches[3..], &[None, None, None]);
         // Without backticks it stays plain text.
-        assert!(para(&blocks, 0).last().is_some_and(|s| !s.code && s.swatch.is_none()));
+        assert!(para(&blocks, 0)
+            .last()
+            .is_some_and(|s| !s.code && s.swatch.is_none()));
     }
 
     #[test]
@@ -1172,7 +1187,9 @@ mod tests {
             match &blocks[0] {
                 Block::Alert { kind: k, blocks } => {
                     assert_eq!(*k, kind);
-                    assert!(matches!(&blocks[0], Block::Paragraph(s) if text(s) == "Useful information."));
+                    assert!(
+                        matches!(&blocks[0], Block::Paragraph(s) if text(s) == "Useful information.")
+                    );
                 }
                 other => panic!("expected alert for {word}, got {other:?}"),
             }
@@ -1215,7 +1232,10 @@ mod tests {
     fn emoji_shortcodes_and_bare_urls() {
         let blocks = parse("Ship it :tada: :unknown: see https://example.com/a, ok");
         let spans = para(&blocks, 0);
-        assert_eq!(text(spans), "Ship it 🎉 :unknown: see https://example.com/a, ok");
+        assert_eq!(
+            text(spans),
+            "Ship it 🎉 :unknown: see https://example.com/a, ok"
+        );
         let link = spans.iter().find(|s| s.link).expect("autolink");
         assert_eq!(link.text, "https://example.com/a");
     }

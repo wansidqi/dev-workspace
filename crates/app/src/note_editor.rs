@@ -13,8 +13,8 @@ use gpui::{
     actions, div, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem, Context,
     CursorStyle, ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle,
     Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, Point, ScrollHandle, ShapedLine, SharedString, Style,
-    TextRun, UTF16Selection, Window,
+    MouseUpEvent, PaintQuad, Pixels, Point, ScrollHandle, ShapedLine, SharedString, Style, TextRun,
+    UTF16Selection, Window,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -868,7 +868,8 @@ impl Element for NoteTextElement {
                 scroll_handle.set_offset(offset);
                 window.refresh();
             }
-            self.input.update(cx, |input, _| input.reveal_cursor = false);
+            self.input
+                .update(cx, |input, _| input.reveal_cursor = false);
         }
 
         let mut selections = Vec::new();

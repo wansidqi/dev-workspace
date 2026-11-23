@@ -48,6 +48,13 @@ pub struct Settings {
     pub reduce_transparency: bool,
     /// Skip transitions: hover and selection changes are instant.
     pub reduce_motion: bool,
+    /// Fetch every repo in the Changes view every few minutes while it is open
+    /// (off by default: it is the one thing that talks to the network on its own).
+    pub background_fetch: bool,
+    /// The optional GitHub integration (pull requests, CI status). Off by default.
+    pub github_enabled: bool,
+    /// Public client id of the OAuth app used for the device flow sign-in.
+    pub github_client_id: String,
     /// Ids of projects the user switched off in the timesheet (sorted).
     pub timesheet_excluded: Vec<i64>,
     /// Project ids in the order the user arranged them in the timesheet.
@@ -78,6 +85,9 @@ impl Default for Settings {
             theme_mode: ThemeMode::Dark,
             reduce_transparency: false,
             reduce_motion: false,
+            background_fetch: false,
+            github_enabled: false,
+            github_client_id: String::new(),
             timesheet_excluded: Vec::new(),
             timesheet_order: Vec::new(),
         }
@@ -104,9 +114,7 @@ impl Settings {
                 "last_project" => settings.last_project = parse_id(value),
                 "last_task" => settings.last_task = parse_id(value),
                 "terminal_open" => settings.terminal_open = matches!(value, "true" | "1"),
-                "note_split_swapped" => {
-                    settings.note_split_swapped = matches!(value, "true" | "1")
-                }
+                "note_split_swapped" => settings.note_split_swapped = matches!(value, "true" | "1"),
                 // A blank command keeps the default rather than breaking
                 // "Open in IDE".
                 "ide_command" if !value.is_empty() => settings.ide_command = value.to_string(),
@@ -133,6 +141,20 @@ impl Settings {
                 }
                 "reduce_motion" => {
                     settings.reduce_motion = matches!(value, "true" | "1");
+                }
+                "github_enabled" => {
+                    settings.github_enabled = matches!(value, "true" | "1");
+                }
+                // A client id is letters and digits; anything else is not one.
+                "github_client_id"
+                    if value
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) =>
+                {
+                    settings.github_client_id = value.to_string();
+                }
+                "background_fetch" => {
+                    settings.background_fetch = matches!(value, "true" | "1");
                 }
                 "timesheet_excluded" => {
                     let mut ids: Vec<i64> = value
@@ -182,6 +204,11 @@ impl Settings {
             self.reduce_transparency
         ));
         out.push_str(&format!("reduce_motion={}\n", self.reduce_motion));
+        out.push_str(&format!("background_fetch={}\n", self.background_fetch));
+        out.push_str(&format!("github_enabled={}\n", self.github_enabled));
+        if !self.github_client_id.is_empty() {
+            out.push_str(&format!("github_client_id={}\n", self.github_client_id));
+        }
         if !self.timesheet_excluded.is_empty() {
             let ids: Vec<String> = self.timesheet_excluded.iter().map(i64::to_string).collect();
             out.push_str(&format!("timesheet_excluded={}\n", ids.join(",")));
@@ -345,6 +372,9 @@ mod tests {
             theme_mode: ThemeMode::Light,
             reduce_transparency: true,
             reduce_motion: true,
+            background_fetch: true,
+            github_enabled: true,
+            github_client_id: "Iv1.abc123".to_string(),
             timesheet_excluded: vec![2, 5],
             timesheet_order: vec![5, 2, 9],
         };

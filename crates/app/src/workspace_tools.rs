@@ -35,6 +35,7 @@ pub struct WorkspaceTools {
     theme: GlassTheme,
     ide_input: Entity<TextInput>,
     scrollback_input: Entity<TextInput>,
+    github: Entity<crate::github_panel::GithubPanel>,
     /// Result of the last action: (message, is_error).
     notice: Option<(String, bool)>,
     /// A backup/export/import is running; further ones are refused.
@@ -86,12 +87,15 @@ impl WorkspaceTools {
                 this.update(cx, |tools, cx| tools.save_scrollback(&text, cx));
             }));
         });
+        let github =
+            cx.new(|cx| crate::github_panel::GithubPanel::new(cx, settings.clone(), theme));
         Self {
             state,
             settings,
             theme,
             ide_input,
             scrollback_input,
+            github,
             notice: None,
             busy: false,
         }
@@ -156,6 +160,13 @@ impl WorkspaceTools {
     fn toggle_reduce_transparency(&mut self, cx: &mut Context<Self>) {
         self.settings.update(cx, |store, cx| {
             store.update(cx, |s| s.reduce_transparency = !s.reduce_transparency)
+        });
+        cx.notify();
+    }
+
+    fn toggle_background_fetch(&mut self, cx: &mut Context<Self>) {
+        self.settings.update(cx, |store, cx| {
+            store.update(cx, |s| s.background_fetch = !s.background_fetch)
         });
         cx.notify();
     }
@@ -333,7 +344,7 @@ impl WorkspaceTools {
 }
 
 /// One settings row: a title and hint on the left, the control on the right.
-fn setting_row(
+pub(crate) fn setting_row(
     theme: &GlassTheme,
     title: &str,
     hint: impl Into<SharedString>,
@@ -373,7 +384,7 @@ fn setting_row(
 }
 
 /// A titled group of setting rows.
-fn setting_group(theme: &GlassTheme, title: &str, rows: Vec<gpui::Div>) -> gpui::Div {
+pub(crate) fn setting_group(theme: &GlassTheme, title: &str, rows: Vec<gpui::Div>) -> gpui::Div {
     let theme = *theme;
     div()
         .flex()
@@ -393,8 +404,9 @@ impl Render for WorkspaceTools {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.theme = crate::theme::current(cx);
         let theme = self.theme;
-        let (command, theme_mode, reduce_transparency, reduce_motion, scrollback): (
+        let (command, theme_mode, reduce_transparency, reduce_motion, scrollback, background_fetch): (
             SharedString,
+            _,
             _,
             _,
             _,
@@ -407,6 +419,7 @@ impl Render for WorkspaceTools {
                 settings.reduce_transparency,
                 settings.reduce_motion,
                 settings.terminal_scrollback,
+                settings.background_fetch,
             )
         };
         let busy = self.busy;
@@ -456,6 +469,18 @@ impl Render for WorkspaceTools {
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_reduce_motion(cx))),
                 ),
             ],
+        );
+
+        let git = setting_group(
+            &theme,
+            "Git",
+            vec![setting_row(
+                &theme,
+                "Fetch in the background",
+                "While Changes is open, fetch every repo every five minutes so ahead and behind counts stay current. Off by default.",
+                switch(&theme, "toggle-background-fetch", background_fetch)
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_background_fetch(cx))),
+            )],
         );
 
         let tools = setting_group(
@@ -579,6 +604,18 @@ impl Render for WorkspaceTools {
                                 appearance,
                                 "settings-group-0",
                                 0,
+                                motion::STANDARD,
+                            ))
+                            .child(motion::enter_after(
+                                git,
+                                "settings-group-git",
+                                1,
+                                motion::STANDARD,
+                            ))
+                            .child(motion::enter_after(
+                                div().child(self.github.clone()),
+                                "settings-group-github",
+                                1,
                                 motion::STANDARD,
                             ))
                             .child(motion::enter_after(

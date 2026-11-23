@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use gpui::{
     div, font, prelude::*, px, relative, AnyElement, App, ClipboardItem, FontStyle, FontWeight,
-    HighlightStyle, Hsla, InteractiveText, SharedString, StrikethroughStyle, StyledText, TextRun, UnderlineStyle,
-    Window,
+    HighlightStyle, Hsla, InteractiveText, SharedString, StrikethroughStyle, StyledText, TextRun,
+    UnderlineStyle, Window,
 };
 
 use crate::highlight::{self, Token};

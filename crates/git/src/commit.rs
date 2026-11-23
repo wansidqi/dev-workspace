@@ -1,7 +1,8 @@
 //! Committing what is staged, including amend and co-author trailers.
 //!
-//! libgit2 does not run git hooks (pre-commit, commit-msg), unlike the git
-//! CLI. That is a known difference from GitHub Desktop; see docs/progress.md.
+//! libgit2 does not run git hooks (pre-commit, commit-msg), so when the repo
+//! has an active hook and `git` is installed the commit goes through the git
+//! CLI instead, as in GitHub Desktop. Without hooks libgit2 does it directly.
 
 use std::path::Path;
 
@@ -104,6 +105,22 @@ pub fn commit_staged(path: &Path, req: &CommitRequest<'_>) -> Result<CommitInfo,
     let head = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
     let sig = signature(&repo)?;
 
+    if has_active_hooks(&repo) && crate::git_executable().is_some() {
+        if !req.amend {
+            let unchanged = match &head {
+                Some(h) => h.tree_id() == tree.id(),
+                None => tree.is_empty(),
+            };
+            if unchanged {
+                return Err(invalid("nothing is staged"));
+            }
+        } else if head.is_none() {
+            return Err(invalid("there is no commit to amend"));
+        }
+        drop((tree, index));
+        return commit_with_git(path, &repo, &message, req.amend);
+    }
+
     let oid = if req.amend {
         let head = head.ok_or_else(|| invalid("there is no commit to amend"))?;
         head.amend(
@@ -128,6 +145,49 @@ pub fn commit_staged(path: &Path, req: &CommitRequest<'_>) -> Result<CommitInfo,
     let commit = repo.find_commit(oid)?;
     let info = commit_info(&commit);
     Ok(info)
+}
+
+/// Whether the repo has a hook that a commit would run.
+fn has_active_hooks(repo: &Repository) -> bool {
+    const HOOKS: [&str; 4] = [
+        "pre-commit",
+        "prepare-commit-msg",
+        "commit-msg",
+        "post-commit",
+    ];
+    let dir = match repo.config().and_then(|c| c.get_path("core.hooksPath")) {
+        Ok(p) if p.is_absolute() => p,
+        Ok(p) => repo.workdir().unwrap_or_else(|| repo.path()).join(p),
+        Err(_) => repo.path().join("hooks"),
+    };
+    HOOKS.iter().any(|name| {
+        let hook = dir.join(name);
+        hook.is_file() || hook.with_extension("exe").is_file()
+    })
+}
+
+/// Commits through the git CLI so hooks run. The message goes in a file, never
+/// on the command line, and a hook that rejects the commit explains itself in
+/// the returned error.
+fn commit_with_git(
+    path: &Path,
+    repo: &Repository,
+    message: &str,
+    amend: bool,
+) -> Result<CommitInfo, GitError> {
+    let file = repo.path().join("devspace-commit-msg.txt");
+    std::fs::write(&file, message)?;
+    let file_str = file.to_string_lossy().into_owned();
+    let mut args = vec!["commit", "-F", file_str.as_str()];
+    if amend {
+        args.push("--amend");
+    }
+    let result = crate::cli::run_ok(path, &args, &[], crate::cli::Kind::Local);
+    let _ = std::fs::remove_file(&file);
+    result?;
+    let repo = Repository::open(path)?;
+    let commit = repo.head()?.peel_to_commit()?;
+    Ok(commit_info(&commit))
 }
 
 /// Summary and description of HEAD's commit, to pre-fill the box when
@@ -352,5 +412,77 @@ mod tests {
         f.repo.merge(&[&theirs], None, None).unwrap();
         assert_eq!(repo_status(f.path()).unwrap().in_progress, Some("merge"));
         assert!(commit_staged(f.path(), &req("merge")).is_err());
+    }
+
+    fn write_hook(f: &Fixture, name: &str, body: &str) {
+        let dir = f.path().join(".git").join("hooks");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(name),
+            format!(
+                "#!/bin/sh
+{body}
+"
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_failing_pre_commit_hook_blocks_the_commit_and_explains_why() {
+        if crate::git_executable().is_none() {
+            return;
+        }
+        let f = Fixture::with_files(&[(
+            "a.txt", "one
+",
+        )]);
+        write_hook(
+            &f,
+            "pre-commit",
+            "echo \"lint failed\" >&2
+exit 1",
+        );
+        f.write(
+            "a.txt", "two
+",
+        );
+        stage_files(f.path(), &["a.txt".into()]).unwrap();
+        let err = commit_staged(f.path(), &req("change"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("lint failed"), "{err}");
+        assert_eq!(
+            repo_status(f.path()).unwrap().staged_count(),
+            1,
+            "still staged"
+        );
+    }
+
+    #[test]
+    fn hooks_run_and_the_commit_still_lands_with_trailers() {
+        if crate::git_executable().is_none() {
+            return;
+        }
+        let f = Fixture::with_files(&[(
+            "a.txt", "one
+",
+        )]);
+        write_hook(&f, "commit-msg", "exit 0");
+        f.write(
+            "a.txt", "two
+",
+        );
+        stage_files(f.path(), &["a.txt".into()]).unwrap();
+        let co = ["Pat <pat@example.com>".to_string()];
+        let r = CommitRequest {
+            co_authors: &co,
+            ..req("change")
+        };
+        let info = commit_staged(f.path(), &r).unwrap();
+        assert_eq!(info.summary, "change");
+        let (_, body) = last_commit_message(f.path()).unwrap().unwrap();
+        assert!(body.contains("Co-authored-by: Pat"), "{body}");
+        assert_eq!(repo_status(f.path()).unwrap().staged_count(), 0);
     }
 }

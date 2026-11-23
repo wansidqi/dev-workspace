@@ -1,0 +1,10 @@
+[package]
+name = "devspace-github"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Blocking HTTP with rustls; no async runtime (CLAUDE.md: avoid tokio). The
+# `json` feature re-exports serde_json so no separate dependency is needed.
+ureq = { version = "2", features = ["json"] }
+thiserror.workspace = true
