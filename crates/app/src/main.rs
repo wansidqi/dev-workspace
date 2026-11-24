@@ -27,6 +27,7 @@ mod note_format;
 mod note_page;
 mod palette;
 mod palette_rank;
+mod preview_select;
 mod project_files;
 mod project_page;
 mod qa;
@@ -107,11 +108,16 @@ struct Root {
     /// Edit / Split / Preview for the open note, and its parsed preview
     /// (re-parsed only when the text changes). See `note_page.rs`.
     note_mode: note_page::NoteMode,
-    note_preview: Option<(SharedString, Vec<markdown::Block>)>,
+    /// The note text, its blocks, and where each top-level block starts in
+    /// that text (so a click in the preview can place the editor's cursor).
+    note_preview: Option<(SharedString, Vec<markdown::Block>, Vec<Option<usize>>)>,
     /// Code block whose copy button was just pressed (shows "Copied" briefly).
     note_copied: Option<usize>,
     /// Scroll position of the rendered note, so `#anchor` links can scroll it.
     note_scroll: gpui::ScrollHandle,
+    /// Text selection in the rendered note, and the focus that lets Ctrl+C copy it.
+    preview_select: preview_select::Shared,
+    preview_focus: gpui::FocusHandle,
     /// Last scroll offsets (editor, preview) seen in the split view, to tell
     /// which side the user moved. See `note_page.rs`.
     note_scroll_seen: Option<(gpui::Pixels, gpui::Pixels)>,
@@ -1004,6 +1010,7 @@ fn main() -> Result<()> {
         theme::install_fonts(cx);
         text_input::init_key_bindings(cx);
         note_editor::init_key_bindings(cx);
+        preview_select::init_key_bindings(cx);
         // Bound globally (no key context) so it also fires while a terminal
         // has focus; GPUI matches bindings before the terminal's raw
         // key-down handler sees the keystroke.
@@ -1189,6 +1196,8 @@ fn main() -> Result<()> {
                         note_mode: note_page::NoteMode::Edit,
                         note_copied: None,
                         note_scroll: gpui::ScrollHandle::new(),
+                        preview_select: Default::default(),
+                        preview_focus: cx.focus_handle(),
                         note_scroll_seen: None,
                         note_split_swapped: saved.note_split_swapped,
                         collapsed_tasks: std::collections::HashSet::new(),

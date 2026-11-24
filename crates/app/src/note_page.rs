@@ -10,6 +10,7 @@ use gpui::{
 use crate::markdown;
 use crate::markdown_view;
 use crate::note_format::Format;
+use crate::preview_select::{PreviewCopy, PreviewSelectAll};
 use crate::theme::GlassTheme;
 use crate::ui::{back_button, icon_button, icon_chip, page_header, segment, segmented, Icon};
 use crate::Root;
@@ -63,10 +64,25 @@ impl Root {
             return;
         };
         let content: SharedString = editor.read(cx).content.clone();
-        let fresh = matches!(&self.note_preview, Some((text, _)) if *text == content);
+        let fresh = matches!(&self.note_preview, Some((text, ..)) if *text == content);
         if !fresh {
-            let blocks = markdown::parse(&content);
-            self.note_preview = Some((content, blocks));
+            let (blocks, starts) = markdown::parse_mapped(&content);
+            self.note_preview = Some((content, blocks, starts));
+            // The old selection pointed into text that is gone.
+            self.preview_select.borrow_mut().clear();
+        }
+    }
+
+    /// Double-click in the preview: switch to the editor with the cursor at the
+    /// start of the block that was clicked, scrolled into view.
+    fn edit_note_at_block(&mut self, block: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let offset = self
+            .note_preview
+            .as_ref()
+            .and_then(|(_, _, starts)| starts.get(block).copied().flatten());
+        self.set_note_mode(NoteMode::Edit, window, cx);
+        if let (Some(offset), Some((_, _, editor))) = (offset, self.open_note.clone()) {
+            editor.update(cx, |e, cx| e.place_cursor(offset, window, cx));
         }
     }
 
@@ -79,7 +95,7 @@ impl Root {
             let target = self
                 .note_preview
                 .as_ref()
-                .and_then(|(_, blocks)| markdown::anchor_index(blocks, anchor));
+                .and_then(|(_, blocks, _)| markdown::anchor_index(blocks, anchor));
             if let Some(ix) = target {
                 self.note_scroll.scroll_to_top_of_item(ix);
                 cx.notify();
@@ -202,11 +218,15 @@ impl Root {
         let preview = |this: &Self, centred: bool| -> AnyElement {
             let root = root.clone();
             let editable = this.note_mode == NoteMode::Preview;
-            let blocks = this.note_preview.as_ref().map(|(_, b)| b.as_slice());
+            let blocks = this.note_preview.as_ref().map(|(_, b, _)| b.as_slice());
             let copy_root = root.clone();
+            let open_root = root.clone();
             let toggle_root = root.clone();
             let link_root = root.clone();
+            let select = this.preview_select.clone();
+            let focus = this.preview_focus.clone();
             let hook = markdown_view::CopyHook {
+                select: select.clone(),
                 on_link: std::rc::Rc::new(move |href, _window, cx| {
                     link_root.update(cx, |this, cx| this.follow_note_link(&href, cx));
                 }),
@@ -217,6 +237,11 @@ impl Root {
                         }
                         cx.notify();
                     });
+                }),
+                on_edit: editable.then(|| {
+                    std::rc::Rc::new(move |block, window: &mut Window, cx: &mut gpui::App| {
+                        open_root.update(cx, |this, cx| this.edit_note_at_block(block, window, cx));
+                    }) as markdown_view::EditHandler
                 }),
                 copied: this.note_copied,
                 on_copy: std::rc::Rc::new(move |index, _text, _window, cx| {
@@ -238,8 +263,51 @@ impl Root {
                     });
                 }),
             };
+            let (down_select, down_root, down_focus) =
+                (select.clone(), root.clone(), focus.clone());
+            let (move_select, move_root) = (select.clone(), root.clone());
+            let (up_select, up_root) = (select.clone(), root.clone());
+            let (all_select, all_root) = (select.clone(), root.clone());
+            let up_out_select = select.clone();
+            let up_out_root = root.clone();
             div()
                 .id("note-preview")
+                .key_context("NotePreview")
+                .track_focus(&focus)
+                .on_action(move |_: &PreviewCopy, _, cx| {
+                    if let Some(text) = select.borrow().selected_text() {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                    }
+                })
+                .on_action(move |_: &PreviewSelectAll, _, cx| {
+                    all_select.borrow_mut().select_all();
+                    all_root.update(cx, |_, cx| cx.notify());
+                })
+                // Drag to select text. A double-click still starts editing, so
+                // only a first press begins a selection.
+                .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
+                    window.focus(&down_focus, cx);
+                    if event.click_count == 1 {
+                        down_select.borrow_mut().start(event.position);
+                    }
+                    down_root.update(cx, |_, cx| cx.notify());
+                })
+                .on_mouse_move(move |event, _, cx| {
+                    if event.pressed_button == Some(gpui::MouseButton::Left)
+                        && move_select.borrow().is_dragging()
+                        && move_select.borrow_mut().drag(event.position)
+                    {
+                        move_root.update(cx, |_, cx| cx.notify());
+                    }
+                })
+                .on_mouse_up(gpui::MouseButton::Left, move |_, _, cx| {
+                    up_select.borrow_mut().finish();
+                    up_root.update(cx, |_, cx| cx.notify());
+                })
+                .on_mouse_up_out(gpui::MouseButton::Left, move |_, _, cx| {
+                    up_out_select.borrow_mut().finish();
+                    up_out_root.update(cx, |_, cx| cx.notify());
+                })
                 .on_click(move |event, window, cx| {
                     // Double-click the rendered note to start editing it.
                     if editable && event.click_count() >= 2 {

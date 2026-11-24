@@ -13,12 +13,14 @@ use gpui::{
     actions, div, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem, Context,
     CursorStyle, ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle,
     Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, Point, ScrollHandle, ShapedLine, SharedString, Style, TextRun,
-    UTF16Selection, Window,
+    MouseUpEvent, PaintQuad, Pixels, Point, ScrollHandle, ShapedLine, SharedString, Style,
+    Subscription, TextRun, UTF16Selection, Window,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::theme::GlassTheme;
+use crate::text_input::TextInput;
+use crate::theme::{GlassTheme, TypeScale};
+use crate::ui::{icon_button, Icon};
 
 pub type ChangeHandler = Box<dyn Fn(&str, &mut Window, &mut Context<NoteEditor>)>;
 pub type CloseHandler = Box<dyn Fn(&mut Window, &mut Context<NoteEditor>)>;
@@ -49,6 +51,9 @@ actions!(
         NeCopy,
         NeClose,
         NeSave,
+        NeFind,
+        NeFindNext,
+        NeFindPrev,
     ]
 );
 
@@ -86,6 +91,10 @@ pub fn init_key_bindings(cx: &mut App) {
         KeyBinding::new("escape", NeClose, Some("NoteEditor")),
         KeyBinding::new("ctrl-s", NeSave, Some("NoteEditor")),
         KeyBinding::new("cmd-s", NeSave, Some("NoteEditor")),
+        KeyBinding::new("ctrl-f", NeFind, Some("NoteEditor")),
+        KeyBinding::new("cmd-f", NeFind, Some("NoteEditor")),
+        KeyBinding::new("f3", NeFindNext, Some("NoteEditor")),
+        KeyBinding::new("shift-f3", NeFindPrev, Some("NoteEditor")),
     ]);
 }
 
@@ -111,6 +120,16 @@ pub struct NoteEditor {
     /// Set by every selection or content change; the next paint scrolls the
     /// cursor into view and clears it, so the mouse wheel is never fought.
     reveal_cursor: bool,
+    /// The find bar (Ctrl+F): its query box, the matches of the query in the
+    /// text, and which one is current. Matches are recomputed on render only
+    /// when the text or the query changed (`find_key`).
+    find_open: bool,
+    find_input: Entity<TextInput>,
+    find_matches: Vec<Range<usize>>,
+    find_current: Option<usize>,
+    find_key: (SharedString, SharedString),
+    /// Keeps the editor repainting as the query is typed.
+    _find_watch: Subscription,
     pub theme: GlassTheme,
 }
 
@@ -122,7 +141,36 @@ impl NoteEditor {
     ) -> Self {
         let content = initial_content.into();
         let end = content.len();
+        let find_input = cx.new(|cx| TextInput::new(cx, "Find in note", theme));
+        let weak = cx.weak_entity();
+        find_input.update(cx, |input, _| {
+            input.keep_on_confirm = true;
+            let next = weak.clone();
+            // Enter steps to the next match; Escape closes the bar.
+            input.on_confirm = Some(Box::new(move |_, window, cx| {
+                let next = next.clone();
+                window.defer(cx, move |_, cx| {
+                    next.update(cx, |this, cx| this.find_step(1, cx)).ok();
+                });
+            }));
+            let close = weak.clone();
+            input.on_cancel = Some(Box::new(move |window, cx| {
+                let close = close.clone();
+                window.defer(cx, move |window, cx| {
+                    close
+                        .update(cx, |this, cx| this.close_find(window, cx))
+                        .ok();
+                });
+            }));
+        });
+        let find_watch = cx.observe(&find_input, |_, _, cx| cx.notify());
         Self {
+            find_open: false,
+            find_input,
+            find_matches: Vec::new(),
+            find_current: None,
+            find_key: (SharedString::default(), SharedString::default()),
+            _find_watch: find_watch,
             focus_handle: cx.focus_handle(),
             content,
             selected_range: end..end,
@@ -427,6 +475,19 @@ impl NoteEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let offset = self.index_for_mouse_position(event.position);
+        if event.click_count >= 3 {
+            // Triple-click selects the whole line.
+            let range = self.line_range(self.line_index_for_offset(offset));
+            self.select_range(range, window, cx);
+            return;
+        }
+        if event.click_count == 2 {
+            // Double-click selects the word under the pointer.
+            let range = crate::text_nav::word_at(&self.content, offset);
+            self.select_range(range, window, cx);
+            return;
+        }
         self.is_selecting = true;
         if event.modifiers.shift {
             self.select_to(self.index_for_mouse_position(event.position), window, cx);
@@ -479,6 +540,155 @@ impl NoteEditor {
         self.reveal_cursor = true;
         window.notify_text_selection_changed(&self.focus_handle);
         cx.notify()
+    }
+
+    // ---- find ----------------------------------------------------------
+
+    /// Ctrl+F: opens the find bar (seeded with a one-line selection) and moves
+    /// focus into its query box.
+    fn open_find(&mut self, _: &NeFind, window: &mut Window, cx: &mut Context<Self>) {
+        self.find_open = true;
+        let selected = &self.selected_range;
+        if !selected.is_empty() {
+            let text = &self.content[selected.clone()];
+            if !text.contains('\n') && text.len() <= 120 {
+                let text = text.to_string();
+                self.find_input.update(cx, |input, cx| {
+                    input.set_text_selected(text);
+                    cx.notify();
+                });
+            }
+        }
+        let focus = self.find_input.read(cx).focus_handle.clone();
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    /// Closes the bar and hands focus back to the text.
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.find_open = false;
+        self.find_matches.clear();
+        self.find_current = None;
+        self.find_key = (SharedString::default(), SharedString::default());
+        window.focus(&self.focus_handle, cx);
+        cx.notify();
+    }
+
+    /// Recomputes the matches if the text or the query changed since last time.
+    /// A new query jumps to the first match at or after the cursor.
+    fn refresh_find(&mut self, cx: &Context<Self>) {
+        if !self.find_open {
+            return;
+        }
+        let query = self.find_input.read(cx).content.clone();
+        if self.find_key.0 == self.content && self.find_key.1 == query {
+            return;
+        }
+        let query_changed = self.find_key.1 != query;
+        self.find_key = (self.content.clone(), query.clone());
+        self.find_matches = crate::text_nav::find_all(&self.content, &query);
+        if self.find_matches.is_empty() {
+            self.find_current = None;
+        } else if query_changed {
+            let from = self.selected_range.start;
+            let ix = self
+                .find_matches
+                .iter()
+                .position(|m| m.start >= from)
+                .unwrap_or(0);
+            self.select_match(ix);
+        } else {
+            let last = self.find_matches.len() - 1;
+            self.find_current = Some(self.find_current.unwrap_or(0).min(last));
+        }
+    }
+
+    fn select_match(&mut self, index: usize) {
+        self.find_current = Some(index);
+        self.selected_range = self.find_matches[index].clone();
+        self.selection_reversed = false;
+        self.reveal_cursor = true;
+    }
+
+    /// Moves to the next (`+1`) or previous (`-1`) match, wrapping around.
+    fn find_step(&mut self, delta: isize, cx: &mut Context<Self>) {
+        self.refresh_find(cx);
+        let count = self.find_matches.len();
+        if count == 0 {
+            return;
+        }
+        let from = self.find_current.unwrap_or(0) as isize;
+        self.select_match((from + delta).rem_euclid(count as isize) as usize);
+        cx.notify();
+    }
+
+    fn find_next(&mut self, _: &NeFindNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.find_step(1, cx);
+    }
+
+    fn find_prev(&mut self, _: &NeFindPrev, _: &mut Window, cx: &mut Context<Self>) {
+        self.find_step(-1, cx);
+    }
+
+    fn render_find_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.theme;
+        let status = match (
+            self.find_matches.len(),
+            self.find_input.read(cx).content.is_empty(),
+        ) {
+            (_, true) => String::new(),
+            (0, false) => "No results".to_string(),
+            (n, false) => format!("{} of {n}", self.find_current.map_or(1, |c| c + 1)),
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap(theme.space_2)
+            .pb(theme.space_2)
+            .child(div().w(px(240.0)).child(self.find_input.clone()))
+            .child(
+                div()
+                    .min_w(px(64.0))
+                    .t_small()
+                    .text_color(theme.text_muted)
+                    .child(status),
+            )
+            .child(
+                icon_button(&theme, Icon::ChevronUp, "find-prev", theme.text_primary)
+                    .on_click(cx.listener(|this, _, _, cx| this.find_step(-1, cx))),
+            )
+            .child(
+                icon_button(&theme, Icon::ChevronDown, "find-next", theme.text_primary)
+                    .on_click(cx.listener(|this, _, _, cx| this.find_step(1, cx))),
+            )
+            .child(
+                icon_button(&theme, Icon::X, "find-close", theme.text_primary)
+                    .on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx))),
+            )
+    }
+
+    /// Puts the cursor at byte `offset` (clamped to the text and to a character
+    /// boundary) and scrolls it into view, e.g. after a click in the preview.
+    pub fn place_cursor(&mut self, offset: usize, window: &Window, cx: &mut Context<Self>) {
+        let mut offset = offset.min(self.content.len());
+        while !self.content.is_char_boundary(offset) {
+            offset -= 1;
+        }
+        self.move_to(offset, window, cx);
+    }
+
+    /// Selects `range` (a double- or triple-click) and stops any drag-select.
+    fn select_range(
+        &mut self,
+        range: std::ops::Range<usize>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.is_selecting = false;
+        self.selected_range = range;
+        self.selection_reversed = false;
+        window.notify_text_selection_changed(&self.focus_handle);
+        cx.notify();
     }
 
     fn cursor_offset(&self) -> usize {
@@ -766,6 +976,8 @@ struct PrepaintState {
     lines: Vec<ShapedLine>,
     cursor: Option<PaintQuad>,
     selections: Vec<PaintQuad>,
+    /// Find-bar matches, painted under the selection.
+    finds: Vec<PaintQuad>,
 }
 
 impl IntoElement for NoteTextElement {
@@ -816,6 +1028,8 @@ impl Element for NoteTextElement {
         let line_starts = input.line_starts();
         let selected_range = input.selected_range.clone();
         let cursor_offset = input.cursor_offset();
+        let find_matches = input.find_matches.clone();
+        let find_current = input.find_current;
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line_height = window.line_height();
@@ -872,6 +1086,39 @@ impl Element for NoteTextElement {
                 .update(cx, |input, _| input.reveal_cursor = false);
         }
 
+        // Only matches on screen are drawn: a short query can match thousands
+        // of times.
+        let viewport = scroll_handle.bounds();
+        let mut finds = Vec::new();
+        for (n, m) in find_matches.iter().enumerate() {
+            let idx = line_starts
+                .partition_point(|start| *start <= m.start)
+                .saturating_sub(1);
+            let top = bounds.top() + line_height * (idx as f32);
+            if viewport.size.height > px(0.0)
+                && (top + line_height < viewport.top() || top > viewport.bottom())
+            {
+                continue;
+            }
+            let Some(line) = shaped.get(idx) else {
+                continue;
+            };
+            let start = m.start - line_starts[idx];
+            let end = (m.end - line_starts[idx]).min(line.len);
+            let color = if find_current == Some(n) {
+                self.theme.warning.opacity(0.55)
+            } else {
+                self.theme.warning.opacity(0.25)
+            };
+            finds.push(fill(
+                Bounds::from_corners(
+                    point(bounds.left() + line.x_for_index(start), top),
+                    point(bounds.left() + line.x_for_index(end), top + line_height),
+                ),
+                color,
+            ));
+        }
+
         let mut selections = Vec::new();
         if !selected_range.is_empty() {
             for (idx, line) in shaped.iter().enumerate() {
@@ -912,6 +1159,7 @@ impl Element for NoteTextElement {
             lines: shaped,
             cursor,
             selections,
+            finds,
         }
     }
 
@@ -931,6 +1179,9 @@ impl Element for NoteTextElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
+        for find in prepaint.finds.drain(..) {
+            window.paint_quad(find);
+        }
         for selection in prepaint.selections.drain(..) {
             window.paint_quad(selection);
         }
@@ -964,6 +1215,7 @@ impl Render for NoteEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.theme = crate::theme::current(cx);
         let theme = self.theme;
+        self.refresh_find(cx);
         let focused = self.focus_handle.is_focused(window);
         // The scroll container carries the frame; the padded text box inside it
         // grows with the content (padding on the scroller itself clips the text).
@@ -995,6 +1247,9 @@ impl Render for NoteEditor {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::close))
             .on_action(cx.listener(Self::save))
+            .on_action(cx.listener(Self::open_find))
+            .on_action(cx.listener(Self::find_next))
+            .on_action(cx.listener(Self::find_prev))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -1009,11 +1264,11 @@ impl Render for NoteEditor {
                 input: cx.entity(),
                 theme,
             });
-        div()
+        let scroller = div()
             .id("note-editor-scroll")
             .flex_1()
             .w_full()
-            .h_full()
+            .min_h(px(0.0))
             .overflow_y_scroll()
             .track_scroll(&self.scroll_handle)
             .rounded(theme.radius_md)
@@ -1024,7 +1279,17 @@ impl Render for NoteEditor {
             } else {
                 theme.border_light
             })
-            .child(editor)
+            .child(editor);
+        let bar = self.find_open.then(|| self.render_find_bar(cx));
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .w_full()
+            .h_full()
+            .min_h(px(0.0))
+            .children(bar)
+            .child(scroller)
     }
 }
 

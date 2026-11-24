@@ -126,8 +126,16 @@ fn footnote_number(name: &str) -> usize {
     })
 }
 
-/// Parses markdown into blocks.
+/// Parses markdown into blocks (the app itself uses [`parse_mapped`]).
+#[cfg(test)]
 pub fn parse(source: &str) -> Vec<Block> {
+    parse_mapped(source).0
+}
+
+/// Like [`parse`], and also says where each top-level block starts in
+/// `source` (a byte offset; `None` for the synthesised footnotes block), so a
+/// click in the preview can put the editor's cursor at the same place.
+pub fn parse_mapped(source: &str) -> (Vec<Block>, Vec<Option<usize>>) {
     let source = if source.len() > MAX_PREVIEW_BYTES {
         let mut end = MAX_PREVIEW_BYTES;
         while !source.is_char_boundary(end) {
@@ -148,22 +156,27 @@ pub fn parse(source: &str) -> Vec<Block> {
         inner: Parser::new_ext(source, options).into_offset_iter(),
         pos: &pos,
     };
-    let blocks = parse_blocks(&mut events, None, 0, &pos);
+    let (blocks, block_starts) = parse_blocks_at(&mut events, None, 0, &pos);
 
     // Footnote definitions move to the end, numbered by first reference.
     let mut body = Vec::with_capacity(blocks.len());
+    let mut starts = Vec::with_capacity(blocks.len());
     let mut notes: Vec<(usize, Vec<Block>)> = Vec::new();
-    for block in blocks {
+    for (block, start) in blocks.into_iter().zip(block_starts) {
         match block {
             Block::FootnoteDef { name, blocks } => notes.push((footnote_number(&name), blocks)),
-            other => body.push(other),
+            other => {
+                body.push(other);
+                starts.push(Some(start));
+            }
         }
     }
     if !notes.is_empty() {
         notes.sort_by_key(|(n, _)| *n);
         body.push(Block::Footnotes(notes));
+        starts.push(None);
     }
-    body
+    (body, starts)
 }
 
 /// Passes events through while remembering the source range of the last one, so
@@ -602,7 +615,20 @@ fn parse_blocks<'a>(
     depth: usize,
     pos: &Cell<(usize, usize)>,
 ) -> Vec<Block> {
+    parse_blocks_at(events, until, depth, pos).0
+}
+
+/// [`parse_blocks`] plus the source offset each returned block starts at (the
+/// start of the event that opened it).
+fn parse_blocks_at<'a>(
+    events: &mut impl Iterator<Item = Event<'a>>,
+    until: Option<TagEnd>,
+    depth: usize,
+    pos: &Cell<(usize, usize)>,
+) -> (Vec<Block>, Vec<usize>) {
     let mut blocks = Vec::new();
+    let mut starts: Vec<usize> = Vec::new();
+    let mut at = 0;
     // Tight list items carry inline events with no paragraph around them.
     let mut pending = Inline::default();
 
@@ -616,6 +642,11 @@ fn parse_blocks<'a>(
     }
 
     while let Some(event) = events.next() {
+        // Blocks added by the previous event began where that event did.
+        while starts.len() < blocks.len() {
+            starts.push(at);
+        }
+        at = pos.get().0;
         if pending.handle(&event) {
             continue;
         }
@@ -728,7 +759,10 @@ fn parse_blocks<'a>(
         }
     }
     flush!();
-    blocks
+    while starts.len() < blocks.len() {
+        starts.push(at);
+    }
+    (blocks, starts)
 }
 
 /// Wraps the event stream so an item's blocks stop at its closing tag.
@@ -906,6 +940,23 @@ mod tests {
             Block::Paragraph(s) => s,
             other => panic!("expected paragraph, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn top_level_blocks_know_where_they_start() {
+        let src = "# Title\n\npara one\n\n```\ncode\n```\n\n- a\n- b\n";
+        let (blocks, starts) = parse_mapped(src);
+        assert_eq!(blocks.len(), starts.len());
+        let at = |s: &str| src.find(s);
+        assert_eq!(starts, vec![Some(0), at("para"), at("```"), at("- a")]);
+    }
+
+    #[test]
+    fn footnote_definitions_do_not_shift_block_starts() {
+        let src = "a[^1]\n\n[^1]: note\n\nb";
+        let (blocks, starts) = parse_mapped(src);
+        assert_eq!(blocks.len(), starts.len());
+        assert_eq!(starts, vec![Some(0), src.rfind('b'), None]);
     }
 
     #[test]

@@ -52,9 +52,82 @@ pub fn word_end_after(text: &str, offset: usize) -> usize {
     chars.peek().map_or(text.len(), |(i, _)| offset + i)
 }
 
+/// Most matches the find bar tracks; a one-letter query in a huge note would
+/// otherwise build a list nobody can step through.
+pub const MAX_FIND_MATCHES: usize = 5000;
+
+/// Every non-overlapping occurrence of `query` in `text`, as byte ranges,
+/// ignoring ASCII case (so offsets always line up with `text`). An empty query
+/// matches nothing.
+pub fn find_all(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let haystack = text.to_ascii_lowercase();
+    let needle = query.to_ascii_lowercase();
+    haystack
+        .match_indices(&needle)
+        .take(MAX_FIND_MATCHES)
+        .map(|(i, m)| i..i + m.len())
+        .collect()
+}
+
+/// The run of letters/digits (or of punctuation, or of spaces) that `offset`
+/// touches, for double-click selection. Prefers the character after the
+/// offset; at the end of the text or before a space it falls back to the
+/// character before, so clicking just past a word still selects it.
+pub fn word_at(text: &str, offset: usize) -> std::ops::Range<usize> {
+    let offset = offset.min(text.len());
+    let after = text[offset..].chars().next().map(class);
+    let before = text[..offset].chars().next_back().map(class);
+    let kind = match (before, after) {
+        (Some(b), Some(Class::Space)) if b != Class::Space => b,
+        (_, Some(a)) => a,
+        (Some(b), None) => b,
+        (None, None) => return offset..offset,
+    };
+    let start = text[..offset]
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| class(*c) == kind)
+        .last()
+        .map_or(offset, |(i, _)| i);
+    let end = text[offset..]
+        .char_indices()
+        .find(|(_, c)| class(*c) != kind)
+        .map_or(text.len(), |(i, _)| offset + i);
+    start..end
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn find_all_ignores_ascii_case_and_keeps_byte_offsets() {
+        assert_eq!(find_all("Foo foo FOO", "foo"), vec![0..3, 4..7, 8..11]);
+        assert!(find_all("abc", "").is_empty());
+        assert!(find_all("abc", "z").is_empty());
+        let t = "héllo Hello";
+        let hits = find_all(t, "hello");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(&t[hits[0].clone()], "Hello");
+        assert_eq!(find_all("aaaa", "aa"), vec![0..2, 2..4]);
+    }
+
+    #[test]
+    fn word_at_selects_the_touched_run() {
+        let t = "foo bar.baz";
+        assert_eq!(word_at(t, 5), 4..7);
+        assert_eq!(word_at(t, 4), 4..7);
+        assert_eq!(word_at(t, 3), 0..3); // just past "foo"
+        assert_eq!(word_at(t, 7), 7..8); // the dot
+        assert_eq!(word_at(t, t.len()), 8..11);
+        assert_eq!(word_at("", 0), 0..0);
+        let m = "héllo 日本語";
+        let r = word_at(m, 3);
+        assert_eq!(&m[r], "héllo");
+    }
 
     #[test]
     fn moves_back_over_words_and_punctuation() {

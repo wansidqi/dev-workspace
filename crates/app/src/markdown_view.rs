@@ -16,6 +16,7 @@ use gpui::{
 
 use crate::highlight::{self, Token};
 use crate::markdown::{AlertKind, Block, Item, Span};
+use crate::preview_select::{Entry, Selection};
 use crate::theme::{checkbox_fill, syntax_color, GlassTheme, TypeScale, CODE_FONT, UI_FONT};
 use crate::ui::{icon, Icon};
 
@@ -35,10 +36,17 @@ pub type ToggleHandler = Rc<dyn Fn(std::ops::Range<usize>, &mut Window, &mut App
 /// Called with a link's destination (a URL or `#anchor`) when it is clicked.
 pub type LinkHandler = Rc<dyn Fn(String, &mut Window, &mut App)>;
 
+/// Called with the top-level block's index when a block is double-clicked.
+pub type EditHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
+
 /// What the preview needs from its owner: which code block was just copied (to
-/// show "Copied"), what to do on a copy click, when a task checkbox is clicked
-/// and when a link is clicked.
+/// show "Copied"), what to do on a copy click, when a task checkbox is clicked,
+/// when a link is clicked and (when the preview can start editing) when a block
+/// is double-clicked.
 pub struct CopyHook {
+    /// The preview's text selection; each text registers with it as it is drawn.
+    pub select: crate::preview_select::Shared,
+    pub on_edit: Option<EditHandler>,
     pub copied: Option<usize>,
     pub on_copy: CopyHandler,
     pub on_toggle: ToggleHandler,
@@ -54,20 +62,41 @@ static NEXT_LINK_ID: AtomicUsize = AtomicUsize::new(0);
 /// owner's scroll handle can scroll to the one a `#anchor` link points at.
 pub fn render_blocks(blocks: &[Block], theme: &GlassTheme, hook: &CopyHook) -> Vec<AnyElement> {
     NEXT_LINK_ID.store(0, Ordering::Relaxed);
+    hook.select.borrow_mut().begin_frame();
     let counter = Cell::new(0);
     blocks
         .iter()
         .enumerate()
         .map(|(i, b)| {
+            let on_edit = hook.on_edit.clone();
             div()
+                .id(("md-block", i))
                 .w_full()
                 .max_w(px(NOTE_MAX_WIDTH))
                 .t_prose()
                 .line_height(relative(NOTE_LINE_HEIGHT))
+                .when_some(on_edit, |d, on_edit| {
+                    d.on_click(move |event, window, cx| {
+                        // Double-click starts editing at this block; the
+                        // container's own handler must not also fire.
+                        if event.click_count() >= 2 {
+                            cx.stop_propagation();
+                            on_edit(i, window, cx);
+                        }
+                    })
+                })
                 .child(render_block(b, theme, hook, &counter, i == 0))
                 .into_any_element()
         })
         .collect()
+}
+
+/// What copying puts between two paragraphs (or a paragraph and a heading).
+const BLOCK_BREAK: &str = "\n\n";
+
+/// The fill behind selected text.
+fn selection_fill(theme: &GlassTheme) -> Hsla {
+    theme.accent.opacity(0.3)
 }
 
 /// `first` is true for the first block of the note or of a container, which
@@ -106,6 +135,7 @@ fn render_block(
                 FontWeight::SEMIBOLD,
                 theme.text_primary,
                 hook,
+                BLOCK_BREAK,
             ))
             .into_any_element()
         }
@@ -117,6 +147,7 @@ fn render_block(
                 FontWeight::NORMAL,
                 theme.text_primary,
                 hook,
+                BLOCK_BREAK,
             ))
             .into_any_element(),
         Block::Code { lang, text } => {
@@ -263,7 +294,7 @@ fn code_card(
     let tokens = highlight::tokenize(&lang_name, text);
     let mut lines = Vec::new();
     let mut offset = 0;
-    for line in text.split('\n') {
+    for (line_no, line) in text.split('\n').enumerate() {
         let range = offset..offset + line.len();
         let highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> = tokens
             .iter()
@@ -283,7 +314,20 @@ fn code_card(
             .collect();
         offset = range.end + 1;
         let shown = if line.is_empty() { " " } else { line };
-        lines.push(div().child(StyledText::new(shown.to_string()).with_highlights(highlights)));
+        let mut select = hook.select.borrow_mut();
+        let selected = select.range_in(select.next_index(), shown.len());
+        let highlights = match selected {
+            Some(selected) => with_selection(highlights, selected, shown.len(), &theme),
+            None => highlights,
+        };
+        let styled = StyledText::new(shown.to_string()).with_highlights(highlights);
+        select.register(Entry {
+            layout: styled.layout().clone(),
+            join: if line_no == 0 { BLOCK_BREAK } else { "\n" },
+            blank: line.is_empty(),
+        });
+        drop(select);
+        lines.push(div().child(styled));
     }
 
     div()
@@ -468,7 +512,8 @@ fn table(
     hook: &CopyHook,
 ) -> AnyElement {
     let theme = *theme;
-    let cell = move |spans: &Vec<Span>, head: bool| {
+    // Copied, a row is tab-separated and each row is a line.
+    let cell = move |spans: &Vec<Span>, head: bool, column: usize| {
         div()
             .flex_1()
             .min_w(px(0.0))
@@ -485,6 +530,13 @@ fn table(
                 },
                 theme.text_primary,
                 hook,
+                if column > 0 {
+                    "\t"
+                } else if head {
+                    BLOCK_BREAK
+                } else {
+                    "\n"
+                },
             ))
     };
     div()
@@ -497,16 +549,87 @@ fn table(
             div()
                 .flex()
                 .bg(theme.surface_raised)
-                .children(header.iter().map(|c| cell(c, true))),
+                .children(header.iter().enumerate().map(|(i, c)| cell(c, true, i))),
         )
         .children(rows.iter().map(|row| {
             div()
                 .flex()
                 .border_t_1()
                 .border_color(theme.border_subtle)
-                .children(row.iter().map(|c| cell(c, false)))
+                .children(row.iter().enumerate().map(|(i, c)| cell(c, false, i)))
         }))
         .into_any_element()
+}
+
+/// Adds the selection's background to a code line's token highlights. The
+/// tokens are cut at the selection's ends so every piece keeps its colour.
+fn with_selection(
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+    selected: Range<usize>,
+    len: usize,
+    theme: &GlassTheme,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let mut cuts = vec![0, len, selected.start, selected.end];
+    for (range, _) in &highlights {
+        cuts.push(range.start);
+        cuts.push(range.end);
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    let mut out = Vec::new();
+    for pair in cuts.windows(2) {
+        let (from, to) = (pair[0], pair[1]);
+        let color = highlights
+            .iter()
+            .find(|(r, _)| r.start <= from && to <= r.end)
+            .and_then(|(_, style)| style.color);
+        let background =
+            (selected.start <= from && to <= selected.end).then(|| selection_fill(theme));
+        if color.is_some() || background.is_some() {
+            out.push((
+                from..to,
+                HighlightStyle {
+                    color,
+                    background_color: background,
+                    ..Default::default()
+                },
+            ));
+        }
+    }
+    out
+}
+
+/// Splits `runs` at the selection's ends and gives the selected pieces the
+/// selection background.
+fn mark_selected(runs: Vec<TextRun>, selected: Range<usize>, fill: Hsla) -> Vec<TextRun> {
+    let mut out = Vec::with_capacity(runs.len() + 2);
+    let mut at = 0;
+    for run in runs {
+        let (start, end) = (at, at + run.len);
+        at = end;
+        let lo = selected.start.clamp(start, end);
+        let hi = selected.end.clamp(start, end);
+        if lo >= hi {
+            out.push(run);
+            continue;
+        }
+        let piece = |from: usize, to: usize, background: Option<Hsla>| {
+            let mut piece = run.clone();
+            piece.len = to - from;
+            if background.is_some() {
+                piece.background_color = background;
+            }
+            piece
+        };
+        if lo > start {
+            out.push(piece(start, lo, None));
+        }
+        out.push(piece(lo, hi, Some(fill)));
+        if hi < end {
+            out.push(piece(hi, end, None));
+        }
+    }
+    out
 }
 
 /// A paragraph's spans as an element: plain styled text, or clickable text when
@@ -518,8 +641,16 @@ fn text(
     base_weight: FontWeight,
     color: Hsla,
     hook: &CopyHook,
+    join: &'static str,
 ) -> AnyElement {
-    let (styled, links) = inline(spans, theme, base_weight, color);
+    let mut select = hook.select.borrow_mut();
+    let (styled, links) = inline(spans, theme, base_weight, color, &select);
+    select.register(Entry {
+        layout: styled.layout().clone(),
+        join,
+        blank: false,
+    });
+    drop(select);
     if links.is_empty() {
         return styled.into_any_element();
     }
@@ -547,9 +678,10 @@ fn inline(
     theme: &GlassTheme,
     base_weight: FontWeight,
     color: Hsla,
+    select: &Selection,
 ) -> (StyledText, Vec<(Range<usize>, String)>) {
     let mut text = String::new();
-    let mut runs = Vec::with_capacity(spans.len());
+    let mut runs: Vec<TextRun> = Vec::with_capacity(spans.len());
     let mut links = Vec::new();
     for span in spans {
         if span.text.is_empty() {
@@ -607,6 +739,18 @@ fn inline(
                 underline: None,
                 strikethrough: None,
             });
+        }
+    }
+    // This text is the next one to register, so that is the index to ask for.
+    if let Some(mut selected) = select.range_in(select.next_index(), text.len()) {
+        while !text.is_char_boundary(selected.start) {
+            selected.start -= 1;
+        }
+        while !text.is_char_boundary(selected.end) {
+            selected.end -= 1;
+        }
+        if selected.start < selected.end {
+            runs = mark_selected(runs, selected, selection_fill(theme));
         }
     }
     (StyledText::new(text).with_runs(runs), links)
