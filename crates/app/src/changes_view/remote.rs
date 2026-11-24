@@ -64,6 +64,9 @@ fn run_action(action: RemoteAction, path: &std::path::Path) -> Result<RemoteOutc
         RemoteAction::Pull => git::pull(path, git::configured_pull_mode(path)),
         RemoteAction::Push => git::push(path, false),
         RemoteAction::Sync => git::sync(path, git::configured_pull_mode(path)),
+        RemoteAction::UpdateFromMain => {
+            git::update_from_base(path, git::configured_pull_mode(path))
+        }
     }
 }
 
@@ -202,7 +205,10 @@ impl ChangesView {
         }
         for (id, ..) in results {
             self.refresh_repo(id, cx);
-            if matches!(action, RemoteAction::Pull | RemoteAction::Sync) {
+            if matches!(
+                action,
+                RemoteAction::Pull | RemoteAction::Sync | RemoteAction::UpdateFromMain
+            ) {
                 self.relink_repo(id, cx);
             }
         }

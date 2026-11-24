@@ -186,11 +186,14 @@ pub(crate) enum RemoteAction {
     Push,
     /// Fetch, pull what's new, push what's ours.
     Sync,
+    /// Merge the remote's main branch into the current branch.
+    UpdateFromMain,
 }
 
 impl RemoteAction {
     fn present(self) -> &'static str {
         match self {
+            RemoteAction::UpdateFromMain => "Updating from main",
             RemoteAction::Fetch => "Fetching",
             RemoteAction::Pull => "Pulling",
             RemoteAction::Push => "Pushing",

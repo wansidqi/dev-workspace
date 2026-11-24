@@ -130,6 +130,18 @@ impl Render for ChangesView {
                     .child(
                         button(
                             &theme,
+                            "changes-update-main",
+                            ButtonKind::Ghost,
+                            Some(Icon::GitBranch),
+                            "Update from main",
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.remote_all(RemoteAction::UpdateFromMain, cx);
+                        })),
+                    )
+                    .child(
+                        button(
+                            &theme,
                             "changes-push",
                             ButtonKind::Ghost,
                             Some(Icon::Upload),

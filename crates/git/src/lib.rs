@@ -48,8 +48,8 @@ pub use rebase::{
 };
 pub use remote::{
     clone_folder_name, clone_repo, configured_pull_mode, default_base_branch, fetch, has_remote,
-    is_clonable_url, next_sync_step, pull, push, remote_names, remote_url, sync, PullMode,
-    RemoteOutcome, SyncStep,
+    is_clonable_url, next_sync_step, pull, push, remote_names, remote_url, sync, update_from_base,
+    PullMode, RemoteOutcome, SyncStep,
 };
 pub use shelf::{
     shelf_discard, shelf_file_diff, shelf_list, shelf_restore, shelf_stash, Shelf, ShelfFile,

@@ -183,6 +183,51 @@ pub fn pull(path: &Path, mode: PullMode) -> Result<RemoteOutcome, GitError> {
     }
 }
 
+/// Brings the remote's main branch (the repo's default base: `origin/HEAD`,
+/// else `main`, `master` or `develop`) into the current branch: fetch, then a
+/// merge. Fast-forwards when it can, so a branch that hasn't diverged gets no
+/// merge commit. On the base branch itself this is a plain pull.
+pub fn update_from_base(path: &Path, mode: PullMode) -> Result<RemoteOutcome, GitError> {
+    let (repo, branch, remote) = require_remote(path)?;
+    let branch = branch.ok_or_else(|| {
+        GitError::Invalid("HEAD is detached; switch to a branch to update it".into())
+    })?;
+    let base = default_base_branch(path)
+        .ok_or_else(|| GitError::Invalid("couldn't find a main branch to update from".into()))?;
+    if !is_safe_ref_name(&base) {
+        return Err(GitError::Invalid(format!("unusable branch name `{base}`")));
+    }
+    if branch == base {
+        return pull(path, mode);
+    }
+    run_ok(path, &["fetch", "--prune", &remote], &[], Kind::Network)?;
+    let theirs = format!("{remote}/{base}");
+    if repo.find_branch(&theirs, BranchType::Remote).is_err() {
+        return Err(GitError::Invalid(format!(
+            "`{theirs}` doesn't exist on the remote"
+        )));
+    }
+    let out = crate::cli::run(path, &["merge", "--no-edit", &theirs], &[], Kind::Local)?;
+    if !out.success {
+        if conflicts_after(path) {
+            return Ok(RemoteOutcome {
+                message: format!(
+                    "updated from {theirs}, but some files conflict: resolve them to finish"
+                ),
+                conflicts: true,
+            });
+        }
+        return Err(GitError::Invalid(out.message()));
+    }
+    if out.stdout.contains("Already up to date") {
+        Ok(RemoteOutcome::done(format!(
+            "already up to date with {theirs}"
+        )))
+    } else {
+        Ok(RemoteOutcome::done(format!("updated from {theirs}")))
+    }
+}
+
 /// Pushes the current branch. Publishes it (sets the upstream) the first
 /// time. `force_with_lease` is the safe force: it refuses if someone else
 /// pushed since you last fetched.
