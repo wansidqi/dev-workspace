@@ -118,6 +118,11 @@ struct Root {
     /// Text selection in the rendered note, and the focus that lets Ctrl+C copy it.
     preview_select: preview_select::Shared,
     preview_focus: gpui::FocusHandle,
+    /// The preview's find bar (Ctrl+F while the preview has focus): its query box,
+    /// whether it is showing, and the subscription that repaints as it is typed in.
+    preview_find: Entity<TextInput>,
+    preview_find_open: bool,
+    _preview_find_watch: gpui::Subscription,
     /// Last scroll offsets (editor, preview) seen in the split view, to tell
     /// which side the user moved. See `note_page.rs`.
     note_scroll_seen: Option<(gpui::Pixels, gpui::Pixels)>,
@@ -1173,6 +1178,30 @@ fn main() -> Result<()> {
                     // dispatched along the focused element's ancestors, so
                     // the root needs focus whenever nothing else has it.
                     let focus_handle = cx.focus_handle();
+                    let preview_find = cx.new(|cx| TextInput::new(cx, "Find in note", theme));
+                    let weak_root = cx.weak_entity();
+                    preview_find.update(cx, |input, _| {
+                        input.keep_on_confirm = true;
+                        // Enter steps to the next match; Escape closes the bar.
+                        let next = weak_root.clone();
+                        input.on_confirm = Some(Box::new(move |_, window, cx| {
+                            let next = next.clone();
+                            window.defer(cx, move |_, cx| {
+                                next.update(cx, |this, cx| this.preview_find_step(1, cx))
+                                    .ok();
+                            });
+                        }));
+                        let close = weak_root.clone();
+                        input.on_cancel = Some(Box::new(move |window, cx| {
+                            let close = close.clone();
+                            window.defer(cx, move |window, cx| {
+                                close
+                                    .update(cx, |this, cx| this.close_preview_find(window, cx))
+                                    .ok();
+                            });
+                        }));
+                    });
+                    let preview_find_watch = cx.observe(&preview_find, |_, _, cx| cx.notify());
                     window.focus(&focus_handle, cx);
                     let workspace_tools = cx
                         .new(|cx| WorkspaceTools::new(cx, state.clone(), settings.clone(), theme));
@@ -1198,6 +1227,9 @@ fn main() -> Result<()> {
                         note_scroll: gpui::ScrollHandle::new(),
                         preview_select: Default::default(),
                         preview_focus: cx.focus_handle(),
+                        preview_find,
+                        preview_find_open: false,
+                        _preview_find_watch: preview_find_watch,
                         note_scroll_seen: None,
                         note_split_swapped: saved.note_split_swapped,
                         collapsed_tasks: std::collections::HashSet::new(),

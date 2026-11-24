@@ -11,7 +11,16 @@ use std::{cell::RefCell, ops::Range, rc::Rc};
 
 use gpui::{actions, App, KeyBinding, Pixels, Point, TextLayout};
 
-actions!(devspace_preview, [PreviewCopy, PreviewSelectAll]);
+actions!(
+    devspace_preview,
+    [
+        PreviewCopy,
+        PreviewSelectAll,
+        PreviewFind,
+        PreviewFindNext,
+        PreviewFindPrev
+    ]
+);
 
 /// Copy and select-all while the preview has focus.
 pub fn init_key_bindings(cx: &mut App) {
@@ -20,6 +29,10 @@ pub fn init_key_bindings(cx: &mut App) {
         KeyBinding::new("cmd-c", PreviewCopy, Some("NotePreview")),
         KeyBinding::new("ctrl-a", PreviewSelectAll, Some("NotePreview")),
         KeyBinding::new("cmd-a", PreviewSelectAll, Some("NotePreview")),
+        KeyBinding::new("ctrl-f", PreviewFind, Some("NotePreview")),
+        KeyBinding::new("cmd-f", PreviewFind, Some("NotePreview")),
+        KeyBinding::new("f3", PreviewFindNext, Some("NotePreview")),
+        KeyBinding::new("shift-f3", PreviewFindPrev, Some("NotePreview")),
     ]);
 }
 
@@ -33,6 +46,8 @@ pub struct Entry {
     pub join: &'static str,
     /// An empty code line (shown as a single space so it keeps its height).
     pub blank: bool,
+    /// Where the find query occurs in this text (byte ranges).
+    pub hits: Vec<Range<usize>>,
 }
 
 /// The preview's selection, shared between the render (which registers texts
@@ -43,6 +58,13 @@ pub struct Selection {
     anchor: Option<Pos>,
     head: Option<Pos>,
     dragging: bool,
+    /// The find bar's query (empty: not searching), which match is current
+    /// (counted across all texts), how many matches the last frame found, and
+    /// whether the next paint should scroll the current one into view.
+    query: String,
+    current: usize,
+    hit_count: usize,
+    reveal: bool,
 }
 
 /// Shared handle, as the preview's owner and its mouse handlers all need it.
@@ -55,6 +77,14 @@ fn ordered(a: Pos, b: Pos) -> (Pos, Pos) {
     } else {
         (b, a)
     }
+}
+
+/// `current` moved by `delta` among `total` matches, wrapping around.
+fn wrap_step(current: usize, total: usize, delta: isize) -> usize {
+    if total == 0 {
+        return 0;
+    }
+    (current as isize + delta).rem_euclid(total as isize) as usize
 }
 
 /// The part of text `ix` (of `len` bytes) that a selection from `start` to
@@ -88,6 +118,7 @@ impl Selection {
     /// Forgets last frame's texts; the render registers them again in order.
     pub fn begin_frame(&mut self) {
         self.entries.clear();
+        self.hit_count = 0;
     }
 
     /// The index the next registered text will get.
@@ -96,7 +127,67 @@ impl Selection {
     }
 
     pub fn register(&mut self, entry: Entry) {
+        self.hit_count += entry.hits.len();
         self.entries.push(entry);
+    }
+
+    // ---- find ------------------------------------------------------------
+
+    /// Sets the text being searched for. A new query starts at its first
+    /// match and asks for it to be scrolled into view.
+    pub fn set_query(&mut self, query: &str) {
+        if self.query != query {
+            self.query = query.to_owned();
+            self.current = 0;
+            self.reveal = !query.is_empty();
+        }
+    }
+
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    /// How many matches the last frame found, across all texts.
+    pub fn hit_total(&self) -> usize {
+        self.hit_count
+    }
+
+    /// Which match is current (0-based). Only meaningful with matches.
+    pub fn current_hit(&self) -> usize {
+        self.current
+    }
+
+    /// How many matches were registered before the next text, so a text can
+    /// tell which of its own matches is the current one.
+    pub fn hits_before_next(&self) -> usize {
+        self.hit_count
+    }
+
+    /// Moves to the next (+1) or previous (-1) match, wrapping around, and
+    /// asks for it to be scrolled into view.
+    pub fn step_hit(&mut self, delta: isize) {
+        self.current = wrap_step(self.current, self.hit_count, delta);
+        self.reveal = self.hit_count > 0;
+    }
+
+    /// Takes the pending "scroll to the current match" request.
+    pub fn take_reveal(&mut self) -> bool {
+        std::mem::take(&mut self.reveal)
+    }
+
+    /// Where the current match is on screen (its top-left) and the height of
+    /// its line, from the last paint.
+    pub fn current_hit_position(&self) -> Option<(Point<Pixels>, Pixels)> {
+        let mut seen = 0;
+        for entry in &self.entries {
+            if self.current < seen + entry.hits.len() {
+                let range = &entry.hits[self.current - seen];
+                let at = entry.layout.position_for_index(range.start)?;
+                return Some((at, entry.layout.line_height()));
+            }
+            seen += entry.hits.len();
+        }
+        None
     }
 
     /// The selected part of text `ix`, for drawing it highlighted.
@@ -204,6 +295,14 @@ impl Selection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stepping_through_matches_wraps_around() {
+        assert_eq!(wrap_step(0, 3, 1), 1);
+        assert_eq!(wrap_step(2, 3, 1), 0);
+        assert_eq!(wrap_step(0, 3, -1), 2);
+        assert_eq!(wrap_step(0, 0, 1), 0);
+    }
 
     #[test]
     fn ends_are_put_in_document_order() {

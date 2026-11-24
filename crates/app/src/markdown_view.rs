@@ -315,16 +315,22 @@ fn code_card(
         offset = range.end + 1;
         let shown = if line.is_empty() { " " } else { line };
         let mut select = hook.select.borrow_mut();
-        let selected = select.range_in(select.next_index(), shown.len());
-        let highlights = match selected {
-            Some(selected) => with_selection(highlights, selected, shown.len(), &theme),
-            None => highlights,
+        let (hits, marks) = if line.is_empty() {
+            (Vec::new(), Vec::new())
+        } else {
+            text_marks(&select, shown, &theme)
+        };
+        let highlights = if marks.is_empty() {
+            highlights
+        } else {
+            with_backgrounds(highlights, &marks, shown.len())
         };
         let styled = StyledText::new(shown.to_string()).with_highlights(highlights);
         select.register(Entry {
             layout: styled.layout().clone(),
             join: if line_no == 0 { BLOCK_BREAK } else { "\n" },
             blank: line.is_empty(),
+            hits,
         });
         drop(select);
         lines.push(div().child(styled));
@@ -561,15 +567,60 @@ fn table(
         .into_any_element()
 }
 
-/// Adds the selection's background to a code line's token highlights. The
-/// tokens are cut at the selection's ends so every piece keeps its colour.
-fn with_selection(
-    highlights: Vec<(Range<usize>, HighlightStyle)>,
-    selected: Range<usize>,
-    len: usize,
+/// What the find bar and the selection do to the text about to be registered:
+/// the find matches in it, and every background to paint behind it (matches
+/// first, the current one stronger, then the selection on top).
+fn text_marks(
+    select: &Selection,
+    text: &str,
     theme: &GlassTheme,
+) -> (Vec<Range<usize>>, Vec<(Range<usize>, Hsla)>) {
+    let hits = if select.query().is_empty() {
+        Vec::new()
+    } else {
+        crate::text_nav::find_all(text, select.query())
+    };
+    let first = select.hits_before_next();
+    let mut marks: Vec<(Range<usize>, Hsla)> = hits
+        .iter()
+        .enumerate()
+        .map(|(n, range)| {
+            let fill = if first + n == select.current_hit() {
+                theme.warning.opacity(0.55)
+            } else {
+                theme.warning.opacity(0.25)
+            };
+            (range.clone(), fill)
+        })
+        .collect();
+    // This text is the next one to register, so that is the index to ask for.
+    if let Some(mut selected) = select.range_in(select.next_index(), text.len()) {
+        while !text.is_char_boundary(selected.start) {
+            selected.start -= 1;
+        }
+        while !text.is_char_boundary(selected.end) {
+            selected.end -= 1;
+        }
+        if selected.start < selected.end {
+            marks.push((selected, selection_fill(theme)));
+        }
+    }
+    (hits, marks)
+}
+
+/// Adds background marks to a code line's token highlights. The tokens are cut
+/// at every mark's ends so each piece keeps its colour; where marks overlap the
+/// later one wins.
+fn with_backgrounds(
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+    marks: &[(Range<usize>, Hsla)],
+    len: usize,
 ) -> Vec<(Range<usize>, HighlightStyle)> {
-    let mut cuts = vec![0, len, selected.start, selected.end];
+    let mut cuts = vec![0, len];
+    for (range, _) in marks {
+        cuts.push(range.start.min(len));
+        cuts.push(range.end.min(len));
+    }
     for (range, _) in &highlights {
         cuts.push(range.start);
         cuts.push(range.end);
@@ -583,8 +634,11 @@ fn with_selection(
             .iter()
             .find(|(r, _)| r.start <= from && to <= r.end)
             .and_then(|(_, style)| style.color);
-        let background =
-            (selected.start <= from && to <= selected.end).then(|| selection_fill(theme));
+        let background = marks
+            .iter()
+            .rev()
+            .find(|(r, _)| r.start <= from && to <= r.end)
+            .map(|(_, fill)| *fill);
         if color.is_some() || background.is_some() {
             out.push((
                 from..to,
@@ -644,11 +698,12 @@ fn text(
     join: &'static str,
 ) -> AnyElement {
     let mut select = hook.select.borrow_mut();
-    let (styled, links) = inline(spans, theme, base_weight, color, &select);
+    let (styled, links, hits) = inline(spans, theme, base_weight, color, &select);
     select.register(Entry {
         layout: styled.layout().clone(),
         join,
         blank: false,
+        hits,
     });
     drop(select);
     if links.is_empty() {
@@ -679,7 +734,7 @@ fn inline(
     base_weight: FontWeight,
     color: Hsla,
     select: &Selection,
-) -> (StyledText, Vec<(Range<usize>, String)>) {
+) -> (StyledText, Vec<(Range<usize>, String)>, Vec<Range<usize>>) {
     let mut text = String::new();
     let mut runs: Vec<TextRun> = Vec::with_capacity(spans.len());
     let mut links = Vec::new();
@@ -741,17 +796,9 @@ fn inline(
             });
         }
     }
-    // This text is the next one to register, so that is the index to ask for.
-    if let Some(mut selected) = select.range_in(select.next_index(), text.len()) {
-        while !text.is_char_boundary(selected.start) {
-            selected.start -= 1;
-        }
-        while !text.is_char_boundary(selected.end) {
-            selected.end -= 1;
-        }
-        if selected.start < selected.end {
-            runs = mark_selected(runs, selected, selection_fill(theme));
-        }
+    let (hits, marks) = text_marks(select, &text, theme);
+    for (range, fill) in marks {
+        runs = mark_selected(runs, range, fill);
     }
-    (StyledText::new(text).with_runs(runs), links)
+    (StyledText::new(text).with_runs(runs), links, hits)
 }
