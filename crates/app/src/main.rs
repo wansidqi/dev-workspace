@@ -19,6 +19,7 @@ mod external;
 mod github_panel;
 mod highlight;
 mod ide;
+mod log_select;
 mod markdown;
 mod markdown_view;
 mod motion;
@@ -1016,6 +1017,7 @@ fn main() -> Result<()> {
         text_input::init_key_bindings(cx);
         note_editor::init_key_bindings(cx);
         preview_select::init_key_bindings(cx);
+        log_select::init_key_bindings(cx);
         // Bound globally (no key context) so it also fires while a terminal
         // has focus; GPUI matches bindings before the terminal's raw
         // key-down handler sees the keystroke.

@@ -71,7 +71,7 @@ pub struct Selection {
 pub type Shared = Rc<RefCell<Selection>>;
 
 /// The two ends of a selection in document order.
-fn ordered(a: Pos, b: Pos) -> (Pos, Pos) {
+pub(crate) fn ordered(a: Pos, b: Pos) -> (Pos, Pos) {
     if a <= b {
         (a, b)
     } else {
@@ -89,7 +89,7 @@ fn wrap_step(current: usize, total: usize, delta: isize) -> usize {
 
 /// The part of text `ix` (of `len` bytes) that a selection from `start` to
 /// `end` covers. `None` when it covers none of it.
-fn range_for(start: Pos, end: Pos, ix: usize, len: usize) -> Option<Range<usize>> {
+pub(crate) fn range_for(start: Pos, end: Pos, ix: usize, len: usize) -> Option<Range<usize>> {
     if ix < start.0 || ix > end.0 {
         return None;
     }

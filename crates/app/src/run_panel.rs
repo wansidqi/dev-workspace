@@ -18,10 +18,12 @@ use std::time::Duration;
 use devspace_core::{ProjectId, RunCommandId};
 use devspace_runner::{RunState, RunningCommand};
 use gpui::{
-    div, prelude::*, px, uniform_list, AnyElement, App, ClipboardItem, Context, Entity, Hsla,
-    PathPromptOptions, SharedString, UniformListScrollHandle, WeakEntity, Window,
+    div, prelude::*, px, uniform_list, AnyElement, App, ClipboardItem, Context, Entity,
+    FocusHandle, HighlightStyle, Hsla, MouseButton, MouseDownEvent, MouseMoveEvent,
+    PathPromptOptions, ScrollHandle, StyledText, UniformListScrollHandle, WeakEntity, Window,
 };
 
+use crate::log_select::{self, LogCopy, LogSelectAll};
 use crate::state::AppState;
 use crate::text_input::TextInput;
 use crate::theme::GlassTheme;
@@ -81,6 +83,13 @@ pub struct RunPanel {
     /// Result of the last action: (message, is_error).
     notice: Option<(String, bool)>,
     scroll: UniformListScrollHandle,
+    /// Text selection in the log, the focus that lets Ctrl+C copy it, and the
+    /// scrollbars' grab state (the log's and the command list's).
+    log_sel: log_select::Shared,
+    log_focus: FocusHandle,
+    log_bar_drag: ui::ScrollbarDrag,
+    list_scroll: ScrollHandle,
+    list_bar_drag: ui::ScrollbarDrag,
     /// Called by the back button; the root hides the view.
     pub on_close: Option<CloseHandler>,
 }
@@ -121,6 +130,11 @@ impl RunPanel {
             confirm_delete: None,
             notice: None,
             scroll: UniformListScrollHandle::new(),
+            log_sel: Default::default(),
+            log_focus: cx.focus_handle(),
+            log_bar_drag: Default::default(),
+            list_scroll: ScrollHandle::new(),
+            list_bar_drag: Default::default(),
             on_close: None,
         }
     }
@@ -179,6 +193,7 @@ impl RunPanel {
 
     fn select(&mut self, id: RunCommandId, cx: &mut Context<Self>) {
         self.selected = Some(id);
+        self.log_sel.borrow_mut().clear();
         self.scroll.scroll_to_bottom();
         cx.notify();
     }
@@ -248,6 +263,87 @@ impl RunPanel {
         if let Some(run) = self.selected_id(cx).and_then(|id| self.runs.get_mut(&id)) {
             run.cmd.clear_log();
         }
+        self.log_sel.borrow_mut().clear();
+        cx.notify();
+    }
+
+    /// The selected command's held log lines with their absolute numbers (see
+    /// `log_select`), and how many there are.
+    fn with_log_lines<R>(&self, cx: &App, f: impl FnOnce(&[(usize, &str)]) -> R) -> Option<R> {
+        let run = self.selected_id(cx).and_then(|id| self.runs.get(&id))?;
+        let log = run.cmd.log();
+        let dropped = log.dropped() as usize;
+        let lines: Vec<(usize, &str)> = (0..log.len())
+            .filter_map(|ix| Some((dropped + ix, log.get(ix)?)))
+            .collect();
+        Some(f(&lines))
+    }
+
+    /// Ctrl+C in the log: copies the selected text.
+    fn copy_selection(&mut self, cx: &mut Context<Self>) {
+        let text = self
+            .with_log_lines(cx, |lines| {
+                self.log_sel.borrow().selected_text(lines.iter().copied())
+            })
+            .flatten();
+        if let Some(text) = text {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    fn select_all_log(&mut self, cx: &mut Context<Self>) {
+        let range = self.with_log_lines(cx, |lines| {
+            let (first, last) = (lines.first()?, lines.last()?);
+            Some((first.0, last.0, last.1.len()))
+        });
+        if let Some(Some((first, last, len))) = range {
+            self.log_sel.borrow_mut().select_all(first, last, len);
+            cx.notify();
+        }
+    }
+
+    fn log_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.log_focus, cx);
+        match event.click_count {
+            1 => self.log_sel.borrow_mut().start(event.position),
+            n => {
+                // Double-click: the word; triple-click: the whole line.
+                let pos = self.log_sel.borrow().pos_at(event.position);
+                if let Some((line, offset)) = pos {
+                    let range = self
+                        .with_log_lines(cx, |lines| {
+                            let (_, text) = lines.iter().find(|(l, _)| *l == line)?;
+                            Some(if n == 2 {
+                                crate::text_nav::word_at(text, offset)
+                            } else {
+                                0..text.len()
+                            })
+                        })
+                        .flatten();
+                    if let Some(range) = range {
+                        self.log_sel.borrow_mut().select_range(line, range);
+                    }
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn log_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let dragging =
+            event.pressed_button == Some(MouseButton::Left) && self.log_sel.borrow().is_dragging();
+        if dragging && self.log_sel.borrow_mut().drag(event.position) {
+            cx.notify();
+        }
+    }
+
+    fn log_mouse_up(&mut self, cx: &mut Context<Self>) {
+        self.log_sel.borrow_mut().finish();
         cx.notify();
     }
 
@@ -833,7 +929,8 @@ impl RunPanel {
                     .child(empty_message)
                     .into_any_element()
             } else {
-                uniform_list(
+                let log_scroll = self.scroll.0.borrow().base_handle.clone();
+                let list = uniform_list(
                     "run-log",
                     count,
                     cx.processor(move |this, range: Range<usize>, _window, _cx| {
@@ -842,9 +939,30 @@ impl RunPanel {
                             return Vec::new();
                         };
                         let log = run.cmd.log();
+                        let dropped = log.dropped() as usize;
+                        let mut select = this.log_sel.borrow_mut();
+                        // Only the visible rows exist; they register for hit-testing.
+                        select.begin_frame();
                         range
                             .filter_map(|ix| {
                                 let line = log.get(ix)?;
+                                let number = dropped + ix;
+                                let shown = if line.is_empty() { " " } else { line };
+                                let highlights = select
+                                    .range_in(number, line.len())
+                                    .map(|selected| {
+                                        vec![(
+                                            selected,
+                                            HighlightStyle {
+                                                background_color: Some(theme.accent.opacity(0.3)),
+                                                ..Default::default()
+                                            },
+                                        )]
+                                    })
+                                    .unwrap_or_default();
+                                let styled =
+                                    StyledText::new(shown.to_string()).with_highlights(highlights);
+                                select.register(number, styled.layout().clone(), line.len());
                                 Some(
                                     div()
                                         .id(("run-log-line", ix))
@@ -855,17 +973,43 @@ impl RunPanel {
                                         .text_color(theme.text_primary)
                                         .overflow_hidden()
                                         .whitespace_nowrap()
-                                        .child(SharedString::from(line.to_string())),
+                                        .child(styled),
                                 )
                             })
                             .collect::<Vec<_>>()
                     }),
                 )
                 .track_scroll(&self.scroll)
-                .w_full()
-                .flex_1()
-                .min_h(px(0.0))
-                .into_any_element()
+                .size_full();
+                div()
+                    .id("run-log-box")
+                    .relative()
+                    .flex_1()
+                    .w_full()
+                    .min_h(px(0.0))
+                    .cursor_text()
+                    .key_context("RunLog")
+                    .track_focus(&self.log_focus)
+                    .on_action(cx.listener(|this, _: &LogCopy, _, cx| this.copy_selection(cx)))
+                    .on_action(cx.listener(|this, _: &LogSelectAll, _, cx| this.select_all_log(cx)))
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::log_mouse_down))
+                    .on_mouse_move(cx.listener(|this, event, _, cx| this.log_mouse_move(event, cx)))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| this.log_mouse_up(cx)),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| this.log_mouse_up(cx)),
+                    )
+                    .child(list)
+                    .child(ui::scrollbar(
+                        &theme,
+                        "run-log-scrollbar",
+                        &log_scroll,
+                        &self.log_bar_drag,
+                    ))
+                    .into_any_element()
             })
             .into_any_element()
     }
@@ -963,16 +1107,29 @@ impl Render for RunPanel {
                         ))
                     })
                     .when(!list.is_empty(), |el| {
+                        // The scrollbar needs a parent the size of the viewport.
                         el.child(
                             div()
-                                .id("run-command-list")
-                                .flex()
-                                .flex_col()
+                                .relative()
                                 .flex_none()
                                 .max_h(px(280.0))
-                                .gap(px(2.0))
-                                .overflow_y_scroll()
-                                .children(list),
+                                .child(
+                                    div()
+                                        .id("run-command-list")
+                                        .flex()
+                                        .flex_col()
+                                        .max_h(px(280.0))
+                                        .gap(px(2.0))
+                                        .overflow_y_scroll()
+                                        .track_scroll(&self.list_scroll)
+                                        .children(list),
+                                )
+                                .child(ui::scrollbar(
+                                    &theme,
+                                    "run-list-scrollbar",
+                                    &self.list_scroll,
+                                    &self.list_bar_drag,
+                                )),
                         )
                     })
                     .child(self.render_log(selected, cx)),
