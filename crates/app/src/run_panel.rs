@@ -19,15 +19,16 @@ use devspace_core::{ProjectId, RunCommandId};
 use devspace_runner::{RunState, RunningCommand};
 use gpui::{
     div, prelude::*, px, uniform_list, AnyElement, App, ClipboardItem, Context, Entity,
-    FocusHandle, HighlightStyle, Hsla, MouseButton, MouseDownEvent, MouseMoveEvent,
-    PathPromptOptions, ScrollHandle, StyledText, UniformListScrollHandle, WeakEntity, Window,
+    FocusHandle, HighlightStyle, Hsla, ListHorizontalSizingBehavior, MouseButton, MouseDownEvent,
+    MouseMoveEvent, PathPromptOptions, ScrollHandle, StyledText, UniformListScrollHandle,
+    WeakEntity, Window,
 };
 
 use crate::log_select::{self, LogCopy, LogSelectAll};
 use crate::state::AppState;
 use crate::text_input::TextInput;
 use crate::theme::GlassTheme;
-use crate::ui::{self, icon, section_label, ButtonKind, Icon};
+use crate::ui::{self, icon, section_label, ButtonKind, Icon, ScrollAxis};
 use crate::{icon_button, icon_button_tinted, Root};
 
 /// How often running commands are polled for new output. Same cadence as
@@ -88,10 +89,19 @@ pub struct RunPanel {
     log_sel: log_select::Shared,
     log_focus: FocusHandle,
     log_bar_drag: ui::ScrollbarDrag,
+    log_hbar_drag: ui::ScrollbarDrag,
     list_scroll: ScrollHandle,
     list_bar_drag: ui::ScrollbarDrag,
     /// Called by the back button; the root hides the view.
     pub on_close: Option<CloseHandler>,
+}
+
+/// Index of the line with the most bytes, the one the log is measured by so its
+/// width fits the longest line.
+fn widest_line(log: &devspace_runner::LogBuffer) -> usize {
+    (0..log.len())
+        .max_by_key(|ix| log.get(*ix).map_or(0, str::len))
+        .unwrap_or(0)
 }
 
 /// Status chip text and colour for a run state.
@@ -133,6 +143,7 @@ impl RunPanel {
             log_sel: Default::default(),
             log_focus: cx.focus_handle(),
             log_bar_drag: Default::default(),
+            log_hbar_drag: Default::default(),
             list_scroll: ScrollHandle::new(),
             list_bar_drag: Default::default(),
             on_close: None,
@@ -818,7 +829,7 @@ impl RunPanel {
 
     fn render_log(&mut self, selected: Option<RunCommandId>, cx: &mut Context<Self>) -> AnyElement {
         let theme = self.theme;
-        let (title, state, count, dropped) = {
+        let (title, state, count, dropped, longest) = {
             let name = selected.and_then(|id| {
                 self.state
                     .read(cx)
@@ -836,10 +847,11 @@ impl RunPanel {
                         Some(state),
                         run.cmd.log().len(),
                         run.cmd.log().dropped(),
+                        widest_line(run.cmd.log()),
                     )
                 }
-                (Some(name), None) => (name, None, 0, 0),
-                _ => (String::new(), None, 0, 0),
+                (Some(name), None) => (name, None, 0, 0, 0),
+                _ => (String::new(), None, 0, 0, 0),
             }
         };
         let status = state_chip(&theme, state);
@@ -979,6 +991,10 @@ impl RunPanel {
                             .collect::<Vec<_>>()
                     }),
                 )
+                // Long lines scroll sideways instead of being cut off; the list is
+                // as wide as its longest line (monospace, so the most bytes).
+                .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
+                .with_width_from_item(Some(longest))
                 .track_scroll(&self.scroll)
                 .size_full();
                 div()
@@ -1007,7 +1023,15 @@ impl RunPanel {
                         &theme,
                         "run-log-scrollbar",
                         &log_scroll,
+                        ScrollAxis::Vertical,
                         &self.log_bar_drag,
+                    ))
+                    .child(ui::scrollbar(
+                        &theme,
+                        "run-log-hscrollbar",
+                        &log_scroll,
+                        ScrollAxis::Horizontal,
+                        &self.log_hbar_drag,
                     ))
                     .into_any_element()
             })
@@ -1128,6 +1152,7 @@ impl Render for RunPanel {
                                     &theme,
                                     "run-list-scrollbar",
                                     &self.list_scroll,
+                                    ScrollAxis::Vertical,
                                     &self.list_bar_drag,
                                 )),
                         )

@@ -914,18 +914,36 @@ pub fn tip(
     tooltip(theme, title, hint)
 }
 
-/// Where a drag on a [`scrollbar`] took hold: the pointer's distance below
-/// the top of the thumb. Owned by the screen, because it must outlive a frame.
+/// Where a drag on a [`scrollbar`] took hold: the pointer's distance along the
+/// track from the top (or left) of the thumb. Owned by the screen, because it
+/// must outlive a frame.
 pub type ScrollbarDrag = std::rc::Rc<std::cell::Cell<Option<Pixels>>>;
+
+/// Which way a [`scrollbar`] runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollAxis {
+    Vertical,
+    Horizontal,
+}
 
 /// Smallest the thumb gets, so a very long list still leaves something to grab.
 const SCROLLBAR_MIN_THUMB: f32 = 28.0;
-/// Width of the strip along the edge that takes the mouse.
+/// Thickness of the strip along the edge that takes the mouse.
 const SCROLLBAR_WIDTH: f32 = 12.0;
 
-/// `(thumb height, thumb top, track height)` for a scroller whose viewport is
-/// `viewport` tall and which can scroll `max` further, at scroll position
-/// `offset` (negative when scrolled). `None` when nothing scrolls.
+/// The scroller's viewport length, how far it can scroll and where it is now
+/// (negative when scrolled), along `axis`.
+fn axis_state(handle: &ScrollHandle, axis: ScrollAxis) -> (Pixels, Pixels, Pixels) {
+    let (bounds, max, offset) = (handle.bounds(), handle.max_offset(), handle.offset());
+    match axis {
+        ScrollAxis::Vertical => (bounds.size.height, max.y, offset.y),
+        ScrollAxis::Horizontal => (bounds.size.width, max.x, offset.x),
+    }
+}
+
+/// `(thumb length, thumb start, track length)` for a scroller whose viewport is
+/// `viewport` long and which can scroll `max` further, at `offset`. `None` when
+/// nothing scrolls.
 fn thumb_geometry(
     viewport: Pixels,
     max: Pixels,
@@ -941,87 +959,97 @@ fn thumb_geometry(
     Some((thumb, track * progress, track))
 }
 
-/// Scrolls `handle` so the thumb's top sits at `top` (relative to the track).
-fn scroll_thumb_to(handle: &ScrollHandle, top: Pixels) {
-    let bounds = handle.bounds();
-    let max = handle.max_offset().y;
-    let Some((_, _, track)) = thumb_geometry(bounds.size.height, max, handle.offset().y) else {
+/// Scrolls `handle` so the thumb's start sits at `start` along the track.
+fn scroll_thumb_to(handle: &ScrollHandle, axis: ScrollAxis, start: Pixels) {
+    let (viewport, max, offset) = axis_state(handle, axis);
+    let Some((_, _, track)) = thumb_geometry(viewport, max, offset) else {
         return;
     };
     if track <= px(0.0) {
         return;
     }
-    let progress = (top / track).clamp(0.0, 1.0);
-    handle.set_offset(point(handle.offset().x, -(max * progress)));
+    let to = -(max * (start / track).clamp(0.0, 1.0));
+    let current = handle.offset();
+    handle.set_offset(match axis {
+        ScrollAxis::Vertical => point(current.x, to),
+        ScrollAxis::Horizontal => point(to, current.y),
+    });
 }
 
-/// A vertical scrollbar for `handle`, to be placed in a relatively positioned
-/// parent that is exactly the scroller's viewport (it lays itself along the
-/// parent's right edge). Hidden when nothing scrolls. The thumb can be dragged,
-/// and a click on the track jumps there. `drag` holds the grab between frames.
+/// The pointer's position along `axis`, measured from the viewport's start.
+fn along(handle: &ScrollHandle, axis: ScrollAxis, position: gpui::Point<Pixels>) -> Pixels {
+    let bounds = handle.bounds();
+    match axis {
+        ScrollAxis::Vertical => position.y - bounds.top(),
+        ScrollAxis::Horizontal => position.x - bounds.left(),
+    }
+}
+
+/// A scrollbar for `handle`, to be placed in a relatively positioned parent
+/// that is exactly the scroller's viewport (it lays itself along the parent's
+/// right edge, or bottom edge when horizontal). Hidden when nothing scrolls.
+/// The thumb can be dragged, and a click on the track jumps there. `drag` holds
+/// the grab between frames.
 pub fn scrollbar(
     theme: &GlassTheme,
     id: &'static str,
     handle: &ScrollHandle,
+    axis: ScrollAxis,
     drag: &ScrollbarDrag,
 ) -> AnyElement {
-    let bounds = handle.bounds();
-    let max = handle.max_offset().y;
-    let geometry = thumb_geometry(bounds.size.height, max, handle.offset().y);
+    let (viewport, max, offset) = axis_state(handle, axis);
     let theme = *theme;
-    let Some((thumb, top, _)) = geometry else {
+    let Some((thumb, start, _)) = thumb_geometry(viewport, max, offset) else {
         // Nothing to show yet (or nothing to scroll); the check below asks for
         // a repaint once the scroller has been measured.
-        return settle_check(handle, drag, None);
+        return settle_check(handle, axis, drag, None);
     };
     let active = drag.get().is_some();
     let down_handle = handle.clone();
     let down_drag = drag.clone();
-    div()
-        .id(id)
+    let strip = div().id(id).absolute().cursor_default();
+    let strip = match axis {
+        // The vertical bar stops short of the horizontal one's corner.
+        ScrollAxis::Vertical => strip.top_0().right_0().bottom_0().w(px(SCROLLBAR_WIDTH)),
+        ScrollAxis::Horizontal => strip
+            .left_0()
+            .bottom_0()
+            .right(px(SCROLLBAR_WIDTH))
+            .h(px(SCROLLBAR_WIDTH)),
+    };
+    let thumb_el = div()
         .absolute()
-        .top_0()
-        .right_0()
-        .bottom_0()
-        .w(px(SCROLLBAR_WIDTH))
-        .cursor_default()
+        .rounded(px(3.0))
+        // The accent, dimming on hover and while dragged like a primary button.
+        .bg(if active {
+            theme.accent.opacity(0.74)
+        } else {
+            theme.accent
+        })
+        .hover(move |s| s.bg(theme.accent.opacity(0.88)));
+    let thumb_el = match axis {
+        ScrollAxis::Vertical => thumb_el.left(px(3.0)).w(px(6.0)).top(start).h(thumb),
+        ScrollAxis::Horizontal => thumb_el.top(px(3.0)).h(px(6.0)).left(start).w(thumb),
+    };
+    strip
         .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
             cx.stop_propagation();
-            let bounds = down_handle.bounds();
-            let (thumb, top, _) = thumb_geometry(
-                bounds.size.height,
-                down_handle.max_offset().y,
-                down_handle.offset().y,
-            )
-            .unwrap_or_default();
-            let y = event.position.y - bounds.top();
+            let (viewport, max, offset) = axis_state(&down_handle, axis);
+            let (thumb, start, _) = thumb_geometry(viewport, max, offset).unwrap_or_default();
+            let at = along(&down_handle, axis, event.position);
             // On the thumb: keep the point that was grabbed. On the track: the
             // thumb centres on the click and carries on as a drag.
-            let grab = if y >= top && y <= top + thumb {
-                y - top
+            let grab = if at >= start && at <= start + thumb {
+                at - start
             } else {
                 thumb / 2.0
             };
             down_drag.set(Some(grab));
-            scroll_thumb_to(&down_handle, y - grab);
+            scroll_thumb_to(&down_handle, axis, at - grab);
             window.refresh();
         })
-        .child(
-            div()
-                .absolute()
-                .left(px(3.0))
-                .w(px(6.0))
-                .top(top)
-                .h(thumb)
-                .rounded(px(3.0))
-                .bg(if active {
-                    theme.text_secondary
-                } else {
-                    theme.text_muted.opacity(0.6)
-                })
-                .hover(move |s| s.bg(theme.text_secondary)),
-        )
-        .child(settle_check(handle, drag, Some((thumb, top))))
+        .child(thumb_el)
+        .child(settle_check(handle, axis, drag, Some((thumb, start))))
         .into_any_element()
 }
 
@@ -1031,15 +1059,15 @@ pub fn scrollbar(
 /// anywhere in the window so the drag can leave the narrow strip.
 fn settle_check(
     handle: &ScrollHandle,
+    axis: ScrollAxis,
     drag: &ScrollbarDrag,
     drawn: Option<(Pixels, Pixels)>,
 ) -> AnyElement {
     let (handle, drag) = (handle.clone(), drag.clone());
     gpui::canvas(
         move |_, window, _| {
-            let bounds = handle.bounds();
-            let now = thumb_geometry(bounds.size.height, handle.max_offset().y, handle.offset().y)
-                .map(|(thumb, top, _)| (thumb, top));
+            let (viewport, max, offset) = axis_state(&handle, axis);
+            let now = thumb_geometry(viewport, max, offset).map(|(thumb, start, _)| (thumb, start));
             let moved = match (drawn, now) {
                 (None, None) => false,
                 (Some((a, b)), Some((c, d))) => (a - c).abs() > px(0.5) || (b - d).abs() > px(0.5),
@@ -1050,7 +1078,7 @@ fn settle_check(
             }
             (handle, drag)
         },
-        |_, (handle, drag), window, _| {
+        move |_, (handle, drag), window, _| {
             if drag.get().is_none() {
                 return;
             }
@@ -1063,8 +1091,8 @@ fn settle_check(
                     move_drag.set(None);
                     return;
                 }
-                let top = event.position.y - move_handle.bounds().top() - grab;
-                scroll_thumb_to(&move_handle, top);
+                let at = along(&move_handle, axis, event.position);
+                scroll_thumb_to(&move_handle, axis, at - grab);
                 window.refresh();
             });
             window.on_mouse_event(move |_: &gpui::MouseUpEvent, _, window, _| {
