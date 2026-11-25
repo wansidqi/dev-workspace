@@ -10,11 +10,12 @@
 use std::ops::Range;
 
 use gpui::{
-    actions, div, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem, Context,
-    CursorStyle, ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle,
-    Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, Point, ScrollHandle, ShapedLine, SharedString, Style,
-    Subscription, TextRun, UTF16Selection, Window,
+    actions, div, fill, point, prelude::*, px, relative, size, App, AvailableSpace, Bounds,
+    ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
+    EntityInputHandler, FocusHandle, Focusable, GlobalElementId, Hsla, KeyBinding, LayoutId,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
+    ScrollHandle, SharedString, Size, Style, Subscription, TextRun, TextStyle, UTF16Selection,
+    Window, WrappedLine,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -104,9 +105,12 @@ pub struct NoteEditor {
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
-    /// One shaped line per `\n`-delimited row, refreshed on every paint.
-    last_lines: Vec<ShapedLine>,
+    /// One shaped (soft-wrapped) line per `\n`-delimited row, refreshed on
+    /// every paint. A line spans several visual rows when it is wrapped.
+    last_lines: Vec<WrappedLine>,
     last_bounds: Option<Bounds<Pixels>>,
+    /// Height of one visual row at the last paint.
+    last_line_height: Pixels,
     is_selecting: bool,
     /// Called after every edit with the full content, so the caller can
     /// persist it (e.g. to the note's file on disk).
@@ -178,6 +182,7 @@ impl NoteEditor {
             marked_range: None,
             last_lines: Vec::new(),
             last_bounds: None,
+            last_line_height: px(0.0),
             is_selecting: false,
             on_change: None,
             on_close: None,
@@ -240,46 +245,83 @@ impl NoteEditor {
     }
 
     fn up(&mut self, _: &NeUp, window: &mut Window, cx: &mut Context<Self>) {
-        let offset = self.cursor_offset();
-        let line_idx = self.line_index_for_offset(offset);
-        if line_idx == 0 {
-            self.move_to(0, window, cx);
-            return;
-        }
-        let target = self.offset_on_line(line_idx - 1, offset);
-        self.move_to(target, window, cx);
-    }
-
-    /// Offset on `target_line` closest to the on-screen x of `from_offset`, so
-    /// Up/Down keep their column on the proportional note font. Falls back to
-    /// the same byte column before the first paint has shaped any lines.
-    fn offset_on_line(&self, target_line: usize, from_offset: usize) -> usize {
-        let from_line = self.line_index_for_offset(from_offset);
-        let from_start = self.line_range(from_line).start;
-        let target = self.line_range(target_line);
-        let col = from_offset - from_start;
-        match (
-            self.last_lines.get(from_line),
-            self.last_lines.get(target_line),
-        ) {
-            (Some(from), Some(to)) => {
-                let x = from.x_for_index(col.min(from.len()));
-                (target.start + to.closest_index_for_x(x)).min(target.end)
-            }
-            _ => (target.start + col).min(target.end),
-        }
+        self.move_vertical(-1, window, cx);
     }
 
     fn down(&mut self, _: &NeDown, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_vertical(1, window, cx);
+    }
+
+    /// Moves the caret one visual row up (`-1`) or down (`1`), keeping its
+    /// on-screen x so wrapped lines and the proportional note font behave.
+    /// Before the first paint there is no layout, so it steps by source line.
+    fn move_vertical(&mut self, dir: isize, window: &mut Window, cx: &mut Context<Self>) {
         let offset = self.cursor_offset();
-        let line_idx = self.line_index_for_offset(offset);
-        let line_count = self.lines().len();
-        if line_idx + 1 >= line_count {
-            self.move_to(self.content.len(), window, cx);
+        let lh = self.last_line_height;
+        if let (Some(caret), true) = (self.caret_point(offset), lh > px(0.0)) {
+            let y = caret.y + lh * (dir as f32) + lh * 0.5;
+            let total: usize = self.last_lines.iter().map(row_count).sum();
+            let target = if y < px(0.0) {
+                0
+            } else if y >= lh * (total as f32) {
+                self.content.len()
+            } else {
+                self.offset_at(point(caret.x, y))
+            };
+            self.move_to(target, window, cx);
             return;
         }
-        let target = self.offset_on_line(line_idx + 1, offset);
-        self.move_to(target, window, cx);
+        let line_idx = self.line_index_for_offset(offset);
+        let target_line = if dir < 0 {
+            if line_idx == 0 {
+                self.move_to(0, window, cx);
+                return;
+            }
+            line_idx - 1
+        } else {
+            if line_idx + 1 >= self.lines().len() {
+                self.move_to(self.content.len(), window, cx);
+                return;
+            }
+            line_idx + 1
+        };
+        let col = offset - self.line_range(line_idx).start;
+        let target = self.line_range(target_line);
+        self.move_to((target.start + col).min(target.end), window, cx);
+    }
+
+    /// Caret position for `offset` relative to the text origin, from the last
+    /// paint's layout.
+    fn caret_point(&self, offset: usize) -> Option<Point<Pixels>> {
+        let idx = self.line_index_for_offset(offset);
+        let line = self.last_lines.get(idx)?;
+        let col = offset - self.line_starts()[idx];
+        let (row, x) = caret_in_line(line, col);
+        let rows: usize = self.last_lines.iter().take(idx).map(row_count).sum();
+        Some(point(x, self.last_line_height * ((rows + row) as f32)))
+    }
+
+    /// Byte offset nearest `p`, a point relative to the text origin, using the
+    /// last paint's layout. Below everything it is the end of the text.
+    fn offset_at(&self, p: Point<Pixels>) -> usize {
+        let lh = self.last_line_height;
+        if self.last_lines.is_empty() || lh <= px(0.0) {
+            return 0;
+        }
+        let mut row = (p.y.max(px(0.0)) / lh) as usize;
+        let starts = self.line_starts();
+        for (idx, line) in self.last_lines.iter().enumerate() {
+            let n = row_count(line);
+            if row < n {
+                let in_line = point(p.x, lh * (row as f32) + lh * 0.5);
+                let col = match line.closest_index_for_position(in_line, lh) {
+                    Ok(i) | Err(i) => i,
+                };
+                return starts[idx] + col.min(line.len());
+            }
+            row -= n;
+        }
+        self.content.len()
     }
 
     fn select_left(&mut self, _: &NeSelectLeft, window: &mut Window, cx: &mut Context<Self>) {
@@ -709,14 +751,7 @@ impl NoteEditor {
         let Some(bounds) = self.last_bounds.as_ref() else {
             return 0;
         };
-        if self.last_lines.is_empty() {
-            return 0;
-        }
-        let line_height = bounds.size.height / (self.last_lines.len() as f32).max(1.0);
-        let relative_y = (position.y - bounds.top()).max(px(0.0));
-        let line_idx = ((relative_y / line_height) as usize).min(self.last_lines.len() - 1);
-        let line_start = self.line_starts()[line_idx];
-        line_start + self.last_lines[line_idx].closest_index_for_x(position.x - bounds.left())
+        self.offset_at(point(position.x - bounds.left(), position.y - bounds.top()))
     }
 
     fn select_to(&mut self, offset: usize, window: &Window, cx: &mut Context<Self>) {
@@ -926,19 +961,14 @@ impl EntityInputHandler for NoteEditor {
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let range = self.range_from_utf16(&range_utf16);
-        let line_idx = self.line_index_for_offset(range.start);
-        let line = self.last_lines.get(line_idx)?;
-        let line_start = self.line_starts().get(line_idx).copied()?;
-        let line_height = window.line_height();
-        let top = bounds.top() + line_height * (line_idx as f32);
+        let start = self.caret_point(range.start)?;
+        let end = self.caret_point(range.end).unwrap_or(start);
+        let right = if end.y == start.y { end.x } else { start.x };
         Some(Bounds::from_corners(
+            bounds.origin + start,
             point(
-                bounds.left() + line.x_for_index(range.start - line_start),
-                top,
-            ),
-            point(
-                bounds.left() + line.x_for_index((range.end - line_start).min(line.len())),
-                top + line_height,
+                bounds.left() + right,
+                bounds.top() + start.y + window.line_height(),
             ),
         ))
     }
@@ -972,8 +1002,107 @@ struct NoteTextElement {
     theme: GlassTheme,
 }
 
+/// Visual rows a wrapped line occupies (one more than its wrap boundaries).
+fn row_count(line: &WrappedLine) -> usize {
+    line.wrap_boundaries().len() + 1
+}
+
+/// Byte index at which each visual row of a wrapped line starts.
+fn row_starts(line: &WrappedLine) -> Vec<usize> {
+    let mut starts = vec![0];
+    for b in line.wrap_boundaries() {
+        if let Some(glyph) = line
+            .runs()
+            .get(b.run_ix)
+            .and_then(|r| r.glyphs.get(b.glyph_ix))
+        {
+            starts.push(glyph.index);
+        }
+    }
+    starts
+}
+
+/// The visual row holding byte `col` and the x of `col` within that row. A
+/// caret on a wrap boundary shows at the start of the lower row.
+fn caret_in_line(line: &WrappedLine, col: usize) -> (usize, Pixels) {
+    let starts = row_starts(line);
+    let row = starts.partition_point(|s| *s <= col).saturating_sub(1);
+    let layout = &line.unwrapped_layout;
+    let x = layout.x_for_index(col.min(line.len())) - layout.x_for_index(starts[row]);
+    (row, x)
+}
+
+/// One rectangle per visual row covered by `start..end` (bytes of the line),
+/// with `origin` the top-left of the line.
+fn range_rects(
+    line: &WrappedLine,
+    start: usize,
+    end: usize,
+    origin: Point<Pixels>,
+    line_height: Pixels,
+) -> Vec<Bounds<Pixels>> {
+    let starts = row_starts(line);
+    let layout = &line.unwrapped_layout;
+    let mut rects = Vec::new();
+    for (r, &row_start) in starts.iter().enumerate() {
+        let row_end = starts.get(r + 1).copied().unwrap_or(line.len());
+        let (a, b) = (start.max(row_start), end.min(row_end));
+        if a >= b {
+            continue;
+        }
+        let base = layout.x_for_index(row_start);
+        let top = origin.y + line_height * (r as f32);
+        rects.push(Bounds::from_corners(
+            point(origin.x + layout.x_for_index(a) - base, top),
+            point(origin.x + layout.x_for_index(b) - base, top + line_height),
+        ));
+    }
+    rects
+}
+
+/// Shapes every source line, wrapped to `wrap` when given. Shaping is cached
+/// by the text system, so measuring and painting the same text is cheap.
+fn shape_wrapped(
+    window: &Window,
+    style: &TextStyle,
+    font_size: Pixels,
+    color: Hsla,
+    lines: &[&str],
+    wrap: Option<Pixels>,
+) -> Vec<WrappedLine> {
+    lines
+        .iter()
+        .map(|text| {
+            let runs = if text.is_empty() {
+                vec![]
+            } else {
+                vec![TextRun {
+                    len: text.len(),
+                    font: style.font(),
+                    color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }]
+            };
+            window
+                .text_system()
+                .shape_text(
+                    SharedString::from(text.to_string()),
+                    font_size,
+                    &runs,
+                    wrap,
+                    None,
+                )
+                .ok()
+                .and_then(|mut shaped| shaped.drain(..).next())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
 struct PrepaintState {
-    lines: Vec<ShapedLine>,
+    lines: Vec<WrappedLine>,
     cursor: Option<PaintQuad>,
     selections: Vec<PaintQuad>,
     /// Find-bar matches, painted under the selection.
@@ -1007,11 +1136,29 @@ impl Element for NoteTextElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let line_count = self.input.read(cx).lines().len().max(1);
+        // The height depends on how many rows the text wraps to at the width
+        // the layout engine hands us, so it is measured, not fixed.
+        let content = self.input.read(cx).content.clone();
+        let text_style = window.text_style();
+        let font_size = text_style.font_size.to_pixels(window.rem_size());
+        let line_height = window.line_height();
+        let color = self.theme.text_primary;
         let mut style = Style::default();
         style.size.width = relative(1.).into();
-        style.size.height = (window.line_height() * (line_count as f32)).into();
-        (window.request_layout(style, [], cx), ())
+        let id = window.request_measured_layout(style, move |known, available, window, _cx| {
+            let width = known.width.or(match available.width {
+                AvailableSpace::Definite(w) => Some(w),
+                _ => None,
+            });
+            let lines: Vec<&str> = content.split('\n').collect();
+            let shaped = shape_wrapped(window, &text_style, font_size, color, &lines, width);
+            let rows: usize = shaped.iter().map(row_count).sum();
+            Size {
+                width: width.unwrap_or(px(0.0)),
+                height: line_height * (rows.max(1) as f32),
+            }
+        });
+        (id, ())
     }
 
     fn prepaint(
@@ -1034,34 +1181,34 @@ impl Element for NoteTextElement {
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line_height = window.line_height();
 
-        let shaped: Vec<ShapedLine> = lines_text
-            .iter()
-            .map(|text| {
-                let run = TextRun {
-                    len: text.len(),
-                    font: style.font(),
-                    color: self.theme.text_primary,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                };
-                let runs = if text.is_empty() { vec![] } else { vec![run] };
-                window.text_system().shape_line(
-                    SharedString::from(text.clone()),
-                    font_size,
-                    &runs,
-                    None,
-                )
-            })
-            .collect();
+        let line_refs: Vec<&str> = lines_text.iter().map(String::as_str).collect();
+        let shaped = shape_wrapped(
+            window,
+            &style,
+            font_size,
+            self.theme.text_primary,
+            &line_refs,
+            Some(bounds.size.width),
+        );
+
+        // Top of each source line, relative to the text origin: a wrapped
+        // line is several rows tall.
+        let mut tops: Vec<Pixels> = Vec::with_capacity(shaped.len());
+        let mut rows_so_far = 0usize;
+        for line in &shaped {
+            tops.push(line_height * (rows_so_far as f32));
+            rows_so_far += row_count(line);
+        }
 
         let cursor_line_idx = input.line_index_for_offset(cursor_offset);
         let cursor_col = cursor_offset - line_starts[cursor_line_idx];
-        let cursor_top = bounds.top() + line_height * (cursor_line_idx as f32);
-        let cursor_x = shaped
+        let (cursor_row, cursor_x) = shaped
             .get(cursor_line_idx)
-            .map(|l| l.x_for_index(cursor_col))
-            .unwrap_or(px(0.0));
+            .map(|l| caret_in_line(l, cursor_col))
+            .unwrap_or((0, px(0.0)));
+        let cursor_top = bounds.top()
+            + tops.get(cursor_line_idx).copied().unwrap_or(px(0.0))
+            + line_height * (cursor_row as f32);
 
         // Keep the cursor inside the scroller after typing or moving it. The
         // offset is read from this frame's layout, so a stale one-frame-old
@@ -1094,54 +1241,47 @@ impl Element for NoteTextElement {
             let idx = line_starts
                 .partition_point(|start| *start <= m.start)
                 .saturating_sub(1);
-            let top = bounds.top() + line_height * (idx as f32);
-            if viewport.size.height > px(0.0)
-                && (top + line_height < viewport.top() || top > viewport.bottom())
-            {
-                continue;
-            }
             let Some(line) = shaped.get(idx) else {
                 continue;
             };
+            let top = bounds.top() + tops[idx];
+            let height = line_height * (row_count(line) as f32);
+            if viewport.size.height > px(0.0)
+                && (top + height < viewport.top() || top > viewport.bottom())
+            {
+                continue;
+            }
             let start = m.start - line_starts[idx];
-            let end = (m.end - line_starts[idx]).min(line.len);
+            let end = (m.end - line_starts[idx]).min(line.len());
             let color = if find_current == Some(n) {
                 self.theme.warning.opacity(0.55)
             } else {
                 self.theme.warning.opacity(0.25)
             };
-            finds.push(fill(
-                Bounds::from_corners(
-                    point(bounds.left() + line.x_for_index(start), top),
-                    point(bounds.left() + line.x_for_index(end), top + line_height),
-                ),
-                color,
-            ));
+            for rect in range_rects(line, start, end, point(bounds.left(), top), line_height) {
+                finds.push(fill(rect, color));
+            }
         }
 
         let mut selections = Vec::new();
         if !selected_range.is_empty() {
             for (idx, line) in shaped.iter().enumerate() {
-                let line_range = line_starts[idx]..line_starts[idx] + line.len;
+                let line_range = line_starts[idx]..line_starts[idx] + line.len();
                 let overlap_start = selected_range.start.max(line_range.start);
                 let overlap_end = selected_range.end.min(line_range.end);
                 if overlap_start >= overlap_end {
                     continue;
                 }
-                let top = bounds.top() + line_height * (idx as f32);
-                selections.push(fill(
-                    Bounds::from_corners(
-                        point(
-                            bounds.left() + line.x_for_index(overlap_start - line_range.start),
-                            top,
-                        ),
-                        point(
-                            bounds.left() + line.x_for_index(overlap_end - line_range.start),
-                            top + line_height,
-                        ),
-                    ),
-                    self.theme.accent.opacity(0.25),
-                ));
+                let top = bounds.top() + tops[idx];
+                for rect in range_rects(
+                    line,
+                    overlap_start - line_range.start,
+                    overlap_end - line_range.start,
+                    point(bounds.left(), top),
+                    line_height,
+                ) {
+                    selections.push(fill(rect, self.theme.accent.opacity(0.25)));
+                }
             }
         }
 
@@ -1186,8 +1326,8 @@ impl Element for NoteTextElement {
             window.paint_quad(selection);
         }
         let line_height = window.line_height();
-        for (idx, line) in prepaint.lines.iter().enumerate() {
-            let top = bounds.top() + line_height * (idx as f32);
+        let mut top = bounds.top();
+        for line in prepaint.lines.iter() {
             line.paint(
                 point(bounds.left(), top),
                 line_height,
@@ -1197,6 +1337,7 @@ impl Element for NoteTextElement {
                 cx,
             )
             .unwrap();
+            top += line_height * (row_count(line) as f32);
         }
         if focus_handle.is_focused(window) {
             if let Some(cursor) = prepaint.cursor.take() {
@@ -1207,6 +1348,7 @@ impl Element for NoteTextElement {
         self.input.update(cx, |input, _cx| {
             input.last_lines = lines;
             input.last_bounds = Some(bounds);
+            input.last_line_height = line_height;
         });
     }
 }
