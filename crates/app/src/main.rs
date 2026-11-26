@@ -440,6 +440,8 @@ impl Root {
         let theme = self.theme;
         let state = self.state.clone();
         let root = cx.entity();
+        // Edits are autosaved as you type, so Escape (discard) restores this.
+        let original = content.clone();
         let editor = cx.new(|cx| {
             let mut editor = NoteEditor::new(cx, content, theme);
             let change_state = state.clone();
@@ -449,7 +451,11 @@ impl Root {
                 });
             }));
             let close_root = root.clone();
+            let discard_state = state.clone();
             editor.on_close = Some(Box::new(move |_window, cx| {
+                discard_state.update(cx, |state, _| {
+                    state.write_note_content(id, &original);
+                });
                 close_root.update(cx, |root, cx| {
                     root.open_note = None;
                     cx.notify();
