@@ -96,6 +96,13 @@ pub struct TaskDetail {
     body_cache: Option<(NoteId, i64, Vec<Block>)>,
     /// Text selection of the body preview (each text registers with it).
     preview_select: preview_select::Shared,
+    /// Focus scope of the description: Ctrl+C / Ctrl+A / Ctrl+F act on it.
+    preview_focus: gpui::FocusHandle,
+    /// Find bar of the description (Ctrl+F).
+    find_input: Entity<TextInput>,
+    find_open: bool,
+    /// Scroll of the page body, to bring the current match into view.
+    body_scroll: gpui::ScrollHandle,
     /// Index of the code block whose copy button was just pressed.
     copied: Option<usize>,
     /// The issue thread, read when the Comments tab opens.
@@ -199,6 +206,29 @@ impl TaskDetail {
             }));
         });
 
+        let find_input = cx.new(|cx| TextInput::new(cx, "Find in description", theme));
+        let weak = cx.weak_entity();
+        find_input.update(cx, |input, _| {
+            input.keep_on_confirm = true;
+            let next = weak.clone();
+            input.on_confirm = Some(Box::new(move |_, window, cx| {
+                let next = next.clone();
+                window.defer(cx, move |_, cx| {
+                    next.update(cx, |this, cx| this.find_step(1, cx)).ok();
+                });
+            }));
+            let close = weak.clone();
+            input.on_cancel = Some(Box::new(move |window, cx| {
+                let close = close.clone();
+                window.defer(cx, move |window, cx| {
+                    close
+                        .update(cx, |this, cx| this.close_find(window, cx))
+                        .ok();
+                });
+            }));
+        });
+        cx.observe(&find_input, |_, _, cx| cx.notify()).detach();
+
         // Links/tasks/notes change from elsewhere (commit browser, deletes).
         cx.observe(&state, |this, _, cx| {
             this.refresh_commits(cx);
@@ -231,6 +261,10 @@ impl TaskDetail {
             issue_sync,
             body_cache: None,
             preview_select: Default::default(),
+            preview_focus: cx.focus_handle(),
+            find_input,
+            find_open: false,
+            body_scroll: gpui::ScrollHandle::new(),
             copied: None,
             comments: None,
             comments_busy: false,
@@ -251,6 +285,36 @@ impl TaskDetail {
             on_open_task: None,
             on_open_history: None,
         }
+    }
+
+    /// Ctrl+F in the description: shows the find bar (seeded with a one-line
+    /// selection) and focuses its query box.
+    fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.find_open = true;
+        let selected = self.preview_select.borrow().selected_text();
+        if let Some(text) = selected.filter(|t| !t.contains('\n') && t.len() <= 120) {
+            self.find_input.update(cx, |input, cx| {
+                input.set_text_selected(text);
+                cx.notify();
+            });
+        }
+        let focus = self.find_input.read(cx).focus_handle.clone();
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    /// Closes the find bar and hands focus back to the description.
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.find_open = false;
+        self.preview_select.borrow_mut().set_query("");
+        window.focus(&self.preview_focus, cx);
+        cx.notify();
+    }
+
+    /// Steps to the next (`+1`) or previous (`-1`) match.
+    fn find_step(&mut self, delta: isize, cx: &mut Context<Self>) {
+        self.preview_select.borrow_mut().step_hit(delta);
+        cx.notify();
     }
 
     /// Swaps the due-date or branch label for a text input prefilled with
@@ -1008,7 +1072,15 @@ impl TaskDetail {
                         .read_note_content(id)
                         .unwrap_or_default();
                     self.body_cache = Some((id, updated, markdown::parse_mapped(&content).0));
+                    // The old selection pointed into text that is gone.
+                    self.preview_select.borrow_mut().clear();
                 }
+                let query = if self.find_open {
+                    self.find_input.read(cx).content.to_string()
+                } else {
+                    String::new()
+                };
+                self.preview_select.borrow_mut().set_query(&query);
                 let blocks: &[Block] = self.body_cache.as_ref().map_or(&[], |(_, _, b)| b);
                 out.push(
                     div()
@@ -1074,14 +1146,175 @@ impl TaskDetail {
                         let _ = crate::external::open_url(&href);
                     }),
                 };
+                let select = self.preview_select.clone();
+                let (down_select, move_select, up_select, out_select, all_select) = (
+                    select.clone(),
+                    select.clone(),
+                    select.clone(),
+                    select.clone(),
+                    select.clone(),
+                );
+                let (reveal_select, reveal_scroll) = (select.clone(), self.body_scroll.clone());
+                let focus = self.preview_focus.clone();
+                let down_focus = focus.clone();
+                let rendered = markdown_view::render_blocks(blocks, &theme, &hook);
+                if self.find_open {
+                    let (total, current, searching) = {
+                        let s = select.borrow();
+                        (s.hit_total(), s.current_hit(), !s.query().is_empty())
+                    };
+                    let status = match (searching, total) {
+                        (false, _) => String::new(),
+                        (true, 0) => "No results".to_string(),
+                        (true, n) => format!("{} of {n}", current + 1),
+                    };
+                    out.push(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(theme.space_2)
+                            .child(div().w(px(240.0)).child(self.find_input.clone()))
+                            .child(
+                                div()
+                                    .min_w(px(64.0))
+                                    .t_small()
+                                    .text_color(theme.text_muted)
+                                    .child(status),
+                            )
+                            .child(
+                                icon_button(
+                                    &theme,
+                                    Icon::ChevronUp,
+                                    "tfind-prev",
+                                    theme.text_primary,
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| this.find_step(-1, cx))),
+                            )
+                            .child(
+                                icon_button(
+                                    &theme,
+                                    Icon::ChevronDown,
+                                    "tfind-next",
+                                    theme.text_primary,
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| this.find_step(1, cx))),
+                            )
+                            .child(
+                                icon_button(&theme, Icon::X, "tfind-close", theme.text_primary)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.close_find(window, cx)
+                                    })),
+                            )
+                            .into_any_element(),
+                    );
+                }
                 out.push(
                     div()
                         .id("task-description")
+                        .key_context("NotePreview")
+                        .track_focus(&focus)
                         .flex()
                         .flex_col()
                         .items_center()
                         .gap(theme.space_3)
-                        .children(markdown_view::render_blocks(blocks, &theme, &hook))
+                        .on_action(
+                            cx.listener(move |_, _: &preview_select::PreviewCopy, _, cx| {
+                                if let Some(text) = select.borrow().selected_text() {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                }
+                            }),
+                        )
+                        .on_action(cx.listener(
+                            move |_, _: &preview_select::PreviewSelectAll, _, cx| {
+                                all_select.borrow_mut().select_all();
+                                cx.notify();
+                            },
+                        ))
+                        .on_action(cx.listener(
+                            |this, _: &preview_select::PreviewFind, window, cx| {
+                                this.open_find(window, cx)
+                            },
+                        ))
+                        .on_action(cx.listener(
+                            |this, _: &preview_select::PreviewFindNext, _, cx| {
+                                this.find_step(1, cx)
+                            },
+                        ))
+                        .on_action(cx.listener(
+                            |this, _: &preview_select::PreviewFindPrev, _, cx| {
+                                this.find_step(-1, cx)
+                            },
+                        ))
+                        // Drag to select text; a double-click still edits, so
+                        // only a first press begins a selection.
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(move |_, event: &gpui::MouseDownEvent, window, cx| {
+                                window.focus(&down_focus, cx);
+                                if event.click_count == 1 {
+                                    down_select.borrow_mut().start(event.position);
+                                }
+                                cx.notify();
+                            }),
+                        )
+                        .on_mouse_move(cx.listener(
+                            move |_, event: &gpui::MouseMoveEvent, _, cx| {
+                                if event.pressed_button == Some(gpui::MouseButton::Left)
+                                    && move_select.borrow().is_dragging()
+                                    && move_select.borrow_mut().drag(event.position)
+                                {
+                                    cx.notify();
+                                }
+                            },
+                        ))
+                        .on_mouse_up(
+                            gpui::MouseButton::Left,
+                            cx.listener(move |_, _, _, cx| {
+                                up_select.borrow_mut().finish();
+                                cx.notify();
+                            }),
+                        )
+                        .on_mouse_up_out(
+                            gpui::MouseButton::Left,
+                            cx.listener(move |_, _, _, cx| {
+                                out_select.borrow_mut().finish();
+                                cx.notify();
+                            }),
+                        )
+                        .children(rendered)
+                        // Last, so the texts above are measured when it runs:
+                        // scrolls the current find match into view.
+                        .child(
+                            gpui::canvas(
+                                move |_, window, _| {
+                                    let mut select = reveal_select.borrow_mut();
+                                    if !select.take_reveal() {
+                                        return;
+                                    }
+                                    let Some((at, line_height)) = select.current_hit_position()
+                                    else {
+                                        return;
+                                    };
+                                    let viewport = reveal_scroll.bounds();
+                                    let margin = line_height * 2.0;
+                                    let mut offset = reveal_scroll.offset();
+                                    if at.y < viewport.top() + margin {
+                                        offset.y += viewport.top() + margin - at.y;
+                                    } else if at.y + line_height > viewport.bottom() - margin {
+                                        offset.y +=
+                                            viewport.bottom() - margin - (at.y + line_height);
+                                    }
+                                    offset.y =
+                                        offset.y.min(px(0.0)).max(-reveal_scroll.max_offset().y);
+                                    if offset != reveal_scroll.offset() {
+                                        reveal_scroll.set_offset(offset);
+                                        window.refresh();
+                                    }
+                                },
+                                |_, _, _, _| {},
+                            )
+                            .absolute(),
+                        )
                         .into_any_element(),
                 );
             }
@@ -2235,6 +2468,7 @@ impl Render for TaskDetail {
                     .px(theme.space_6)
                     .py(theme.space_4)
                     .overflow_y_scroll()
+                    .track_scroll(&self.body_scroll)
                     .children(body),
             )
             .into_any_element()
