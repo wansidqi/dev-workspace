@@ -19,6 +19,7 @@ mod external;
 mod github_panel;
 mod highlight;
 mod ide;
+mod issue_sync;
 mod log_select;
 mod markdown;
 mod markdown_view;
@@ -54,12 +55,13 @@ use changes_view::ChangesView;
 use commit_browser::CommitBrowser;
 use credentials_panel::CredentialsPanel;
 use devspace_core::{NoteId, ProjectId, Task, TaskId, TaskStatus};
-use devspace_storage::{run_migrations, WorkspacePaths};
+use devspace_storage::WorkspacePaths;
 use gpui::{
     actions, div, prelude::*, px, size, App, Bounds, Context, Entity, KeyBinding,
     PathPromptOptions, SharedString, TitlebarOptions, Window, WindowAppearance,
     WindowBackgroundAppearance, WindowBounds, WindowOptions,
 };
+use issue_sync::IssueSync;
 use note_editor::NoteEditor;
 use project_files::ProjectFiles;
 use run_panel::RunPanel;
@@ -106,6 +108,9 @@ struct Root {
     /// The note currently open in the full-content editor, if any — replaces
     /// the task/notes list in `main_panel` while set.
     open_note: Option<(NoteId, SharedString, Entity<NoteEditor>)>,
+    /// The note was opened to edit from a task page: saving goes back there
+    /// instead of to the note's preview.
+    close_note_on_save: bool,
     /// Edit / Split / Preview for the open note, and its parsed preview
     /// (re-parsed only when the text changes). See `note_page.rs`.
     note_mode: note_page::NoteMode,
@@ -129,11 +134,6 @@ struct Root {
     note_scroll_seen: Option<(gpui::Pixels, gpui::Pixels)>,
     /// Split view: editor on the right, preview on the left.
     note_split_swapped: bool,
-    /// Tasks whose subtasks are folded away in the project's task tree.
-    collapsed_tasks: std::collections::HashSet<TaskId>,
-    /// The fold or unfold that is animating, so only those rows move.
-    tree_motion: Option<project_page::TreeMotion>,
-    tree_motion_token: u64,
     /// Right-hand terminal panel (CLAUDE.md layout concept: "collapsible
     /// panels for terminal, commit browser and credentials"). Owns a tab set
     /// per project; hiding it or switching projects keeps shells running.
@@ -145,6 +145,8 @@ struct Root {
     /// The git Changes view (working copy of every linked repo), replacing the
     /// main content while open.
     open_changes: Option<Entity<ChangesView>>,
+    /// Pulls GitHub issues in as tasks and sends edits of linked tasks back.
+    issue_sync: Entity<IssueSync>,
     /// Which page of the Git section (Changes or History) is showing.
     git_tab: GitTab,
     /// The task/subtask detail page (notes, attachments, commits). Stays
@@ -456,12 +458,18 @@ impl Root {
             let save_root = root.clone();
             editor.on_save = Some(Box::new(move |window, cx| {
                 save_root.update(cx, |root, cx| {
+                    if root.close_note_on_save {
+                        root.open_note = None;
+                        cx.notify();
+                        return;
+                    }
                     root.set_note_mode(note_page::NoteMode::Preview, window, cx);
                 });
             }));
             editor
         });
         self.open_note = Some((id, title, editor));
+        self.close_note_on_save = false;
         self.note_scroll = gpui::ScrollHandle::new();
         self.note_scroll_seen = None;
         self.note_mode = mode;
@@ -473,10 +481,11 @@ impl Root {
     /// subtask at any depth, in place of the project page.
     fn open_task_detail(&mut self, task: TaskId, cx: &mut Context<Self>) {
         let theme = self.theme;
+        let issue_sync = self.issue_sync.clone();
         let state = self.state.clone();
         let root = cx.entity();
         let detail = cx.new(|cx| {
-            let mut detail = TaskDetail::new(cx, state, theme, task);
+            let mut detail = TaskDetail::new(cx, state, theme, task, issue_sync);
             let close_root = root.clone();
             detail.on_close = Some(Box::new(move |_window, cx| {
                 close_root.update(cx, |root, cx| {
@@ -487,6 +496,25 @@ impl Root {
             let note_root = root.clone();
             detail.on_open_note = Some(Box::new(move |id, title, _window, cx| {
                 note_root.update(cx, |root, cx| root.open_note(id, title, cx));
+            }));
+            let task_root = root.clone();
+            detail.on_open_task = Some(Box::new(move |id, subtasks, _window, cx| {
+                task_root.update(cx, |root, cx| {
+                    root.open_task_detail(id, cx);
+                    if subtasks {
+                        if let Some(page) = root.open_task.clone() {
+                            page.update(cx, |page, cx| page.show_tab("subtasks", cx));
+                        }
+                    }
+                });
+            }));
+            let edit_root = root.clone();
+            detail.on_edit_note = Some(Box::new(move |id, title, window, cx| {
+                edit_root.update(cx, |root, cx| {
+                    root.open_note(id, title, cx);
+                    root.set_note_mode(note_page::NoteMode::Edit, window, cx);
+                    root.close_note_on_save = true;
+                });
             }));
             let history_root = root.clone();
             detail.on_open_history = Some(Box::new(move |_window, cx| {
@@ -1004,7 +1032,12 @@ fn init_data() -> Result<(WorkspacePaths, rusqlite::Connection)> {
     paths.ensure_dirs(None)?;
 
     let mut conn = devspace_storage::open_connection(&paths.database_file())?;
-    run_migrations(&mut conn)?;
+    // An upgrade that rewrites data is preceded by a snapshot in `backups/`.
+    if let Some(backup) =
+        devspace_storage::run_migrations_with_backup(&mut conn, &paths.backups_dir())?
+    {
+        tracing::info!("database backed up before upgrade: {}", backup.display());
+    }
     Ok((paths, conn))
 }
 
@@ -1208,6 +1241,8 @@ fn main() -> Result<()> {
                     let workspace_tools = cx
                         .new(|cx| WorkspaceTools::new(cx, state.clone(), settings.clone(), theme));
                     let project_files = cx.new(|_| ProjectFiles::new(state.clone(), theme));
+                    let issue_sync =
+                        cx.new(|cx| IssueSync::new(cx, state.clone(), settings.clone()));
                     let mut root = Root {
                         background,
                         hovered: None,
@@ -1224,6 +1259,7 @@ fn main() -> Result<()> {
                         editing_task: None,
                         editing_note: None,
                         open_note: None,
+                        close_note_on_save: false,
                         note_mode: note_page::NoteMode::Edit,
                         note_copied: None,
                         note_scroll: gpui::ScrollHandle::new(),
@@ -1234,15 +1270,13 @@ fn main() -> Result<()> {
                         _preview_find_watch: preview_find_watch,
                         note_scroll_seen: None,
                         note_split_swapped: saved.note_split_swapped,
-                        collapsed_tasks: std::collections::HashSet::new(),
-                        tree_motion: None,
-                        tree_motion_token: 0,
                         note_preview: None,
                         terminal_panel,
                         terminal_open: saved.terminal_open,
                         focus_handle,
                         open_history: None,
                         open_changes: None,
+                        issue_sync,
                         git_tab: GitTab::Changes,
                         open_task: None,
                         confirm_unlink_repo: None,

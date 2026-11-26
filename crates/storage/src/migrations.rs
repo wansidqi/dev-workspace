@@ -206,7 +206,76 @@ const MIGRATIONS: &[(i64, &str)] = &[
         );
         "#,
     ),
+    (
+        6,
+        r#"
+        -- A task may be the local face of one GitHub issue. A separate table
+        -- keeps `tasks` unchanged, so tasks work without GitHub and the
+        -- link goes when the task or the repo does. `issue_id` is GitHub's
+        -- database id (the sub-issues API wants it, not the number);
+        -- `remote_updated` is the issue's `updated_at` at the last sync.
+        CREATE TABLE task_issue_links (
+            task_id        INTEGER PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+            repo_id        INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+            number         INTEGER NOT NULL,
+            issue_id       INTEGER NOT NULL,
+            remote_updated TEXT NOT NULL DEFAULT '',
+            UNIQUE (repo_id, number)
+        );
+
+        CREATE TRIGGER task_issue_links_same_project
+        BEFORE INSERT ON task_issue_links
+        WHEN (SELECT project_id FROM tasks WHERE id = NEW.task_id)
+             IS NOT (SELECT project_id FROM repos WHERE id = NEW.repo_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'issue link crosses projects');
+        END;
+
+        -- Tasks and notes become one thing: every note that hangs off a task
+        -- turns into a subtask of it, and the note stays as that subtask's
+        -- body (the file is untouched, only its owner changes). Todo notes
+        -- stay open; reference notes start Done so the open-task counts do
+        -- not jump. Project-level notes are left alone.
+        CREATE TEMP TABLE note_task_map AS
+            SELECT n.id AS note_id,
+                   (SELECT COALESCE(MAX(id), 0) FROM tasks)
+                       + ROW_NUMBER() OVER (ORDER BY n.updated_at, n.id) AS task_id
+            FROM notes n
+            WHERE n.task_id IS NOT NULL;
+
+        INSERT INTO tasks (id, project_id, parent_id, title, status, priority,
+                           due_at, branch, created_at, updated_at)
+            SELECT m.task_id, n.project_id, n.task_id, n.title,
+                   CASE WHEN n.kind = 'todo' THEN 'todo' ELSE 'done' END,
+                   'medium', NULL, NULL, n.updated_at, n.updated_at
+            FROM note_task_map m JOIN notes n ON n.id = m.note_id;
+
+        UPDATE notes
+           SET task_id = (SELECT m.task_id FROM note_task_map m WHERE m.note_id = notes.id)
+         WHERE id IN (SELECT note_id FROM note_task_map);
+
+        DROP TABLE note_task_map;
+        "#,
+    ),
 ];
+
+/// Whether the database is behind this build, so a caller can take a backup
+/// before the first migration that rewrites data.
+pub fn has_pending_migrations(conn: &Connection) -> Result<bool, StorageError> {
+    let table: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !table {
+        return Ok(true);
+    }
+    let applied: Option<i64> =
+        conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| {
+            r.get(0)
+        })?;
+    Ok(applied.unwrap_or(0) < latest_migration_version())
+}
 
 /// The newest schema version this build knows. Import refuses databases
 /// made by a newer app than this.
@@ -241,6 +310,40 @@ pub fn run_migrations(conn: &mut Connection) -> Result<(), StorageError> {
     }
 
     Ok(())
+}
+
+/// Like [`run_migrations`], but first snapshots an existing database that is
+/// behind this build into `backup_dir` (`VACUUM INTO`, so the WAL is
+/// included): a migration may rewrite user data, and an upgrade should be
+/// undoable. Fresh databases are not backed up. Returns the backup path.
+pub fn run_migrations_with_backup(
+    conn: &mut Connection,
+    backup_dir: &std::path::Path,
+) -> Result<Option<std::path::PathBuf>, StorageError> {
+    let has_table: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations')",
+        [],
+        |row| row.get(0),
+    )?;
+    let mut backup = None;
+    if has_table && has_pending_migrations(conn)? {
+        let from: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+            [],
+            |r| r.get(0),
+        )?;
+        std::fs::create_dir_all(backup_dir)?;
+        let path = backup_dir.join(format!(
+            "app-before-v{}-from-v{from}.db",
+            latest_migration_version()
+        ));
+        if !path.exists() {
+            conn.execute("VACUUM INTO ?1", [path.to_string_lossy().as_ref()])?;
+            backup = Some(path);
+        }
+    }
+    run_migrations(conn)?;
+    Ok(backup)
 }
 
 #[cfg(test)]
@@ -312,7 +415,120 @@ mod tests {
         let versions: i64 = conn
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(versions, 5);
+        assert_eq!(versions, latest_migration_version());
+    }
+
+    /// A database as it was at migration 5, with notes on a task, a note on
+    /// a subtask and a project-level note.
+    fn v5_database_with_notes() -> Connection {
+        let conn = open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);")
+            .unwrap();
+        for (version, sql) in MIGRATIONS.iter().filter(|(v, _)| *v <= 5) {
+            conn.execute_batch(sql).unwrap();
+            conn.execute(
+                "INSERT INTO schema_migrations (version) VALUES (?1)",
+                [version],
+            )
+            .unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO projects (id, name, archived, created_at, updated_at) VALUES (1, 'P', 0, 0, 0);
+             INSERT INTO tasks (id, project_id, parent_id, title, status, priority, created_at, updated_at)
+               VALUES (1, 1, NULL, 'Parent', 'in_progress', 'high', 5, 5),
+                      (2, 1, 1, 'Child', 'todo', 'medium', 6, 6);
+             INSERT INTO notes (id, project_id, task_id, kind, title, file_path, updated_at) VALUES
+               (10, 1, 1, 'note', 'Spec', '10.md', 100),
+               (11, 1, 1, 'todo', 'Checklist', '11.md', 200),
+               (12, 1, 2, 'sql', 'Query', '12.md', 300),
+               (13, 1, NULL, 'note', 'Project note', '13.md', 400);",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn migration_six_turns_task_notes_into_subtasks_that_keep_their_files() {
+        let mut conn = v5_database_with_notes();
+        run_migrations(&mut conn).unwrap();
+
+        let owner = |note: i64| -> Option<i64> {
+            conn.query_row("SELECT task_id FROM notes WHERE id = ?1", [note], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        let task = |id: i64| -> (Option<i64>, String, String, i64) {
+            conn.query_row(
+                "SELECT parent_id, title, status, created_at FROM tasks WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap()
+        };
+
+        // Three notes became three tasks, numbered after the existing ones.
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 5);
+        let (spec, checklist, query) = (owner(10).unwrap(), owner(11).unwrap(), owner(12).unwrap());
+        assert!(spec > 2 && checklist > 2 && query > 2);
+        assert_eq!(owner(13), None, "project-level notes stay put");
+
+        // Each hangs off the task its note was on, titled like the note;
+        // todo notes stay open, the rest start done; the note file is the body.
+        assert_eq!(task(spec), (Some(1), "Spec".into(), "done".into(), 100));
+        assert_eq!(
+            task(checklist),
+            (Some(1), "Checklist".into(), "todo".into(), 200)
+        );
+        assert_eq!(task(query), (Some(2), "Query".into(), "done".into(), 300));
+        let file: String = conn
+            .query_row("SELECT file_path FROM notes WHERE id = 10", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(file, "10.md");
+
+        // Existing tasks are untouched, and running again changes nothing.
+        assert_eq!(task(1).1, "Parent");
+        run_migrations(&mut conn).unwrap();
+        let again: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(again, 5);
+    }
+
+    #[test]
+    fn a_backup_is_taken_only_when_an_existing_database_is_upgraded() {
+        let dir = std::env::temp_dir().join(format!("devspace-mig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut fresh = open_in_memory().unwrap();
+        assert_eq!(run_migrations_with_backup(&mut fresh, &dir).unwrap(), None);
+
+        let mut old = v5_database_with_notes();
+        let backup = run_migrations_with_backup(&mut old, &dir)
+            .unwrap()
+            .expect("an old database is backed up first");
+        let copy = Connection::open(&backup).unwrap();
+        let notes_on_tasks: i64 = copy
+            .query_row(
+                "SELECT COUNT(*) FROM notes WHERE task_id IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(notes_on_tasks, 3, "the backup predates the conversion");
+        let tasks_in_copy: i64 = copy
+            .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tasks_in_copy, 2);
+
+        assert_eq!(run_migrations_with_backup(&mut old, &dir).unwrap(), None);
+        drop(copy);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

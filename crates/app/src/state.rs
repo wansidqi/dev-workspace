@@ -4,8 +4,8 @@
 
 use devspace_core::{
     descendants_of, sanitize_file_name, Attachment, AttachmentId, CommitLink, CommitLinkId,
-    CommitLinkStatus, Note, NoteId, NoteKind, Project, ProjectId, Repo, RepoId, Task, TaskId,
-    TaskPriority, TaskStatus,
+    CommitLinkStatus, IssueLink, Note, NoteId, NoteKind, Project, ProjectId, Repo, RepoId, Task,
+    TaskId, TaskPriority, TaskStatus,
 };
 use devspace_storage::{
     AttachmentRepo, CommitLinkRepo, NoteRepo, ProjectFolderRepo, ProjectRepo, RepoRepo, TaskRepo,
@@ -14,8 +14,10 @@ use devspace_storage::{
 use rusqlite::Connection;
 
 mod credentials; // credentials vault helpers (state/credentials.rs)
+mod issues; // GitHub issue links and sync bookkeeping (state/issues.rs)
 mod run_commands; // run-command helpers (state/run_commands.rs)
 mod timesheet; // timesheet helpers (state/timesheet.rs)
+pub use issues::Dirty;
 use std::time::{SystemTime, UNIX_EPOCH};
 pub use timesheet::TimesheetProject;
 
@@ -82,6 +84,10 @@ pub struct AppState {
     /// the commit browser's badges and the unassigned filter.
     pub commit_links: Vec<CommitLink>,
     next_commit_link_id: i64,
+    /// Which tasks of the selected project are GitHub issues.
+    pub issue_links: Vec<IssueLink>,
+    /// Linked tasks edited here and not yet sent to GitHub (see `issues.rs`).
+    dirty: std::collections::HashMap<TaskId, Dirty>,
     /// Attachments of the selected project (project-level and per-task).
     pub attachments: Vec<Attachment>,
     next_attachment_id: i64,
@@ -125,6 +131,8 @@ impl AppState {
             unreadable_repos: Vec::new(),
             commit_links: Vec::new(),
             next_commit_link_id: 1,
+            issue_links: Vec::new(),
+            dirty: std::collections::HashMap::new(),
             attachments: Vec::new(),
             next_attachment_id: 1,
             run_commands: Vec::new(),
@@ -199,6 +207,7 @@ impl AppState {
         self.project_folder_path = ProjectFolderRepo::get(&self.conn, id).unwrap_or_default();
         self.reload_recent_commits();
         self.reload_commit_links();
+        self.reload_issue_links();
         self.reload_attachments();
         self.reload_run_commands();
         self.reload_credentials();
@@ -544,6 +553,7 @@ impl AppState {
             self.repos.retain(|r| r.id != id);
             self.reload_recent_commits();
             self.reload_commit_links();
+            self.reload_issue_links();
         }
     }
 
@@ -593,6 +603,7 @@ impl AppState {
     }
 
     /// Notes attached to one task or subtask, newest first.
+    #[cfg(test)]
     pub fn notes_for_task(&self, task: TaskId) -> Vec<Note> {
         self.notes
             .iter()
@@ -641,18 +652,39 @@ impl AppState {
     }
 
     pub fn write_note_content(&mut self, id: NoteId, content: &str) {
-        let Some(note) = self.notes.iter_mut().find(|n| n.id == id) else {
+        if !self.store_note_content(id, content) {
             return;
+        }
+        // The body note of a linked task is the issue body: send it.
+        let owner = self
+            .notes
+            .iter()
+            .find(|n| n.id == id)
+            .and_then(|n| n.task_id);
+        if let Some(task) = owner {
+            if self.body_note(task) == Some(id) {
+                self.mark_dirty(task, |d| d.body = true);
+            }
+            self.update_task(task, |_| {});
+        }
+    }
+
+    /// Writes a note file and its row without telling the GitHub sync (a pull
+    /// writing the remote body must not send it straight back).
+    fn store_note_content(&mut self, id: NoteId, content: &str) -> bool {
+        let Some(note) = self.notes.iter_mut().find(|n| n.id == id) else {
+            return false;
         };
         let Some(project_id) = self.selected_project else {
-            return;
+            return false;
         };
         let full_path = self.paths.notes_dir(project_id).join(&note.file_path);
         if std::fs::write(full_path, content).is_err() {
-            return;
+            return false;
         }
         note.updated_at = now();
         let _ = NoteRepo::update(&self.conn, note);
+        true
     }
 
     pub fn create_task(&mut self, title: &str) {
@@ -686,6 +718,7 @@ impl AppState {
         };
         task.set_status(next, now());
         let _ = TaskRepo::update(&self.conn, task);
+        self.mark_dirty(id, |d| d.status = true);
     }
 
     /// Cycles Low -> Medium -> High -> Urgent -> Low.
@@ -724,6 +757,7 @@ impl AppState {
             if let Some(task) = self.tasks.iter_mut().find(|t| t.id == id) {
                 let _ = task.add_tag(tag, now());
             }
+            self.mark_dirty(id, |d| d.tags = true);
         }
         Ok(added)
     }
@@ -733,6 +767,7 @@ impl AppState {
             if let Some(task) = self.tasks.iter_mut().find(|t| t.id == id) {
                 task.remove_tag(tag, now());
             }
+            self.mark_dirty(id, |d| d.tags = true);
         }
     }
 
@@ -798,6 +833,7 @@ impl AppState {
         task.title = title.to_string();
         task.updated_at = now;
         let _ = TaskRepo::update(&self.conn, task);
+        self.mark_dirty(id, |d| d.title = true);
     }
 
     pub fn delete_task(&mut self, id: TaskId) {
@@ -813,6 +849,9 @@ impl AppState {
                 self.notes = NoteRepo::list_for_project(&self.conn, project).unwrap_or_default();
             }
             self.reload_commit_links();
+            self.reload_issue_links();
+            self.dirty
+                .retain(|task, _| self.tasks.iter().any(|t| t.id == *task));
             self.reload_attachments();
         }
     }

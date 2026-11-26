@@ -7,10 +7,11 @@ use std::collections::HashMap;
 
 use devspace_core::{
     cherry_pick_script, Attachment, AttachmentId, CherryPickCommit, CherryPickGroup, CommitLink,
-    CommitLinkId, CommitLinkStatus, Note, NoteId, NoteKind, RepoId, TaskId, TaskPriority,
+    CommitLinkId, CommitLinkStatus, NoteId, NoteKind, RepoId, Task, TaskId, TaskPriority,
     TaskStatus,
 };
 use devspace_git::RepoCommit;
+use devspace_github as gh;
 use gpui::{
     div, prelude::*, px, AnyElement, App, ClipboardItem, Context, Entity, Hsla, PathPromptOptions,
     SharedString, Window,
@@ -19,6 +20,10 @@ use gpui::{
 use crate::attach_flow::{attach_notice, attach_paths};
 use crate::date::{format_date, format_iso_date, parse_date};
 use crate::external::{open_attachment, reveal, OpenOutcome};
+use crate::issue_sync::{load_token, remote_for, IssueSync};
+use crate::markdown::{self, Block};
+use crate::markdown_view;
+use crate::preview_select;
 use crate::state::AppState;
 use crate::text_input::TextInput;
 use crate::theme::GlassTheme;
@@ -29,12 +34,17 @@ use crate::ui::{
 
 pub type CloseHandler = Box<dyn Fn(&mut Window, &mut App)>;
 pub type OpenNoteHandler = Box<dyn Fn(NoteId, SharedString, &mut Window, &mut App)>;
+/// Opens a task's page; the flag asks for its Subtasks tab.
+pub type OpenTaskHandler = Box<dyn Fn(TaskId, bool, &mut Window, &mut App)>;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
-    Notes,
+    Description,
+    Subtasks,
     Attachments,
     Commits,
+    /// The issue thread; only for tasks that are GitHub issues.
+    Comments,
 }
 
 /// Commits listed in the branch view, newest first.
@@ -57,7 +67,9 @@ impl TaskDetail {
     /// Switches tab by name (debug QA hook; unknown names change nothing).
     pub(crate) fn show_tab(&mut self, name: &str, cx: &mut Context<Self>) {
         self.tab = match name {
-            "notes" => Tab::Notes,
+            "description" | "notes" => Tab::Description,
+            "subtasks" => Tab::Subtasks,
+            "comments" => Tab::Comments,
             "attachments" => Tab::Attachments,
             "commits" => Tab::Commits,
             _ => return,
@@ -76,7 +88,21 @@ pub struct TaskDetail {
     theme: GlassTheme,
     task_id: TaskId,
     tab: Tab,
-    new_note_input: Entity<TextInput>,
+    /// "New subtask…" input on the Subtasks tab; Enter adds it.
+    new_subtask_input: Entity<TextInput>,
+    /// Pulls and pushes this task's GitHub issue; also says what went wrong.
+    issue_sync: Entity<IssueSync>,
+    /// The parsed body note, kept until the note changes.
+    body_cache: Option<(NoteId, i64, Vec<Block>)>,
+    /// Text selection of the body preview (each text registers with it).
+    preview_select: preview_select::Shared,
+    /// Index of the code block whose copy button was just pressed.
+    copied: Option<usize>,
+    /// The issue thread, read when the Comments tab opens.
+    comments: Option<Vec<gh::Comment>>,
+    comments_busy: bool,
+    comments_error: Option<String>,
+    comment_input: Entity<TextInput>,
     /// "Add tag…" input on the task page; Enter adds the tag.
     tag_input: Entity<TextInput>,
     /// Copy picked files into the workspace (default) vs link by path.
@@ -89,8 +115,6 @@ pub struct TaskDetail {
     commit_keys_requested: Vec<CommitKey>,
     /// The due-date / branch field currently being edited, with its input.
     editing: Option<(Field, Entity<TextInput>)>,
-    /// The note whose title is being renamed in the Notes tab, with its input.
-    editing_note: Option<(NoteId, Entity<TextInput>)>,
     /// Per repo: the commits on this task's branch that are not in the
     /// target branch, and commits that look like they belong to the task.
     /// Both are read in the background and refreshed when their inputs
@@ -101,6 +125,11 @@ pub struct TaskDetail {
 
     pub on_close: Option<CloseHandler>,
     pub on_open_note: Option<OpenNoteHandler>,
+    /// Opens a note straight in Edit mode (the description's Edit button and
+    /// double-click); `on_open_note` opens it for reading.
+    pub on_edit_note: Option<OpenNoteHandler>,
+    /// Opens another task's page (a subtask, or the parent on Back).
+    pub on_open_task: Option<OpenTaskHandler>,
     /// Jump to the commit browser to map more commits.
     pub on_open_history: Option<CloseHandler>,
 }
@@ -139,18 +168,27 @@ impl TaskDetail {
         state: Entity<AppState>,
         theme: GlassTheme,
         task_id: TaskId,
+        issue_sync: Entity<IssueSync>,
     ) -> Self {
-        let new_note_input = cx.new(|cx| TextInput::new(cx, "New note title…", theme));
+        let new_subtask_input = cx.new(|cx| TextInput::new(cx, "New subtask…", theme));
         let me = cx.entity();
-        new_note_input.update(cx, |input, _| {
-            input.on_confirm = Some(Box::new(move |title, window, cx| {
+        new_subtask_input.update(cx, |input, _| {
+            input.on_confirm = Some(Box::new(move |title, _window, cx| {
                 let title = title.trim().to_string();
                 if title.is_empty() {
                     return;
                 }
-                me.update(cx, |this, cx| this.create_note(&title, window, cx));
+                me.update(cx, |this, cx| this.create_subtask(&title, cx));
             }));
         });
+        let comment_input = cx.new(|cx| TextInput::new(cx, "Write a comment", theme));
+        comment_input.update(cx, |input, _| {
+            input.multiline = true;
+            input.min_rows = 3;
+        });
+        cx.observe(&comment_input, |_, _, cx| cx.notify()).detach();
+        // Sync progress and failures show on this page too.
+        cx.observe(&issue_sync, |_, _, cx| cx.notify()).detach();
 
         let tag_input = cx.new(|cx| TextInput::new(cx, "Add tag…", theme));
         let me_for_tags = cx.entity();
@@ -168,13 +206,36 @@ impl TaskDetail {
         })
         .detach();
 
+        // Opens on the description; a task with subtasks and nothing written
+        // opens on its subtasks instead.
+        let tab = {
+            let s = state.read(cx);
+            let has_text = s
+                .body_note(task_id)
+                .and_then(|id| s.read_note_content(id))
+                .is_some_and(|t| !t.trim().is_empty());
+            let has_subtasks = s.tasks.iter().any(|t| t.parent_id == Some(task_id));
+            if !has_text && has_subtasks {
+                Tab::Subtasks
+            } else {
+                Tab::Description
+            }
+        };
+
         Self {
             state,
             theme,
             task_id,
-            tab: Tab::Notes,
-            new_note_input,
-            editing_note: None,
+            tab,
+            new_subtask_input,
+            issue_sync,
+            body_cache: None,
+            preview_select: Default::default(),
+            copied: None,
+            comments: None,
+            comments_busy: false,
+            comments_error: None,
+            comment_input,
             tag_input,
             copy_files: true,
             notice: None,
@@ -186,6 +247,8 @@ impl TaskDetail {
             extras_key: None,
             on_close: None,
             on_open_note: None,
+            on_edit_note: None,
+            on_open_task: None,
             on_open_history: None,
         }
     }
@@ -453,91 +516,170 @@ impl TaskDetail {
             .into_any_element()
     }
 
-    /// Turns a note row into a title input. Enter saves the new title, Escape
-    /// or an empty title leaves it as it was.
-    fn start_rename_note(
-        &mut self,
-        id: NoteId,
-        title: SharedString,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let theme = self.theme;
-        let input = cx.new(|cx| {
-            let mut input = TextInput::new(cx, "Note title…", theme);
-            input.set_text_selected(title);
-            input
-        });
-        let me = cx.entity();
-        let state = self.state.clone();
-        input.update(cx, |input, _| {
-            let me_confirm = me.clone();
-            input.on_confirm = Some(Box::new(move |title, _window, cx| {
-                let title = title.trim().to_string();
-                if !title.is_empty() {
-                    state.update(cx, |state, cx| {
-                        state.rename_note(id, &title);
-                        cx.notify();
-                    });
-                }
-                me_confirm.update(cx, |this, cx| {
-                    this.editing_note = None;
-                    cx.notify();
-                });
-            }));
-            input.keep_on_confirm = true;
-            input.on_cancel = Some(Box::new(move |_window, cx| {
-                me.update(cx, |this, cx| {
-                    this.editing_note = None;
-                    cx.notify();
-                });
-            }));
-        });
-        let focus = input.read(cx).focus_handle.clone();
-        window.focus(&focus, cx);
-        self.editing_note = Some((id, input));
-        cx.notify();
-    }
-
-    /// Creates a checklist note, titled from the input (or "Todo") and opens it.
-    fn create_todo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let typed = self.new_note_input.read(cx).content.trim().to_string();
-        let title = if typed.is_empty() {
-            "Todo".into()
-        } else {
-            typed
-        };
-        self.new_note_input
-            .update(cx, |input, cx| input.reset(window, cx));
-        self.create_note_of(&title, NoteKind::Todo, window, cx);
-    }
-
-    fn create_note(&mut self, title: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.create_note_of(title, NoteKind::Note, window, cx);
-    }
-
-    fn create_note_of(
-        &mut self,
-        title: &str,
-        kind: NoteKind,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let task = self.task_id;
-        let created = self.state.update(cx, |state, cx| {
-            let id = state.create_note_of_kind(Some(task), title, kind);
+    /// Adds a subtask under this task. It is local until published (or
+    /// until this task is an issue and the subtask is published too).
+    fn create_subtask(&mut self, title: &str, cx: &mut Context<Self>) {
+        let parent = self.task_id;
+        let made = self.state.update(cx, |state, cx| {
+            let id = state.create_subtask(parent, title);
             cx.notify();
             id
         });
-        match created {
-            Some(id) => {
-                if let Some(open) = &self.on_open_note {
-                    open(id, title.to_string().into(), window, cx);
-                }
-            }
-            None => self.notice = Some(("Couldn't create the note".into(), true)),
+        if made.is_none() {
+            self.notice = Some(("Couldn't create the subtask".into(), true));
         }
         cx.notify();
+    }
+
+    /// Opens the task's body note in the note page (made first if the task
+    /// has none yet).
+    fn open_body_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let task = self.task_id;
+        let note = self.state.update(cx, |state, cx| {
+            let id = state.ensure_body_note(task);
+            cx.notify();
+            id.and_then(|id| {
+                state
+                    .notes
+                    .iter()
+                    .find(|n| n.id == id)
+                    .map(|n| (id, n.title.clone()))
+            })
+        });
+        match note {
+            Some((id, title)) => {
+                if let Some(open) = &self.on_edit_note {
+                    open(id, title.into(), window, cx);
+                }
+            }
+            None => self.notice = Some(("Couldn't open the description".into(), true)),
+        }
+        cx.notify();
+    }
+
+    /// Opens another task's page (a subtask, or the parent).
+    fn open_task(&mut self, id: TaskId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(open) = &self.on_open_task {
+            open(id, false, window, cx);
+        }
+    }
+
+    /// Opens this task's issue on github.com.
+    fn open_issue_in_browser(&mut self, cx: &mut Context<Self>) {
+        let target = {
+            let state = self.state.read(cx);
+            state.issue_link(self.task_id).and_then(|link| {
+                let repo = state.repos.iter().find(|r| r.id == link.repo_id)?;
+                Some((repo.path.clone(), link.number))
+            })
+        };
+        let Some((path, number)) = target else { return };
+        cx.spawn(async move |this, cx| {
+            let url = cx
+                .background_executor()
+                .spawn(async move {
+                    remote_for(&path).map(|r| {
+                        format!("https://github.com/{}/{}/issues/{number}", r.owner, r.name)
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let result = match url {
+                    Some(url) => crate::external::open_url(&url),
+                    None => Err("The repo has no GitHub remote.".into()),
+                };
+                if let Err(message) = result {
+                    this.notice = Some((message, true));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Reads the issue's comments in the background.
+    fn load_comments(&mut self, cx: &mut Context<Self>) {
+        let target = {
+            let state = self.state.read(cx);
+            state.issue_link(self.task_id).and_then(|link| {
+                let repo = state.repos.iter().find(|r| r.id == link.repo_id)?;
+                Some((repo.path.clone(), link.number))
+            })
+        };
+        let Some((path, number)) = target else {
+            self.comments = None;
+            return;
+        };
+        if self.comments_busy {
+            return;
+        }
+        self.comments_busy = true;
+        self.comments_error = None;
+        cx.notify();
+        let task = self.task_id;
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let token = load_token().ok_or("Sign in to GitHub in Settings first.")?;
+                    let remote = remote_for(&path).ok_or("The repo has no GitHub remote.")?;
+                    gh::list_comments(&token, &remote, number).map_err(|e| e.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.comments_busy = false;
+                if this.task_id == task {
+                    match result {
+                        Ok(list) => this.comments = Some(list),
+                        Err(message) => this.comments_error = Some(message),
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Posts the written comment to the issue.
+    fn post_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.comment_input.read(cx).content.trim().to_string();
+        if text.is_empty() || self.comments_busy {
+            return;
+        }
+        let target = {
+            let state = self.state.read(cx);
+            state.issue_link(self.task_id).and_then(|link| {
+                let repo = state.repos.iter().find(|r| r.id == link.repo_id)?;
+                Some((repo.path.clone(), link.number))
+            })
+        };
+        let Some((path, number)) = target else { return };
+        self.comments_busy = true;
+        self.comments_error = None;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let token = load_token().ok_or("Sign in to GitHub in Settings first.")?;
+                    let remote = remote_for(&path).ok_or("The repo has no GitHub remote.")?;
+                    gh::add_comment(&token, &remote, number, &text).map_err(|e| e.to_string())
+                })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.comments_busy = false;
+                match result {
+                    Ok(comment) => {
+                        this.comments.get_or_insert_with(Vec::new).push(comment);
+                        this.comment_input
+                            .update(cx, |input, cx| input.reset(window, cx));
+                    }
+                    Err(message) => this.comments_error = Some(message),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Loads the branch view and suggested commits in the background. Skips
@@ -814,69 +956,231 @@ impl TaskDetail {
             .into_any_element()
     }
 
-    fn notes_tab(&mut self, notes: Vec<Note>, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /// The task's body: its first note, rendered. Editing opens the note
+    /// page. Older tasks may carry further notes; they are listed below.
+    fn description_tab(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = self.theme;
-        let mut out: Vec<AnyElement> = vec![div()
-            .flex()
-            .items_center()
-            .gap(theme.space_2)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .child(self.new_note_input.clone()),
-            )
-            .child(
-                button(
+        let task_id = self.task_id;
+        let (body, extras) = {
+            let state = self.state.read(cx);
+            let body = state.body_note(task_id).and_then(|id| {
+                state
+                    .notes
+                    .iter()
+                    .find(|n| n.id == id)
+                    .map(|n| (id, n.updated_at))
+            });
+            (body, state.extra_notes(task_id))
+        };
+        let mut out: Vec<AnyElement> = Vec::new();
+        match body {
+            None => out.push(
+                empty_state(
                     &theme,
-                    "note-new-todo",
-                    ButtonKind::Secondary,
-                    Some(Icon::ListChecks),
-                    "Todo",
+                    Icon::FileText,
+                    "No description yet",
+                    "Describe the task in markdown: context, decisions, scripts, SQL.",
+                    Some(
+                        button(
+                            &theme,
+                            "task-add-description",
+                            ButtonKind::Primary,
+                            Some(Icon::Pencil),
+                            "Add description",
+                        )
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.open_body_note(window, cx)),
+                        )
+                        .into_any_element(),
+                    ),
                 )
-                .on_click(cx.listener(|this, _, window, cx| this.create_todo(window, cx))),
-            )
-            .into_any_element()];
-        out.push(
+                .into_any_element(),
+            ),
+            Some((id, updated)) => {
+                let stale = self
+                    .body_cache
+                    .as_ref()
+                    .is_none_or(|(cached, at, _)| (*cached, *at) != (id, updated));
+                if stale {
+                    let content = self
+                        .state
+                        .read(cx)
+                        .read_note_content(id)
+                        .unwrap_or_default();
+                    self.body_cache = Some((id, updated, markdown::parse_mapped(&content).0));
+                }
+                let blocks: &[Block] = self.body_cache.as_ref().map_or(&[], |(_, _, b)| b);
+                out.push(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(section_label(&theme, "Description"))
+                        .child(
+                            button(
+                                &theme,
+                                "task-edit-description",
+                                ButtonKind::Secondary,
+                                Some(Icon::Pencil),
+                                "Edit",
+                            )
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.open_body_note(window, cx)),
+                            ),
+                        )
+                        .into_any_element(),
+                );
+                if blocks.is_empty() {
+                    out.push(
+                        div()
+                            .t_small()
+                            .text_color(theme.text_muted)
+                            .child(
+                                "The description is empty. Double-click or press Edit to write it.",
+                            )
+                            .into_any_element(),
+                    );
+                }
+                let me = cx.entity();
+                let edit_me = me.clone();
+                let hook = markdown_view::CopyHook {
+                    select: self.preview_select.clone(),
+                    on_edit: Some(std::rc::Rc::new(move |_block, window, cx| {
+                        edit_me.update(cx, |this, cx| this.open_body_note(window, cx));
+                    })),
+                    copied: self.copied,
+                    on_copy: std::rc::Rc::new(move |index, _text, _window, cx| {
+                        me.update(cx, |this, cx| {
+                            this.copied = Some(index);
+                            cx.notify();
+                            cx.spawn(async move |this, cx| {
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_millis(1600))
+                                    .await;
+                                let _ = this.update(cx, |this, cx| {
+                                    if this.copied == Some(index) {
+                                        this.copied = None;
+                                        cx.notify();
+                                    }
+                                });
+                            })
+                            .detach();
+                        });
+                    }),
+                    // The checklist boxes are edited in the note page.
+                    on_toggle: std::rc::Rc::new(|_, _, _| {}),
+                    on_link: std::rc::Rc::new(|href, _window, _cx| {
+                        // Web and mail links only; the target is untrusted.
+                        let _ = crate::external::open_url(&href);
+                    }),
+                };
+                out.push(
+                    div()
+                        .id("task-description")
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(theme.space_3)
+                        .children(markdown_view::render_blocks(blocks, &theme, &hook))
+                        .into_any_element(),
+                );
+            }
+        }
+        if !extras.is_empty() {
+            out.push(self.section_header("More notes".into()));
+            out.extend(extras.into_iter().map(|note| {
+                let id = note.id;
+                let title: SharedString = note.title.clone().into();
+                self.row()
+                    .id(("task-note", id.0 as u64))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(theme.surface_hover))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if let Some(open) = &this.on_open_note {
+                            open(id, title.clone(), window, cx);
+                        }
+                    }))
+                    .child(icon(note_icon(note.kind), 16.0, theme.text_muted))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .t_body()
+                            .text_color(theme.text_primary)
+                            .truncate()
+                            .child(note.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .t_small()
+                            .t_code()
+                            .text_color(theme.text_muted)
+                            .child(format!("updated {}", format_date(note.updated_at))),
+                    )
+                    .into_any_element()
+            }));
+        }
+        out
+    }
+
+    /// Direct subtasks, each a task with its own page. On GitHub they are
+    /// sub-issues once published.
+    fn subtasks_tab(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let theme = self.theme;
+        let task_id = self.task_id;
+        let mut children: Vec<(Task, usize, Option<u64>)> = {
+            let state = self.state.read(cx);
+            state
+                .tasks
+                .iter()
+                .filter(|t| t.parent_id == Some(task_id))
+                .map(|t| {
+                    let grand = state
+                        .tasks
+                        .iter()
+                        .filter(|g| g.parent_id == Some(t.id))
+                        .count();
+                    (t.clone(), grand, state.issue_link(t.id).map(|l| l.number))
+                })
+                .collect()
+        };
+        // Most recently updated first.
+        children.sort_by_key(|(t, _, _)| std::cmp::Reverse(t.updated_at));
+        let mut out: Vec<AnyElement> = vec![
+            div()
+                .child(self.new_subtask_input.clone())
+                .into_any_element(),
             div()
                 .px(theme.space_1)
                 .t_small()
                 .text_color(theme.text_muted)
-                .child("Notes are markdown. Enter creates the note and opens it.")
+                .child("Subtasks are tasks: each has its own description, files and commits.")
                 .into_any_element(),
-        );
-        if notes.is_empty() {
+        ];
+        if children.is_empty() {
             out.push(self.empty(
-                Icon::StickyNote,
-                "No notes on this task",
-                "Notes are markdown files: write down decisions, scripts or SQL for this task.",
+                Icon::ListChecks,
+                "No subtasks",
+                "Break the task down: type a title above and press Enter.",
             ));
         }
-        let editing_note = self.editing_note.clone();
-        let rows = notes.into_iter().map(|note| {
-            let id = note.id;
-            let title: SharedString = note.title.clone().into();
-            // The row being renamed becomes its title input.
-            if let Some((_, input)) = editing_note.as_ref().filter(|(e, _)| *e == id) {
-                return div()
-                    .px(theme.space_2)
-                    .py(theme.space_2)
-                    .border_b_1()
-                    .border_color(theme.border_subtle)
-                    .child(input.clone())
-                    .into_any_element();
-            }
-            let rename_title = title.clone();
+        let rows = children.into_iter().map(|(child, grand, number)| {
+            let id = child.id;
+            let color = status_style(&theme, child.status).1;
+            let updated = format_date(child.updated_at);
+            let subtitle = match grand {
+                0 => format!("updated {updated}"),
+                1 => format!("updated {updated} · 1 subtask"),
+                n => format!("updated {updated} · {n} subtasks"),
+            };
+            // A flat row like the project page's: icon, title over an
+            // "updated" line, and the status as a tag at the far right.
             self.row()
-                .id(("task-note", id.0 as u64))
+                .id(("subtask", id.0 as u64))
                 .cursor_pointer()
                 .hover(move |s| s.bg(theme.surface_hover))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    if let Some(open) = &this.on_open_note {
-                        open(id, title.clone(), window, cx);
-                    }
-                }))
-                .child(icon(note_icon(note.kind), 16.0, theme.text_muted))
+                .on_click(cx.listener(move |this, _, window, cx| this.open_task(id, window, cx)))
+                .child(icon(Icon::FileText, 16.0, theme.text_muted))
                 .child(
                     div()
                         .flex()
@@ -886,56 +1190,36 @@ impl TaskDetail {
                         .child(
                             div()
                                 .t_body()
-                                .text_color(theme.text_primary)
+                                .text_color(if child.status == TaskStatus::Done {
+                                    theme.text_secondary
+                                } else {
+                                    theme.text_primary
+                                })
                                 .truncate()
-                                .child(note.title.clone()),
-                        )
-                        .child(div().t_small().t_code().text_color(theme.text_muted).child(
-                            match note.kind {
-                                NoteKind::Note => {
-                                    format!("updated {}", format_date(note.updated_at))
-                                }
-                                kind => format!(
-                                    "{} · updated {}",
-                                    kind.label().to_lowercase(),
-                                    format_date(note.updated_at)
-                                ),
-                            },
-                        )),
-                )
-                .child(
-                    row_actions()
-                        .child(
-                            icon_button(
-                                &theme,
-                                Icon::Pencil,
-                                ("task-note-rename", id.0 as u64),
-                                theme.text_primary,
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, window, cx| {
-                                    this.start_rename_note(id, rename_title.clone(), window, cx);
-                                    cx.stop_propagation();
-                                },
-                            )),
+                                .child(child.title.clone()),
                         )
                         .child(
-                            icon_button(
-                                &theme,
-                                Icon::Trash,
-                                ("task-note-delete", id.0 as u64),
-                                theme.danger,
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    this.state.update(cx, |state, cx| {
-                                        state.delete_note(id);
-                                        cx.notify();
-                                    });
-                                    cx.stop_propagation();
-                                },
-                            )),
+                            div()
+                                .t_small()
+                                .t_code()
+                                .text_color(theme.text_muted)
+                                .child(subtitle),
                         ),
+                )
+                .children(number.map(|n| chip(&theme, format!("#{n}"), theme.text_secondary)))
+                .child(
+                    div()
+                        .id(("subtask-status", id.0 as u64))
+                        .flex_none()
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.state.update(cx, |state, cx| {
+                                state.cycle_task_status(id);
+                                cx.notify();
+                            });
+                            cx.stop_propagation();
+                        }))
+                        .child(chip(&theme, status_label(child.status), color)),
                 )
                 .into_any_element()
         });
@@ -946,6 +1230,92 @@ impl TaskDetail {
                 .border_t_1()
                 .border_color(theme.border_subtle)
                 .children(rows.collect::<Vec<_>>())
+                .into_any_element(),
+        );
+        out
+    }
+
+    /// The issue's comment thread (GitHub only).
+    fn comments_tab(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let theme = self.theme;
+        if self.comments.is_none() && !self.comments_busy && self.comments_error.is_none() {
+            self.load_comments(cx);
+        }
+        let mut out: Vec<AnyElement> = Vec::new();
+        if let Some(message) = self.comments_error.clone() {
+            out.push(notice(&theme, message, true).into_any_element());
+        }
+        match &self.comments {
+            None => out.push(
+                div()
+                    .t_small()
+                    .text_color(theme.text_muted)
+                    .child(if self.comments_busy {
+                        "Loading comments…"
+                    } else {
+                        "Comments could not be loaded."
+                    })
+                    .into_any_element(),
+            ),
+            Some(list) if list.is_empty() => out.push(
+                div()
+                    .t_small()
+                    .text_color(theme.text_muted)
+                    .child("No comments yet.")
+                    .into_any_element(),
+            ),
+            Some(list) => {
+                for comment in list {
+                    out.push(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(theme.space_1)
+                            .p(theme.space_3)
+                            .rounded(theme.radius_md)
+                            .border_1()
+                            .border_color(theme.border_subtle)
+                            .bg(theme.surface_sunken)
+                            .child(div().t_small().t_code().text_color(theme.text_muted).child(
+                                format!(
+                                    "{} · {}",
+                                    comment.author,
+                                    comment.created_at.get(..10).unwrap_or(&comment.created_at)
+                                ),
+                            ))
+                            .child(
+                                div()
+                                    .t_body()
+                                    .text_color(theme.text_secondary)
+                                    .child(comment.body.clone()),
+                            )
+                            .into_any_element(),
+                    );
+                }
+            }
+        }
+        let has_text = !self.comment_input.read(cx).content.trim().is_empty();
+        out.push(
+            div()
+                .flex()
+                .flex_col()
+                .gap(theme.space_2)
+                .child(self.comment_input.clone())
+                .child(
+                    div().flex().justify_end().child(
+                        button(
+                            &theme,
+                            "task-post-comment",
+                            ButtonKind::Primary,
+                            Some(Icon::Upload),
+                            "Comment",
+                        )
+                        .when(!has_text || self.comments_busy, |b| b.opacity(0.5))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.post_comment(window, cx);
+                        })),
+                    ),
+                )
                 .into_any_element(),
         );
         out
@@ -1513,7 +1883,7 @@ impl Render for TaskDetail {
             self.refresh_commits(cx);
         }
 
-        let (task, trail, notes, attachments, links) = {
+        let (task, trail, subtasks, attachments, links, issue, github_ready) = {
             let state = self.state.read(cx);
             let task = state.tasks.iter().find(|t| t.id == self.task_id).cloned();
             // Ancestors, root first, for the breadcrumb.
@@ -1536,9 +1906,15 @@ impl Render for TaskDetail {
             (
                 task,
                 trail,
-                state.notes_for_task(self.task_id),
+                state
+                    .tasks
+                    .iter()
+                    .filter(|t| t.parent_id == Some(self.task_id))
+                    .count(),
                 state.attachments_for_task(self.task_id),
                 links,
+                state.issue_link(self.task_id).cloned(),
+                !state.repos.is_empty(),
             )
         };
 
@@ -1574,13 +1950,26 @@ impl Render for TaskDetail {
                 .into_any_element();
         };
 
-        let counts = (notes.len(), attachments.len(), links.len());
+        let counts = (subtasks, attachments.len(), links.len());
+        // The Comments tab exists only for issues; fall back if it vanished.
+        if self.tab == Tab::Comments && issue.is_none() {
+            self.tab = Tab::Description;
+        }
         let body = match self.tab {
-            Tab::Notes => self.notes_tab(notes, cx),
+            Tab::Description => self.description_tab(cx),
+            Tab::Subtasks => self.subtasks_tab(cx),
+            Tab::Comments => self.comments_tab(cx),
             Tab::Attachments => self.attachments_tab(attachments, cx),
             Tab::Commits => self.commits_tab(links, cx),
         };
         let (status_glyph, status_color) = status_style(&theme, task.status);
+        let parent_id = task.parent_id;
+        let github_on = self.issue_sync.read(cx).enabled(cx);
+        let (sync_error, sync_notice, sync_busy) = {
+            let sync = self.issue_sync.read(cx);
+            (sync.error.clone(), sync.notice.clone(), sync.busy > 0)
+        };
+        let issue_number = issue.as_ref().map(|l| l.number);
 
         div()
             .flex()
@@ -1602,9 +1991,18 @@ impl Render for TaskDetail {
                             .items_center()
                             .gap(theme.space_3)
                             .child(back_button(&theme, "task-back").on_click(cx.listener(
-                                |this, _, window, cx| {
-                                    if let Some(close) = &this.on_close {
-                                        close(window, cx);
+                                move |this, _, window, cx| {
+                                    // A subtask goes back to its parent, a top-level task
+                                    // back to the project page.
+                                    match (parent_id, &this.on_open_task) {
+                                        (Some(parent), Some(open)) => {
+                                            open(parent, true, window, cx)
+                                        }
+                                        _ => {
+                                            if let Some(close) = &this.on_close {
+                                                close(window, cx);
+                                            }
+                                        }
                                     }
                                 },
                             )))
@@ -1645,6 +2043,54 @@ impl Render for TaskDetail {
                                             ),
                                     ),
                             )
+                            .child(div().flex_none().child(self.details_row(&task, cx)))
+                            .child(div().flex_none().child(self.tags_row(&task, cx)))
+                            .children(match issue_number {
+                                Some(number) => Some(
+                                    div()
+                                        .id("task-issue-link")
+                                        .flex()
+                                        .flex_none()
+                                        .items_center()
+                                        .gap(theme.space_2)
+                                        .h(px(28.0))
+                                        .px(theme.space_3)
+                                        .rounded(theme.radius_sm)
+                                        .border_1()
+                                        .border_color(theme.border_light)
+                                        .text_color(theme.text_secondary)
+                                        .t_small()
+                                        .t_code()
+                                        .cursor_pointer()
+                                        .hover(move |s| s.bg(theme.surface_hover))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.open_issue_in_browser(cx);
+                                        }))
+                                        .child(icon(Icon::CircleDot, 14.0, theme.text_secondary))
+                                        .child(format!("#{number}"))
+                                        .into_any_element(),
+                                ),
+                                None if github_on && github_ready => Some(
+                                    button(
+                                        &theme,
+                                        "task-publish",
+                                        ButtonKind::Secondary,
+                                        Some(Icon::Upload),
+                                        if sync_busy {
+                                            "Publishing…"
+                                        } else {
+                                            "Publish to GitHub"
+                                        },
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let task = this.task_id;
+                                        this.issue_sync
+                                            .update(cx, |sync, cx| sync.publish(task, cx));
+                                    }))
+                                    .into_any_element(),
+                                ),
+                                None => None,
+                            })
                             .child(
                                 div()
                                     .id("task-detail-status")
@@ -1671,21 +2117,35 @@ impl Render for TaskDetail {
                                     .child(status_label(task.status)),
                             ),
                     )
-                    .child(self.details_row(&task, cx))
-                    .child(self.tags_row(&task, cx))
                     .child(
                         tab_bar(&theme)
                             .child(
                                 tab(
                                     &theme,
-                                    "tab-notes",
-                                    "Notes",
-                                    Some(counts.0),
-                                    self.tab == Tab::Notes,
+                                    "tab-description",
+                                    "Description",
+                                    None,
+                                    self.tab == Tab::Description,
                                 )
                                 .on_click(cx.listener(
                                     |this, _, _, cx| {
-                                        this.tab = Tab::Notes;
+                                        this.tab = Tab::Description;
+                                        this.notice = None;
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(
+                                tab(
+                                    &theme,
+                                    "tab-subtasks",
+                                    "Subtasks",
+                                    Some(counts.0),
+                                    self.tab == Tab::Subtasks,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.tab = Tab::Subtasks;
                                         this.notice = None;
                                         cx.notify();
                                     },
@@ -1723,8 +2183,38 @@ impl Render for TaskDetail {
                                         cx.notify();
                                     },
                                 )),
-                            ),
+                            )
+                            .children(issue_number.map(|_| {
+                                tab(
+                                    &theme,
+                                    "tab-comments",
+                                    "Comments",
+                                    None,
+                                    self.tab == Tab::Comments,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.tab = Tab::Comments;
+                                        this.notice = None;
+                                        this.load_comments(cx);
+                                        cx.notify();
+                                    },
+                                ))
+                            })),
                     ),
+            )
+            .when_some(
+                sync_error
+                    .map(|m| (m, true))
+                    .or(sync_notice.map(|m| (m, false))),
+                |d, (message, is_error)| {
+                    d.child(
+                        div()
+                            .px(theme.space_6)
+                            .pt(theme.space_3)
+                            .child(notice(&theme, message, is_error)),
+                    )
+                },
             )
             .when_some(self.notice.clone(), |d, (message, is_error)| {
                 d.child(

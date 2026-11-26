@@ -7,6 +7,9 @@
 
 use ureq::serde_json::{self, Value};
 
+mod issues;
+pub use issues::*;
+
 const API: &str = "https://api.github.com";
 const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";

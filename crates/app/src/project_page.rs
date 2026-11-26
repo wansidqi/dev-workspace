@@ -6,12 +6,9 @@
 //! rail beside it (stacked below on narrow windows). Settings and backup live
 //! in their own view, not here.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::motion;
-use crate::task_tree::{
-    tree_guide_lines, tree_guides, visible_rows, RowMotion, TreeGeometry, TreeGuides,
-};
 use crate::theme::{GlassTheme, TypeScale};
 use crate::ui::{
     button, chip, empty_state, filter_chip, icon, icon_button, section_label, status_style,
@@ -30,22 +27,6 @@ const NOTE_HOVER_KEY_BASE: u64 = 3_000_000;
 /// tasks; below it the rail stacks underneath.
 const TWO_COLUMN_MIN_WIDTH: f32 = 960.0;
 const RAIL_WIDTH: f32 = 340.0;
-
-/// The fold or unfold of a task that is animating. `leaving` is a fold, whose
-/// rows stay a moment to fade out; `token` makes each click a fresh animation.
-#[derive(Debug, Clone)]
-pub struct TreeMotion {
-    pub tasks: HashSet<TaskId>,
-    pub leaving: bool,
-    pub token: u64,
-}
-
-/// Geometry of a task row the tree guides must line up with.
-const TREE: TreeGeometry = TreeGeometry {
-    indent: 22.0,
-    icon: 24.0,
-    row_height: 40.0,
-};
 
 /// Colour for each task status, shared by the strip, rows and chips.
 fn status_color(theme: &GlassTheme, status: TaskStatus) -> Hsla {
@@ -215,19 +196,24 @@ impl Root {
                 .iter()
                 .any(|(name, _)| name.to_lowercase() == wanted.to_lowercase())
         });
-        let tasks: Vec<(Task, usize)> = match &active_tag {
+        let mut tasks: Vec<(Task, usize)> = match &active_tag {
             Some(tag) => tasks_flat
                 .into_iter()
                 .filter(|(t, _)| t.has_tag(tag))
                 .map(|(t, _)| (t, 0))
                 .collect(),
-            None => tasks_flat,
+            None => tasks_flat
+                .into_iter()
+                .filter(|(_, depth)| *depth == 0)
+                .collect(),
         };
-        // Per task: (notes, attachments, mapped commits), for row badges.
+        // Most recently updated first.
+        tasks.sort_by_key(|(t, _)| std::cmp::Reverse(t.updated_at));
+        // Per task: (direct subtasks, attachments, mapped commits), for row badges.
         let mut task_counts: HashMap<TaskId, (usize, usize, usize)> = HashMap::new();
-        for note in state.notes.iter().filter(|n| n.task_id.is_some()) {
-            if let Some(t) = note.task_id {
-                task_counts.entry(t).or_default().0 += 1;
+        for task in state.tasks.iter() {
+            if let Some(parent) = task.parent_id {
+                task_counts.entry(parent).or_default().0 += 1;
             }
         }
         for attachment in &state.attachments {
@@ -261,14 +247,16 @@ impl Root {
         let two_columns = canvas_width >= TWO_COLUMN_MIN_WIDTH;
 
         let header = self.project_header(&project, &raw_tasks, repos.len(), cx);
-        let tasks_section = self.tasks_section(
-            &tasks,
-            raw_tasks.is_empty(),
-            &task_counts,
-            &project_tags,
-            active_tag.as_deref(),
-            cx,
-        );
+        let main_section: AnyElement = self
+            .tasks_section(
+                &tasks,
+                raw_tasks.is_empty(),
+                &task_counts,
+                &project_tags,
+                active_tag.as_deref(),
+                cx,
+            )
+            .into_any_element();
         let rail = self.project_rail(notes, repos, &repo_link_counts, &unreadable_repos, cx);
 
         let body = if two_columns {
@@ -276,7 +264,7 @@ impl Root {
                 .flex()
                 .items_start()
                 .gap(theme.space_8)
-                .child(div().flex_1().min_w(px(0.0)).child(tasks_section))
+                .child(div().flex_1().min_w(px(0.0)).child(main_section))
                 .child(
                     div()
                         .flex_none()
@@ -291,7 +279,7 @@ impl Root {
                 .flex()
                 .flex_col()
                 .gap(theme.space_8)
-                .child(tasks_section)
+                .child(main_section)
                 .child(rail)
         };
 
@@ -548,84 +536,10 @@ impl Root {
                 }))
         });
 
-        // Fold away the subtrees of collapsed tasks. Guides are drawn from the
-        // rows that remain, so a folded parent shows no trunk into nothing.
-        let all_depths: Vec<usize> = tasks.iter().map(|(_, d)| *d).collect();
-        let ids: Vec<TaskId> = tasks.iter().map(|(t, _)| t.id).collect();
-        let motion = self.tree_motion.as_ref().map(|m| (&m.tasks, m.leaving));
-        let shown = visible_rows(&all_depths, &ids, &self.collapsed_tasks, motion);
-        let depths: Vec<usize> = shown.iter().map(|(ix, _)| all_depths[*ix]).collect();
-        let token = self.tree_motion.as_ref().map_or(0, |m| m.token);
-        let rows: Vec<AnyElement> = shown
+        let rows: Vec<AnyElement> = tasks
             .iter()
-            .enumerate()
-            .map(|(vis, (ix, row_motion))| {
-                let (task, depth) = &tasks[*ix];
-                let guides = tree_guides(&depths, vis);
-                let descendants = all_depths[ix + 1..]
-                    .iter()
-                    .take_while(|d| **d > *depth)
-                    .count();
-                let collapsed = self.collapsed_tasks.contains(&task.id);
-                let row = self.task_row(
-                    task,
-                    *depth,
-                    &guides,
-                    task_counts,
-                    editing_task_id,
-                    (descendants, collapsed),
-                    cx,
-                );
-                // Only rows an expand just revealed (or a collapse is fading
-                // out) move; everything else stays put. The token makes each
-                // expand a new element, so it plays once per click.
-                let key = (u64::from(token as u32) << 32) | task.id.0 as u64;
-                match row_motion {
-                    RowMotion::Still => row,
-                    RowMotion::Reveal(n) => motion::enter_after(
-                        div().child(row),
-                        ("task-reveal", key),
-                        *n,
-                        motion::STANDARD,
-                    )
-                    .into_any_element(),
-                    RowMotion::Leave => {
-                        motion::leave(div().child(row), ("task-leave", key), motion::FAST)
-                            .into_any_element()
-                    }
-                }
-            })
+            .map(|(task, _)| self.task_row(task, task_counts, editing_task_id, cx))
             .collect();
-
-        // Tasks that have subtasks, for the fold-all button.
-        let parents: Vec<TaskId> = tasks
-            .iter()
-            .enumerate()
-            .filter(|(ix, (_, depth))| tasks.get(ix + 1).is_some_and(|(_, next)| next > depth))
-            .map(|(_, (task, _))| task.id)
-            .collect();
-        let all_folded =
-            !parents.is_empty() && parents.iter().all(|id| self.collapsed_tasks.contains(id));
-        let fold_all = (!parents.is_empty()).then(|| {
-            button(
-                &theme,
-                "tasks-fold-all",
-                ButtonKind::Ghost,
-                Some(if all_folded {
-                    Icon::ChevronDown
-                } else {
-                    Icon::ChevronUp
-                }),
-                if all_folded {
-                    "Expand all"
-                } else {
-                    "Collapse all"
-                },
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.toggle_all_collapsed(&parents, cx);
-            }))
-        });
 
         div()
             .flex()
@@ -642,16 +556,21 @@ impl Root {
                             .flex()
                             .items_baseline()
                             .gap(theme.space_2)
-                            .child(div().t_heading().text_color(theme.text_primary).child("Tasks"))
+                            .child(
+                                div()
+                                    .t_heading()
+                                    .text_color(theme.text_primary)
+                                    .child("Tasks"),
+                            )
                             .child(
                                 div()
                                     .t_small()
                                     .t_code()
                                     .text_color(theme.text_muted)
                                     .child(tasks.len().to_string()),
-                            ),
-                    )
-                    .children(fold_all),
+                            )
+                            .child(self.sync_status(cx)),
+                    ),
             )
             .children(filters)
             .child(self.new_task_input.clone())
@@ -686,96 +605,47 @@ impl Root {
             })
     }
 
-    /// Folds or unfolds one task's subtasks.
-    fn toggle_task_collapsed(&mut self, id: TaskId, cx: &mut Context<Self>) {
-        let leaving = self.collapsed_tasks.insert(id);
-        if !leaving {
-            self.collapsed_tasks.remove(&id);
-        }
-        self.start_tree_motion(HashSet::from([id]), leaving, cx);
-    }
-
-    /// Folds every task that has subtasks, or unfolds them all when they are
-    /// already all folded. `parents` are the tasks that have subtasks.
-    fn toggle_all_collapsed(&mut self, parents: &[TaskId], cx: &mut Context<Self>) {
-        let open: HashSet<TaskId> = parents
-            .iter()
-            .copied()
-            .filter(|id| !self.collapsed_tasks.contains(id))
-            .collect();
-        if open.is_empty() {
-            let folded: HashSet<TaskId> = parents.iter().copied().collect();
-            self.collapsed_tasks.clear();
-            self.start_tree_motion(folded, false, cx);
-        } else {
-            self.collapsed_tasks.extend(parents.iter().copied());
-            self.start_tree_motion(open, true, cx);
-        }
-    }
-
-    /// Animates a fold or unfold. Unfolding fades the revealed rows in; folding
-    /// keeps them on screen for one short fade before they go.
-    fn start_tree_motion(&mut self, tasks: HashSet<TaskId>, leaving: bool, cx: &mut Context<Self>) {
-        self.tree_motion_token += 1;
-        let token = self.tree_motion_token;
-        self.tree_motion = Some(TreeMotion {
-            tasks,
-            leaving,
-            token,
-        });
-        if leaving {
-            cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(motion::FAST + std::time::Duration::from_millis(20))
-                    .await;
-                let _ = this.update(cx, |this, cx| {
-                    if this.tree_motion.as_ref().is_some_and(|m| m.token == token) {
-                        this.tree_motion = None;
-                        cx.notify();
-                    }
-                });
-            })
-            .detach();
-        }
-        cx.notify();
-    }
-
-    /// One task row. The status icon cycles the status; the rest of the row
-    /// opens the task. Row actions appear while it is hovered.
+    /// One task row, a flat list row: icon, the title over an "updated" line,
+    /// tags and counts, and the status as a tag label at the far right (click
+    /// it to cycle). The rest of the row opens the task; row actions appear
+    /// while it is hovered. Subtasks are not listed here, only counted; they
+    /// live on the task's page.
     fn task_row(
         &mut self,
         task: &Task,
-        depth: usize,
-        guides: &TreeGuides,
         task_counts: &HashMap<TaskId, (usize, usize, usize)>,
         editing_task_id: Option<TaskId>,
-        // (rows nested under this task, whether they are folded away)
-        fold: (usize, bool),
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (descendants, collapsed) = fold;
         let theme = self.theme;
         let id = task.id;
-        let indent = px(depth as f32 * TREE.indent);
 
         if editing_task_id == Some(id) {
             if let Some((_, input)) = self.editing_task.as_ref() {
                 return div()
-                    .py(theme.space_1)
-                    .ml(indent)
+                    .px(theme.space_2)
+                    .py(theme.space_2)
+                    .border_b_1()
+                    .border_color(theme.border_subtle)
                     .child(input.clone())
                     .into_any_element();
             }
         }
 
         let status = task.status;
-        let (status_icon, color) = status_style(&theme, status);
+        let color = status_color(&theme, status);
         let title = task.title.clone();
-        let (note_count, file_count, commit_count) =
+        let (subtasks, file_count, commit_count) =
             task_counts.get(&id).copied().unwrap_or_default();
+        let issue_number = self.state.read(cx).issue_link(id).map(|l| l.number);
         let key = TASK_HOVER_KEY_BASE + id.0 as u64;
         let hovered = self.hovered == Some(key);
-        let done = status == TaskStatus::Done;
+        let updated = date::format_date(task.updated_at);
+        let subtitle = match subtasks {
+            0 => format!("updated {updated}"),
+            1 => format!("updated {updated} · 1 subtask"),
+            n => format!("updated {updated} · {n} subtasks"),
+        };
 
         div()
             .id(("task", id.0 as u64))
@@ -783,12 +653,11 @@ impl Root {
             .flex()
             .items_center()
             .gap(theme.space_3)
-            .h(px(TREE.row_height))
-            .pl(indent + theme.space_1)
-            .pr(theme.space_2)
-            .when(guides.group_end, |d| {
-                d.border_b_1().border_color(theme.border_subtle)
-            })
+            .min_h(px(48.0))
+            .px(theme.space_2)
+            .py(theme.space_2)
+            .border_b_1()
+            .border_color(theme.border_subtle)
             .cursor_pointer()
             .when(hovered, |d| d.bg(theme.surface_hover))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
@@ -797,81 +666,32 @@ impl Root {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.open_task_detail(id, cx);
             }))
-            .children(tree_guide_lines(&theme, guides, TREE, theme.space_1))
+            .child(icon(Icon::FileText, 16.0, theme.text_muted))
             .child(
                 div()
-                    .id(("task-status", id.0 as u64))
                     .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .size(px(24.0))
-                    .rounded(theme.radius_sm)
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(theme.surface_hover))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.state.update(cx, |state, _| {
-                            state.cycle_task_status(id);
-                        });
-                        cx.notify();
-                        cx.stop_propagation();
-                    }))
-                    .child(icon(status_icon, 16.0, color)),
-            )
-            .child(
-                div()
+                    .flex_col()
+                    .flex_1()
                     .min_w(px(0.0))
-                    .truncate()
-                    .t_body()
-                    .text_color(if done {
-                        theme.text_secondary
-                    } else {
-                        theme.text_primary
-                    })
-                    .when(done, |d| d.line_through())
-                    .child(task.title.clone()),
-            )
-            .when(descendants > 0, |d| {
-                d.child(
-                    div()
-                        .id(("task-collapse", id.0 as u64))
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .gap(px(4.0))
-                        .h(px(24.0))
-                        .px(theme.space_1)
-                        .rounded(theme.radius_sm)
-                        .cursor_pointer()
-                        .hover(move |s| s.bg(theme.surface_hover))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.toggle_task_collapsed(id, cx);
-                            cx.stop_propagation();
-                        }))
-                        .child(icon(
-                            if collapsed {
-                                Icon::ChevronRight
+                    .child(
+                        div()
+                            .t_body()
+                            .text_color(if status == TaskStatus::Done {
+                                theme.text_secondary
                             } else {
-                                Icon::ChevronDown
-                            },
-                            14.0,
-                            theme.text_muted,
-                        ))
-                        // A folded task says how much it is hiding.
-                        .when(collapsed, |d| {
-                            d.child(
-                                div()
-                                    .t_small()
-                                    .t_code()
-                                    .text_color(theme.text_secondary)
-                                    .child(format!("+{descendants}")),
-                            )
-                        }),
-                )
-            })
-            // Takes the free width, so the chevron sits right after the title and
-            // the tags and counts stay at the right edge.
-            .child(div().flex_1())
+                                theme.text_primary
+                            })
+                            .truncate()
+                            .child(task.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .t_small()
+                            .t_code()
+                            .text_color(theme.text_muted)
+                            .child(subtitle),
+                    ),
+            )
             .children(task.tags.iter().take(3).map(|tag| {
                 let tint = crate::theme::label_color(&theme, tag);
                 div()
@@ -895,18 +715,38 @@ impl Root {
                         .child(format!("+{}", task.tags.len() - 3)),
                 )
             })
-            .when(note_count > 0, |d| {
-                d.child(meta_count(&theme, Icon::FileText, note_count))
-            })
+            .children(issue_number.map(|number| {
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .t_small()
+                    .t_code()
+                    .text_color(theme.text_muted)
+                    .child(icon(Icon::CircleDot, 12.0, theme.text_muted))
+                    .child(format!("#{number}"))
+            }))
             .when(file_count > 0, |d| {
                 d.child(meta_count(&theme, Icon::Paperclip, file_count))
             })
             .when(commit_count > 0, |d| {
                 d.child(meta_count(&theme, Icon::GitCommit, commit_count))
             })
-            .when(status == TaskStatus::Blocked, |d| {
-                d.child(chip(&theme, status_label(status), color))
-            })
+            .child(
+                div()
+                    .id(("task-status", id.0 as u64))
+                    .flex_none()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.state.update(cx, |state, _| {
+                            state.cycle_task_status(id);
+                        });
+                        cx.notify();
+                        cx.stop_propagation();
+                    }))
+                    .child(chip(&theme, status_label(status), color)),
+            )
             // Row actions float over the row's right edge instead of taking
             // width from the title.
             .when(hovered, |d| {
@@ -1335,5 +1175,43 @@ impl Root {
                 Some(repo_count),
                 repos_content,
             ))
+    }
+}
+
+impl Root {
+    /// With GitHub on, issues sync into the task list: a spinner while the
+    /// sync works, otherwise a button that pulls now. Empty when it is off.
+    fn sync_status(&self, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme;
+        let (github_on, pulling) = {
+            let sync = self.issue_sync.read(cx);
+            (sync.enabled(cx), sync.pulling || sync.busy > 0)
+        };
+        let status = div().flex().items_center();
+        if !github_on {
+            return status;
+        }
+        if pulling {
+            return status
+                .gap(theme.space_2)
+                .t_small()
+                .text_color(theme.text_muted)
+                .child(crate::ui::spinner(&theme, 14.0, "issue-sync-spin"))
+                .child("Syncing");
+        }
+        status.child(
+            icon_button(
+                &theme,
+                Icon::Refresh,
+                "issue-sync-now",
+                theme.text_secondary,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.issue_sync.update(cx, |sync, cx| {
+                    sync.flush(cx);
+                    sync.pull(cx);
+                });
+            })),
+        )
     }
 }
