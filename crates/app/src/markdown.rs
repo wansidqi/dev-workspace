@@ -440,8 +440,68 @@ impl Inline {
     }
 
     fn take(&mut self) -> Vec<Span> {
-        split_refs(std::mem::take(&mut self.spans))
+        split_task_numbers(split_refs(std::mem::take(&mut self.spans)))
     }
+}
+
+/// Turns a task number written as `#4` in plain text into a reference span (the
+/// same kind a `[[Title]]` makes). The `#` must start the text or follow a
+/// space or an opening bracket or comma, and the digits must be the whole word:
+/// `#4a`, `#4_x`, `abc#4`, `#` alone and runs of more than
+/// `refs::MAX_NUMBER_DIGITS` digits stay text. Code, links (a URL's `#4`
+/// fragment included) and spans already turned into references are skipped.
+/// Whether a number is really a task of the open project is decided when the
+/// preview is drawn, so a stray `#12` in prose just reads as text.
+fn split_task_numbers(spans: Vec<Span>) -> Vec<Span> {
+    let mut out = Vec::with_capacity(spans.len());
+    for span in spans {
+        if span.code || span.link || !span.text.contains('#') {
+            out.push(span);
+            continue;
+        }
+        let text = span.text.as_str();
+        let piece = |part: &str| Span {
+            text: part.to_string(),
+            ..span.clone()
+        };
+        let mut from = 0;
+        let mut search = 0;
+        while let Some(found) = text[search..].find('#') {
+            let hash = search + found;
+            search = hash + 1;
+            let before_ok = text[..hash]
+                .chars()
+                .next_back()
+                .is_none_or(|c| c.is_whitespace() || "([{,;:\"'".contains(c));
+            let digits = text[hash + 1..]
+                .bytes()
+                .take_while(u8::is_ascii_digit)
+                .count();
+            let end = hash + 1 + digits;
+            let whole_word = text[end..]
+                .chars()
+                .next()
+                .is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+            if !before_ok || digits == 0 || digits > crate::refs::MAX_NUMBER_DIGITS || !whole_word {
+                continue;
+            }
+            if hash > from {
+                out.push(piece(&text[from..hash]));
+            }
+            out.push(Span {
+                text: text[hash..end].to_string(),
+                link: true,
+                href: Some(format!("{REF_SCHEME}{}", &text[hash..end])),
+                ..span.clone()
+            });
+            from = end;
+            search = end;
+        }
+        if from < text.len() {
+            out.push(piece(&text[from..]));
+        }
+    }
+    out
 }
 
 /// Prefix of the `href` that a `[[Title]]` reference carries. A reference
@@ -1273,6 +1333,59 @@ mod tests {
         );
         let text: String = spans.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(text, "See Deploy checklist and the setup now.");
+    }
+
+    #[test]
+    fn task_numbers_become_references() {
+        let blocks = parse("fix #4 and (#12), **#7**, [#5] too. Done: #8.");
+        let spans = para(&blocks, 0);
+        let refs: Vec<(&str, &str)> = spans
+            .iter()
+            .filter_map(|s| ref_target(s.href.as_deref()?).map(|t| (s.text.as_str(), t)))
+            .collect();
+        assert_eq!(
+            refs,
+            vec![
+                ("#4", "#4"),
+                ("#12", "#12"),
+                ("#7", "#7"),
+                ("#5", "#5"),
+                ("#8", "#8")
+            ]
+        );
+        // The surrounding text is untouched.
+        let text: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(text, "fix #4 and (#12), #7, [#5] too. Done: #8.");
+        assert!(spans.iter().any(|s| s.bold && s.text == "#7"));
+    }
+
+    #[test]
+    fn hash_text_that_is_not_a_task_number_stays_text() {
+        for src in [
+            "#4a",
+            "x#4",
+            "#4_x",
+            "price #",
+            "#1234567890",
+            "see `#4`",
+            "[#4](https://example.com)",
+            "https://example.com/page#4",
+            "C#4",
+        ] {
+            let blocks = parse(src);
+            let any = match blocks.first() {
+                Some(Block::Paragraph(spans)) => spans
+                    .iter()
+                    .any(|s| s.href.as_deref().and_then(ref_target).is_some()),
+                _ => false,
+            };
+            assert!(!any, "{src:?} must not become a task reference");
+        }
+        // A heading marker is not a task number either.
+        assert!(matches!(
+            parse("# 4 things").first(),
+            Some(Block::Heading(..))
+        ));
     }
 
     #[test]

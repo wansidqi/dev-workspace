@@ -1163,6 +1163,16 @@ impl TaskDetail {
                 };
                 self.preview_select.borrow_mut().set_query(&query);
                 let blocks: &[Block] = self.body_cache.as_ref().map_or(&[], |c| &c.blocks);
+                // How `[[Title]]` and `#4` are drawn depends on the project's
+                // notes and tasks; snapshot them only for a body that has any.
+                let ref_lookup: Option<markdown_view::RefLookup> = self
+                    .body_cache
+                    .as_ref()
+                    .filter(|c| crate::refs::mentions_refs(&c.source))
+                    .map(|_| {
+                        let state = self.state.read(cx);
+                        crate::refs::lookup(&state.notes, &state.tasks)
+                    });
                 out.push(
                     div()
                         .flex()
@@ -1237,6 +1247,7 @@ impl TaskDetail {
                     on_link: std::rc::Rc::new(move |href, window, cx| {
                         link_me.update(cx, |this, cx| this.follow_link(&href, window, cx));
                     }),
+                    refs: ref_lookup,
                 };
                 let select = self.preview_select.clone();
                 let (down_select, move_select, up_select, out_select, all_select) = (

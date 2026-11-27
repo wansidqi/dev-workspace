@@ -292,6 +292,16 @@ impl Root {
         // The rendered note reads as a page: a comfortable measure, centred
         // in the available width, text left-aligned.
         let root = cx.entity();
+        // How `[[Title]]` and `#4` are drawn depends on the project's notes and
+        // tasks, so snapshot them, but only for a note that has any.
+        let ref_lookup: Option<markdown_view::RefLookup> = self
+            .note_preview
+            .as_ref()
+            .filter(|(text, ..)| crate::refs::mentions_refs(text))
+            .map(|_| {
+                let state = self.state.read(cx);
+                crate::refs::lookup(&state.notes, &state.tasks)
+            });
         let preview = |this: &Self, centred: bool| -> AnyElement {
             let root = root.clone();
             let editable = this.note_mode == NoteMode::Preview;
@@ -307,6 +317,7 @@ impl Root {
                 on_link: std::rc::Rc::new(move |href, _window, cx| {
                     link_root.update(cx, |this, cx| this.follow_note_link(&href, cx));
                 }),
+                refs: ref_lookup.clone(),
                 on_toggle: std::rc::Rc::new(move |range, window, cx| {
                     toggle_root.update(cx, |this, cx| {
                         if let Some((_, _, editor)) = this.open_note.clone() {

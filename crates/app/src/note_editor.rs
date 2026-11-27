@@ -104,6 +104,14 @@ pub fn init_key_bindings(cx: &mut App) {
     ]);
 }
 
+/// What the suggestion popup shows: where the typed text starts (just after
+/// `[[`, or at the `#`), the matches, and whether it is the `#` task picker.
+struct RefPopup {
+    start: usize,
+    list: Vec<Candidate>,
+    hash: bool,
+}
+
 pub struct NoteEditor {
     pub focus_handle: FocusHandle,
     pub content: SharedString,
@@ -127,6 +135,8 @@ pub struct NoteEditor {
     /// Lists the notes and tasks a `[[` can point at (set by the page that
     /// owns the project). Called only while the popup could show.
     pub ref_source: Option<RefSource>,
+    /// Lists the tasks a `#` can point at; same owner and rules as `ref_source`.
+    pub task_source: Option<RefSource>,
     /// The highlighted row of the `[[` popup.
     ref_selected: usize,
     /// The reference (by where its query starts) that Escape closed the popup
@@ -201,6 +211,7 @@ impl NoteEditor {
             on_close: None,
             on_save: None,
             ref_source: None,
+            task_source: None,
             ref_selected: 0,
             ref_dismissed: None,
             scroll_handle: ScrollHandle::new(),
@@ -213,37 +224,66 @@ impl NoteEditor {
     /// query starts, and the matching notes and tasks. `None` while the caret
     /// is not inside an unfinished `[[`, after Escape closed it for this
     /// reference, or when nothing matches.
-    fn ref_popup(&self, cx: &App) -> Option<(usize, Vec<Candidate>)> {
-        let source = self.ref_source.as_ref()?;
+    fn ref_popup(&self, cx: &App) -> Option<RefPopup> {
         if !self.selected_range.is_empty() {
             return None;
         }
-        let (start, query) = refs::open_query(&self.content, self.cursor_offset())?;
+        let caret = self.cursor_offset();
+        if let Some((start, query)) = refs::open_query(&self.content, caret) {
+            let source = self.ref_source.as_ref()?;
+            if self.ref_dismissed == Some(start) {
+                return None;
+            }
+            let list = refs::filter(query, &source(cx));
+            return (!list.is_empty()).then_some(RefPopup {
+                start,
+                list,
+                hash: false,
+            });
+        }
+        // Otherwise a `#` after other text opens the task picker.
+        let (start, query) = refs::open_task_query(&self.content, caret)?;
+        let source = self.task_source.as_ref()?;
         if self.ref_dismissed == Some(start) {
             return None;
         }
-        let list = refs::filter(query, &source(cx));
-        (!list.is_empty()).then_some((start, list))
+        let all = source(cx);
+        // A whole task number needs no completing, and Enter must stay a newline.
+        let typed = refs::task_number(&format!("#{query}"));
+        if typed.is_some_and(|n| all.iter().any(|c| c.task_id == Some(n))) {
+            return None;
+        }
+        let list = refs::filter_tasks(query, &all);
+        (!list.is_empty()).then_some(RefPopup {
+            start,
+            list,
+            hash: true,
+        })
     }
 
-    /// Writes the highlighted suggestion over the typed query as
-    /// `[[Title]]` and puts the caret after the closing brackets. Returns
-    /// false when no popup is showing, so the key keeps its normal meaning.
+    /// Writes the highlighted suggestion over what was typed: `[[Title]]` with
+    /// the caret after the closing brackets, or `#<number>` for the task picker.
+    /// Returns false when no popup is showing, so the key keeps its normal
+    /// meaning.
     fn accept_ref(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some((start, list)) = self.ref_popup(cx) else {
+        let Some(RefPopup { start, list, hash }) = self.ref_popup(cx) else {
             return false;
         };
         let Some(pick) = list.get(self.ref_selected.min(list.len() - 1)) else {
             return false;
         };
         let caret = self.cursor_offset();
-        // Typing `[[` inside text that already has `]]` must not double them.
-        let end = if self.content[caret..].starts_with("]]") {
-            caret + 2
+        let (end, text) = if hash {
+            (caret, pick.reference.clone())
         } else {
-            caret
+            // Typing `[[` inside text that already has `]]` must not double them.
+            let end = if self.content[caret..].starts_with("]]") {
+                caret + 2
+            } else {
+                caret
+            };
+            (end, format!("{}]]", pick.reference))
         };
-        let text = format!("{}]]", pick.reference);
         let range = self.range_to_utf16(&(start..end));
         self.replace_text_in_range(Some(range), &text, window, cx);
         true
@@ -252,7 +292,7 @@ impl NoteEditor {
     /// Moves the highlight in the suggestion popup, wrapping at both ends.
     /// Returns false when no popup is showing.
     fn step_ref(&mut self, dir: isize, cx: &mut Context<Self>) -> bool {
-        let Some((_, list)) = self.ref_popup(cx) else {
+        let Some(RefPopup { list, .. }) = self.ref_popup(cx) else {
             return false;
         };
         let n = list.len() as isize;
@@ -264,7 +304,7 @@ impl NoteEditor {
     /// The `[[` popup under the caret, drawn above everything (it may hang
     /// out of the scroller) and kept inside the window.
     fn render_ref_popup(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let (_, list) = self.ref_popup(cx)?;
+        let RefPopup { list, hash, .. } = self.ref_popup(cx)?;
         let bounds = self.last_bounds?;
         let caret = self.caret_point(self.cursor_offset())?;
         let at = bounds.origin + caret + point(px(0.0), self.last_line_height + px(4.0));
@@ -272,9 +312,11 @@ impl NoteEditor {
         let selected = self.ref_selected.min(list.len() - 1);
         let rows = list.into_iter().enumerate().map(|(ix, c)| {
             let (glyph, label) = match (c.is_task, c.parent.is_some()) {
-                (true, true) => (Icon::CircleCheck, "Subtask"),
-                (true, false) => (Icon::CircleCheck, "Task"),
-                (false, _) => (Icon::FileText, "Note"),
+                // The task picker writes the number, so it is what is shown.
+                (true, _) if hash => (Icon::CircleCheck, c.reference.clone()),
+                (true, true) => (Icon::CircleCheck, "Subtask".to_string()),
+                (true, false) => (Icon::CircleCheck, "Task".to_string()),
+                (false, _) => (Icon::FileText, "Note".to_string()),
             };
             div()
                 .id(("ref-suggestion", ix))
@@ -620,7 +662,7 @@ impl NoteEditor {
 
     fn close(&mut self, _: &NeClose, window: &mut Window, cx: &mut Context<Self>) {
         // Escape first closes the suggestion popup; the next one leaves the note.
-        if let Some((start, _)) = self.ref_popup(cx) {
+        if let Some(RefPopup { start, .. }) = self.ref_popup(cx) {
             self.ref_dismissed = Some(start);
             cx.notify();
             return;

@@ -26,6 +26,14 @@ pub const CHAIN_SEP: &str = " › ";
 /// belong to a task (its description and extra notes) are not addressable by
 /// title: they are reached through the task.
 pub fn resolve(title: &str, notes: &[Note], tasks: &[Task]) -> Option<RefTarget> {
+    // `#4` is a task's number, the same one commit messages use. Task numbers
+    // are global, so only the open project's tasks may answer.
+    if let Some(number) = task_number(title) {
+        return tasks
+            .iter()
+            .find(|t| t.id.0 == number)
+            .map(|t| RefTarget::Task(t.id));
+    }
     let wanted = normalize(title);
     if wanted.is_empty() {
         return None;
@@ -53,6 +61,84 @@ pub fn resolve(title: &str, notes: &[Note], tasks: &[Task]) -> Option<RefTarget>
     newest(&|p| p == wanted).or_else(|| newest(&|p| p.ends_with(&tail)))
 }
 
+/// Most digits a task number may have; longer runs are not task numbers.
+pub const MAX_NUMBER_DIGITS: usize = 9;
+
+/// The task number in `#4` (just `#` and digits, around which space is
+/// ignored), or `None` for anything else.
+pub fn task_number(text: &str) -> Option<i64> {
+    let digits = text.trim().strip_prefix('#')?;
+    if digits.is_empty()
+        || digits.len() > MAX_NUMBER_DIGITS
+        || !digits.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// How a reference is drawn in the preview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefLook {
+    /// It points at something. `label` replaces the written text when set (a
+    /// `#4` shows as `#4 Task title`); `done` marks a finished task.
+    Found { label: Option<String>, done: bool },
+    /// A `[[Title]]` nothing matches: drawn muted, with a wavy underline.
+    Broken,
+    /// A `#N` that is no task of this project. It is ordinary prose (an issue
+    /// or PR number, say), so it is drawn as plain text, not as a broken link.
+    Plain,
+}
+
+/// Decides how the reference `text` is drawn, from the open project's notes
+/// and tasks.
+pub fn look(text: &str, notes: &[Note], tasks: &[Task]) -> RefLook {
+    match resolve(text, notes, tasks) {
+        Some(RefTarget::Note(_)) => RefLook::Found {
+            label: None,
+            done: false,
+        },
+        Some(RefTarget::Task(id)) => {
+            let task = tasks.iter().find(|t| t.id == id);
+            let by_number = task_number(text).is_some();
+            RefLook::Found {
+                label: task
+                    .filter(|_| by_number)
+                    .map(|t| format!("#{} {}", id.0, t.title.trim())),
+                done: task.is_some_and(|t| t.status == devspace_core::TaskStatus::Done),
+            }
+        }
+        None if task_number(text).is_some() => RefLook::Plain,
+        None => RefLook::Broken,
+    }
+}
+
+/// Whether `content` could hold a reference: it has `[[` or a `#` followed by
+/// a digit. A cheap superset of what the parser accepts, so a preview that
+/// cannot hold any skips building the lookup.
+pub fn mentions_refs(content: &str) -> bool {
+    content.contains("[[")
+        || content
+            .as_bytes()
+            .windows(2)
+            .any(|w| w[0] == b'#' && w[1].is_ascii_digit())
+}
+
+/// A lookup for the preview: snapshots the open project's notes and tasks so it
+/// can answer while the preview is drawn, and remembers each answer, since the
+/// same reference tends to repeat. Built only for a note that mentions
+/// references (see [`mentions_refs`]).
+pub fn lookup(notes: &[Note], tasks: &[Task]) -> std::rc::Rc<dyn Fn(&str) -> RefLook> {
+    let (notes, tasks) = (notes.to_vec(), tasks.to_vec());
+    let seen: std::cell::RefCell<HashMap<String, RefLook>> = Default::default();
+    std::rc::Rc::new(move |text| {
+        seen.borrow_mut()
+            .entry(text.to_string())
+            .or_insert_with(|| look(text, &notes, &tasks))
+            .clone()
+    })
+}
+
 /// Lowercases `text` and trims the space around each part separated by `›`
 /// (or a typed `>`, which stands in for it).
 fn normalize(text: &str) -> String {
@@ -77,6 +163,8 @@ pub struct Candidate {
     /// title, or for a subtask the whole chain, so the link finds this task
     /// and not a namesake.
     pub reference: String,
+    /// The task's number, for the `#` picker. `None` for a note.
+    pub task_id: Option<i64>,
 }
 
 /// Deepest ancestor chain followed; guards against a cycle in bad data.
@@ -121,6 +209,7 @@ pub fn candidates(notes: &[Note], tasks: &[Task]) -> Vec<Candidate> {
             is_task: false,
             parent: None,
             reference: n.title.trim().to_string(),
+            task_id: None,
         });
     let task_entries = tasks.into_iter().filter(|t| writable(&t.title)).map(|t| {
         let mut path = path_of(t, &by_id);
@@ -137,9 +226,77 @@ pub fn candidates(notes: &[Note], tasks: &[Task]) -> Vec<Candidate> {
             is_task: true,
             parent,
             reference,
+            task_id: Some(t.id.0),
         }
     });
     note_entries.chain(task_entries).collect()
+}
+
+/// Every task of the project as a `#` suggestion, newest first. Picking one
+/// writes `#<number>`, which is always writable, so no title is left out.
+pub fn task_candidates(tasks: &[Task]) -> Vec<Candidate> {
+    let by_id: HashMap<TaskId, &Task> = tasks.iter().map(|t| (t.id, t)).collect();
+    let mut sorted: Vec<&Task> = tasks.iter().collect();
+    sorted.sort_by_key(|t| std::cmp::Reverse((t.updated_at, t.id.0)));
+    sorted
+        .into_iter()
+        .map(|t| {
+            let mut path = path_of(t, &by_id);
+            let title = path.pop().unwrap_or_default().to_string();
+            Candidate {
+                title,
+                is_task: true,
+                parent: (!path.is_empty()).then(|| path.join(CHAIN_SEP)),
+                reference: format!("#{}", t.id.0),
+                task_id: Some(t.id.0),
+            }
+        })
+        .collect()
+}
+
+/// When the caret sits right after a `#` that starts a task reference: the
+/// byte offset of the `#` and what was typed after it. The `#` must follow
+/// something else on the line, after a space or an opening bracket or comma,
+/// so a Markdown heading (`# Title`) never opens it. Whitespace after the `#`
+/// ends the token.
+pub fn open_task_query(content: &str, caret: usize) -> Option<(usize, &str)> {
+    let before = content.get(..caret)?;
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    let line = &before[line_start..];
+    let hash = line.rfind('#')?;
+    let lead = &line[..hash];
+    let prev = lead.chars().next_back()?;
+    if lead.trim().is_empty() || !(prev.is_whitespace() || "([{,;:\"'".contains(prev)) {
+        return None;
+    }
+    let query = &line[hash + 1..];
+    if query.len() > MAX_TASK_QUERY || query.contains(char::is_whitespace) || query.contains('#') {
+        return None;
+    }
+    Some((line_start + hash, query))
+}
+
+/// Longest word the `#` picker follows.
+const MAX_TASK_QUERY: usize = 40;
+
+/// The `#` picker's matches: a query of digits lists the tasks whose number
+/// starts with it (smallest number first); anything else, and digits that match
+/// no number, search titles like `filter`.
+pub fn filter_tasks(query: &str, all: &[Candidate]) -> Vec<Candidate> {
+    let q = query.trim();
+    if !q.is_empty() && q.bytes().all(|b| b.is_ascii_digit()) {
+        let mut hits: Vec<Candidate> = all
+            .iter()
+            .filter(|c| c.task_id.is_some_and(|id| id.to_string().starts_with(q)))
+            .cloned()
+            .collect();
+        hits.sort_by_key(|c| c.task_id);
+        hits.truncate(MAX_SUGGESTIONS);
+        if !hits.is_empty() {
+            return hits;
+        }
+    }
+    filter(q, all)
 }
 
 /// When the caret sits inside an unfinished `[[` on its line: the byte offset
@@ -219,6 +376,14 @@ mod tests {
             is_task,
             parent: None,
             reference: title.to_string(),
+            task_id: None,
+        }
+    }
+
+    fn done_task(id: i64, title: &str) -> Task {
+        Task {
+            status: TaskStatus::Done,
+            ..task(id, title, 0)
         }
     }
 
@@ -396,6 +561,116 @@ mod tests {
     }
 
     #[test]
+    fn task_numbers_are_hash_and_digits_only() {
+        assert_eq!(task_number("#4"), Some(4));
+        assert_eq!(task_number(" #042 "), Some(42));
+        for bad in [
+            "",
+            "#",
+            "4",
+            "#4a",
+            "# 4",
+            "#-4",
+            "##4",
+            "#1234567890",
+            "Plan",
+        ] {
+            assert_eq!(task_number(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_number_resolves_to_that_task_of_this_project_only() {
+        let tasks = [task(4, "Plan", 1), child(9, 4, "Sub")];
+        assert_eq!(resolve("#9", &[], &tasks), Some(RefTarget::Task(TaskId(9))));
+        // Task 5 exists in another project, so it is not in this list.
+        assert_eq!(resolve("#5", &[], &tasks), None);
+        // A note whose title looks like a number does not answer for one.
+        let notes = [note(1, None, "#4", 1)];
+        assert_eq!(
+            resolve("#4", &notes, &tasks),
+            Some(RefTarget::Task(TaskId(4)))
+        );
+    }
+
+    #[test]
+    fn look_tells_found_broken_and_plain_apart() {
+        let notes = [note(1, None, "Setup", 1)];
+        let tasks = [task(4, "Plan", 1), done_task(5, "Ship")];
+        assert_eq!(
+            look("Setup", &notes, &tasks),
+            RefLook::Found {
+                label: None,
+                done: false
+            }
+        );
+        // A title reference keeps the text as written; a number gains the title.
+        assert_eq!(
+            look("plan", &notes, &tasks),
+            RefLook::Found {
+                label: None,
+                done: false
+            }
+        );
+        assert_eq!(
+            look("#4", &notes, &tasks),
+            RefLook::Found {
+                label: Some("#4 Plan".to_string()),
+                done: false
+            }
+        );
+        assert_eq!(
+            look("#5", &notes, &tasks),
+            RefLook::Found {
+                label: Some("#5 Ship".to_string()),
+                done: true
+            }
+        );
+        assert_eq!(look("Gone", &notes, &tasks), RefLook::Broken);
+        assert_eq!(look("#77", &notes, &tasks), RefLook::Plain);
+    }
+
+    #[test]
+    fn hash_picker_opens_after_a_hash_that_is_not_a_heading() {
+        assert_eq!(open_task_query("fix #", 5), Some((4, "")));
+        assert_eq!(open_task_query("fix #12", 7), Some((4, "12")));
+        assert_eq!(open_task_query("see (#pl", 8), Some((5, "pl")));
+        assert_eq!(open_task_query("a\nfix #3", 8), Some((6, "3")));
+        // Headings, indented text, glued hashes and finished words stay closed.
+        assert_eq!(open_task_query("#", 1), None);
+        assert_eq!(open_task_query("# Title", 7), None);
+        assert_eq!(open_task_query("  # x", 5), None);
+        assert_eq!(open_task_query("C#", 2), None);
+        assert_eq!(open_task_query("fix #4 now", 10), None);
+        assert_eq!(open_task_query("fix ##4", 7), None);
+    }
+
+    #[test]
+    fn hash_picker_lists_by_number_then_by_title() {
+        let tasks = [
+            task(1, "One", 1),
+            task(12, "Twelve", 2),
+            task(120, "Plan 120", 3),
+            task(7, "Plan seven", 4),
+        ];
+        let all = task_candidates(&tasks);
+        let numbers = |q: &str| -> Vec<i64> {
+            filter_tasks(q, &all)
+                .into_iter()
+                .filter_map(|c| c.task_id)
+                .collect()
+        };
+        assert_eq!(numbers("1"), [1, 12, 120]);
+        assert_eq!(numbers("12"), [12, 120]);
+        // Both start with "plan", so the newer task (7) comes first.
+        assert_eq!(numbers("plan"), [7, 120]);
+        // Digits that are no task's number fall back to the title search.
+        assert_eq!(numbers("999"), Vec::<i64>::new());
+        assert_eq!(filter_tasks("", &all).len(), 4);
+        assert!(all.iter().all(|c| c.reference.starts_with('#')));
+    }
+
+    #[test]
     fn filter_shows_at_most_the_popup_height() {
         let all: Vec<Candidate> = (0..20).map(|i| cand(&format!("Item {i}"), false)).collect();
         assert_eq!(filter("", &all).len(), MAX_SUGGESTIONS);
@@ -416,7 +691,10 @@ mod tests {
             [
                 cand("Newer", false),
                 cand("Older", false),
-                cand("A task", true)
+                Candidate {
+                    task_id: Some(7),
+                    ..cand("A task", true)
+                }
             ]
         );
     }

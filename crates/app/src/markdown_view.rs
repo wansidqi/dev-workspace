@@ -15,8 +15,9 @@ use gpui::{
 };
 
 use crate::highlight::{self, Token};
-use crate::markdown::{AlertKind, Block, Item, Span};
+use crate::markdown::{self, AlertKind, Block, Item, Span};
 use crate::preview_select::{Entry, Selection};
+use crate::refs::RefLook;
 use crate::theme::{checkbox_fill, syntax_color, GlassTheme, TypeScale, CODE_FONT, UI_FONT};
 use crate::ui::{icon, Icon};
 
@@ -36,6 +37,10 @@ pub type ToggleHandler = Rc<dyn Fn(std::ops::Range<usize>, &mut Window, &mut App
 /// Called with a link's destination (a URL or `#anchor`) when it is clicked.
 pub type LinkHandler = Rc<dyn Fn(String, &mut Window, &mut App)>;
 
+/// Decides how a `[[Title]]` or `#4` reference is drawn, given the text between
+/// the brackets (or the `#4`). Called while the preview is built.
+pub type RefLookup = Rc<dyn Fn(&str) -> RefLook>;
+
 /// Called with the top-level block's index and the pointer position when a
 /// block is double-clicked.
 pub type EditHandler = Rc<dyn Fn(usize, gpui::Point<gpui::Pixels>, &mut Window, &mut App)>;
@@ -52,6 +57,8 @@ pub struct CopyHook {
     pub on_copy: CopyHandler,
     pub on_toggle: ToggleHandler,
     pub on_link: LinkHandler,
+    /// How references are drawn. `None` draws them like any other link.
+    pub refs: Option<RefLookup>,
 }
 
 /// Ids for the clickable text of one render, handed out in order so they stay the
@@ -699,7 +706,14 @@ fn text(
     join: &'static str,
 ) -> AnyElement {
     let mut select = hook.select.borrow_mut();
-    let (styled, links, hits) = inline(spans, theme, base_weight, color, &select);
+    let (styled, links, hits) = inline(
+        spans,
+        theme,
+        base_weight,
+        color,
+        &select,
+        hook.refs.as_deref(),
+    );
     select.register(Entry {
         layout: styled.layout().clone(),
         join,
@@ -735,6 +749,7 @@ fn inline(
     base_weight: FontWeight,
     color: Hsla,
     select: &Selection,
+    refs: Option<&dyn Fn(&str) -> RefLook>,
 ) -> (StyledText, Vec<(Range<usize>, String)>, Vec<Range<usize>>) {
     let mut text = String::new();
     let mut runs: Vec<TextRun> = Vec::with_capacity(spans.len());
@@ -743,9 +758,23 @@ fn inline(
         if span.text.is_empty() {
             continue;
         }
+        // A reference is drawn by what it points at; every other link as a link.
+        let look = span
+            .href
+            .as_deref()
+            .and_then(markdown::ref_target)
+            .zip(refs)
+            .map(|(target, look)| look(target));
+        let shown = match &look {
+            Some(RefLook::Found {
+                label: Some(label), ..
+            }) => label.as_str(),
+            _ => span.text.as_str(),
+        };
         let start = text.len();
-        text.push_str(&span.text);
-        if let Some(href) = &span.href {
+        text.push_str(shown);
+        // A `#12` that is no task is plain prose, so there is nothing to click.
+        if let (Some(href), false) = (&span.href, matches!(look, Some(RefLook::Plain))) {
             links.push((start..text.len(), href.clone()));
         }
         let mut f = font(if span.code { CODE_FONT } else { UI_FONT });
@@ -757,17 +786,52 @@ fn inline(
         if span.italic {
             f.style = FontStyle::Italic;
         }
+        let plain = |wavy: bool, line: Option<Hsla>| UnderlineStyle {
+            thickness: px(1.0),
+            color: line,
+            wavy,
+        };
+        let (run_color, background_color, underline, struck) = match &look {
+            // A reference that resolves is a tinted chip, not an underlined web
+            // link; a finished task is struck through as well as dimmed, so the
+            // status is a shape and not only a colour.
+            Some(RefLook::Found { done, .. }) => (
+                if *done {
+                    theme.text_secondary
+                } else {
+                    theme.accent
+                },
+                Some(theme.accent.opacity(0.14)),
+                span.underline.then(|| plain(false, None)),
+                span.strike || *done,
+            ),
+            // A broken one is muted with a wavy underline that is not a link's.
+            Some(RefLook::Broken) => (
+                theme.text_muted,
+                None,
+                Some(plain(true, Some(theme.danger))),
+                span.strike,
+            ),
+            Some(RefLook::Plain) => (
+                color,
+                None,
+                span.underline.then(|| plain(false, None)),
+                span.strike,
+            ),
+            None => (
+                if span.link { theme.accent } else { color },
+                span.code.then_some(theme.surface_raised),
+                (span.link || span.underline).then(|| plain(false, None)),
+                span.strike,
+            ),
+        };
         runs.push(TextRun {
-            len: span.text.len(),
+            len: shown.len(),
             font: f,
-            color: if span.link { theme.accent } else { color },
-            background_color: span.code.then_some(theme.surface_raised),
-            underline: (span.link || span.underline).then_some(UnderlineStyle {
-                thickness: px(1.0),
-                color: None,
-                wavy: false,
-            }),
-            strikethrough: span.strike.then_some(StrikethroughStyle {
+            color: run_color,
+            background_color,
+            underline,
+            strikethrough: struck.then_some(StrikethroughStyle {
                 thickness: px(1.0),
                 color: None,
             }),

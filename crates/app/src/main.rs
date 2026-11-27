@@ -468,6 +468,11 @@ impl Root {
                 let state = ref_state.read(cx);
                 refs::candidates(&state.notes, &state.tasks)
             }));
+            // `#` suggests this project's tasks by number.
+            let task_state = state.clone();
+            editor.task_source = Some(Box::new(move |cx| {
+                refs::task_candidates(&task_state.read(cx).tasks)
+            }));
             let save_root = root.clone();
             editor.on_save = Some(Box::new(move |window, cx| {
                 save_root.update(cx, |root, cx| {
