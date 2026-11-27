@@ -36,7 +36,8 @@ pub struct Span {
     pub swatch: Option<[u8; 3]>,
 }
 
-/// The five GitHub alert types.
+/// The alert types: GitHub's five, and three of our own (`> [!TODO]`,
+/// `> [!BUG]`, `> [!QUESTION]`) that GitHub shows as a plain quote.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlertKind {
     Note,
@@ -44,6 +45,9 @@ pub enum AlertKind {
     Important,
     Warning,
     Caution,
+    Todo,
+    Bug,
+    Question,
 }
 
 impl AlertKind {
@@ -55,8 +59,36 @@ impl AlertKind {
             AlertKind::Important => "Important",
             AlertKind::Warning => "Warning",
             AlertKind::Caution => "Caution",
+            AlertKind::Todo => "To-do",
+            AlertKind::Bug => "Bug",
+            AlertKind::Question => "Question",
         }
     }
+
+    /// The kind written as `word` in `[!WORD]`, in any case.
+    pub fn from_word(word: &str) -> Option<AlertKind> {
+        Some(match word.to_ascii_lowercase().as_str() {
+            "note" => AlertKind::Note,
+            "tip" => AlertKind::Tip,
+            "important" => AlertKind::Important,
+            "warning" => AlertKind::Warning,
+            "caution" => AlertKind::Caution,
+            "todo" => AlertKind::Todo,
+            "bug" => AlertKind::Bug,
+            "question" => AlertKind::Question,
+            _ => return None,
+        })
+    }
+}
+
+/// Whether an alert can be folded, from the marker after its kind:
+/// `> [!NOTE]-` starts folded, `> [!NOTE]+` starts open but can fold, and a
+/// plain `> [!NOTE]` is always open. (The convention Obsidian uses.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fold {
+    None,
+    Open,
+    Closed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +102,7 @@ pub enum Block {
     Quote(Vec<Block>),
     Alert {
         kind: AlertKind,
+        fold: Fold,
         blocks: Vec<Block>,
     },
     List {
@@ -750,6 +783,56 @@ fn alert_kind(kind: BlockQuoteKind) -> AlertKind {
     }
 }
 
+/// A quote whose first paragraph starts `[!KIND]`, `[!KIND]+` or `[!KIND]-`
+/// becomes an alert of that kind, with the marker taken off the text; anything
+/// else stays a quote. The marker must be a whole word, so `[!TODOS]` and
+/// `[!NOTE]x` are text, and it must be plain text: inside code or a link it is
+/// not a marker.
+fn alert_from_marker(mut inner: Vec<Block>) -> Block {
+    let marker = match inner.first() {
+        Some(Block::Paragraph(spans)) => spans
+            .first()
+            .filter(|s| !s.code && !s.link)
+            .and_then(|s| alert_marker(&s.text)),
+        _ => None,
+    };
+    let Some((kind, fold, used)) = marker else {
+        return Block::Quote(inner);
+    };
+    if let Some(Block::Paragraph(spans)) = inner.first_mut() {
+        let rest = spans[0].text[used..].trim_start().to_string();
+        if rest.is_empty() {
+            spans.remove(0);
+        } else {
+            spans[0].text = rest;
+        }
+        if spans.is_empty() {
+            inner.remove(0);
+        }
+    }
+    Block::Alert {
+        kind,
+        fold,
+        blocks: inner,
+    }
+}
+
+/// The kind, fold marker and byte length of a `[!KIND]` marker at the start of
+/// `text`, if there is one.
+fn alert_marker(text: &str) -> Option<(AlertKind, Fold, usize)> {
+    let rest = text.strip_prefix("[!")?;
+    let close = rest.find(']')?;
+    let kind = AlertKind::from_word(&rest[..close])?;
+    let after = 2 + close + 1;
+    let (fold, len) = match text[after..].chars().next() {
+        Some('+') => (Fold::Open, after + 1),
+        Some('-') => (Fold::Closed, after + 1),
+        _ => (Fold::None, after),
+    };
+    let tail = &text[len..];
+    (tail.is_empty() || tail.starts_with(char::is_whitespace)).then_some((kind, fold, len))
+}
+
 fn inline_until<'a>(events: &mut impl Iterator<Item = Event<'a>>, end: TagEnd) -> Vec<Span> {
     let mut inline = Inline::default();
     for event in events.by_ref() {
@@ -895,9 +978,12 @@ fn parse_blocks_at<'a>(
                     blocks.push(match kind {
                         Some(k) => Block::Alert {
                             kind: alert_kind(k),
+                            fold: Fold::None,
                             blocks: inner,
                         },
-                        None => Block::Quote(inner),
+                        // Our own kinds, and a fold marker, are not known to the
+                        // parser, so they arrive as a quote that starts `[!KIND]`.
+                        None => alert_from_marker(inner),
                     });
                 }
             }
@@ -1566,8 +1652,13 @@ mod tests {
         ] {
             let blocks = parse(&format!("> [!{word}]\n> Useful information.\n"));
             match &blocks[0] {
-                Block::Alert { kind: k, blocks } => {
+                Block::Alert {
+                    kind: k,
+                    fold,
+                    blocks,
+                } => {
                     assert_eq!(*k, kind);
+                    assert_eq!(*fold, Fold::None);
                     assert!(
                         matches!(&blocks[0], Block::Paragraph(s) if text(s) == "Useful information.")
                     );
@@ -1576,6 +1667,97 @@ mod tests {
             }
         }
         assert!(matches!(parse("> [!BOGUS]\n> x\n")[0], Block::Quote(_)));
+    }
+
+    /// The alert at the top of `src`: its kind, fold marker and body text.
+    fn alert(src: &str) -> Option<(AlertKind, Fold, Vec<String>)> {
+        match parse(src).into_iter().next()? {
+            Block::Alert { kind, fold, blocks } => {
+                let body = blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        Block::Paragraph(s) => Some(text(s)),
+                        _ => None,
+                    })
+                    .collect();
+                Some((kind, fold, body))
+            }
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn our_own_alert_kinds_are_recognised() {
+        for (word, kind) in [
+            ("TODO", AlertKind::Todo),
+            ("BUG", AlertKind::Bug),
+            ("QUESTION", AlertKind::Question),
+            ("todo", AlertKind::Todo),
+            ("Bug", AlertKind::Bug),
+        ] {
+            let got = alert(&format!("> [!{word}]\n> Needs a look.\n"));
+            assert_eq!(
+                got,
+                Some((kind, Fold::None, vec!["Needs a look.".to_string()])),
+                "{word}"
+            );
+        }
+        // Text on the marker's own line is the body too.
+        assert_eq!(
+            alert("> [!BUG] Crash on save"),
+            Some((
+                AlertKind::Bug,
+                Fold::None,
+                vec!["Crash on save".to_string()]
+            ))
+        );
+        // Several paragraphs and inline markup survive.
+        let got = alert("> [!QUESTION]\n> First **bold**.\n>\n> Second.\n").expect("alert");
+        assert_eq!(got.2, ["First bold.", "Second."]);
+    }
+
+    #[test]
+    fn fold_markers_choose_whether_an_alert_can_fold() {
+        let fold = |src: &str| alert(src).map(|a| a.1);
+        assert_eq!(fold("> [!NOTE]-\n> x"), Some(Fold::Closed));
+        assert_eq!(fold("> [!NOTE]+\n> x"), Some(Fold::Open));
+        assert_eq!(fold("> [!NOTE]\n> x"), Some(Fold::None));
+        assert_eq!(fold("> [!WARNING]- Careful\n> x"), Some(Fold::Closed));
+        assert_eq!(fold("> [!TODO]-\n> x"), Some(Fold::Closed));
+        // The body does not carry the marker.
+        assert_eq!(
+            alert("> [!TIP]-\n> Hidden until opened."),
+            Some((
+                AlertKind::Tip,
+                Fold::Closed,
+                vec!["Hidden until opened.".to_string()]
+            ))
+        );
+    }
+
+    #[test]
+    fn near_misses_stay_plain_quotes() {
+        for src in [
+            "> [!TODOS]\n> x",
+            "> [!NOTE]x\n> y",
+            "> [!BOGUS]-\n> x",
+            "> text [!BUG]\n> x",
+            "> `[!BUG]`\n> x",
+            "> [!BUG\n> x",
+            "> [! BUG]\n> x",
+        ] {
+            assert!(
+                matches!(parse(src).first(), Some(Block::Quote(_))),
+                "{src:?} must stay a quote"
+            );
+        }
+    }
+
+    #[test]
+    fn an_alert_with_nothing_after_its_marker_has_no_body() {
+        let got = alert("> [!TODO]-\n").expect("alert");
+        assert_eq!((got.0, got.1), (AlertKind::Todo, Fold::Closed));
+        assert!(got.2.is_empty());
     }
 
     #[test]

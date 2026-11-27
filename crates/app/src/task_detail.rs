@@ -109,6 +109,8 @@ pub struct TaskDetail {
     body_cache: Option<BodyCache>,
     /// Text selection of the body preview (each text registers with it).
     preview_select: preview_select::Shared,
+    /// Foldable alerts of the description that the reader has flipped.
+    alert_folds: markdown_view::AlertFolds,
     /// Focus scope of the description: Ctrl+C / Ctrl+A / Ctrl+F act on it.
     preview_focus: gpui::FocusHandle,
     /// Find bar of the description (Ctrl+F).
@@ -274,6 +276,7 @@ impl TaskDetail {
             issue_sync,
             body_cache: None,
             preview_select: Default::default(),
+            alert_folds: Default::default(),
             preview_focus: cx.focus_handle(),
             find_input,
             find_open: false,
@@ -1248,6 +1251,7 @@ impl TaskDetail {
                         link_me.update(cx, |this, cx| this.follow_link(&href, window, cx));
                     }),
                     refs: ref_lookup,
+                    folds: Some(self.alert_folds.clone()),
                 };
                 let select = self.preview_select.clone();
                 let (down_select, move_select, up_select, out_select, all_select) = (

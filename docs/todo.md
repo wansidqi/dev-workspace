@@ -31,7 +31,9 @@ Rules that still apply to all of them: notes are untrusted input (raw HTML stays
 
 - [ ] **Table of contents rail.** Outline built from headings, click to jump. Check how `#anchor` links already scroll before building it.
 - [ ] **Image sizing, captions and zoom.** `![alt](path =300x)`, click to enlarge, paths relative to the project's attachments folder. Paths must be validated and stay inside the project directory.
-- [ ] **More alert kinds.** Custom kinds such as `[!TODO]`, `[!BUG]`, `[!QUESTION]`, and collapsible alerts. Extend `AlertKind`, give each a Lucide icon and a status colour (shape plus colour, never colour alone).
+- [x] **More alert kinds** (2026-11-27). `> [!TODO]`, `> [!BUG]` and `> [!QUESTION]` join GitHub's five (To-do: list-checks icon, muted; Bug: bug icon, danger; Question: circle-help icon, accent; shape plus colour, never colour alone). Alerts can fold with the Obsidian markers: `> [!NOTE]-` starts folded, `> [!NOTE]+` starts open and can fold; click the header to flip it, and the chevron shows the state. The marker is parsed in `markdown.rs` (`alert_from_marker`), drawn in `markdown_view.rs`, and the slash list has `/to-do`, `/bug`, `/question` and `/foldable`. Two new Lucide icons (`bug`, `circle-help`) in `assets/icons`. Not yet tried by hand in the app.
+  - Note: GitHub itself shows the three new kinds and the fold markers as a plain quote, so a note shared there loses the styling but stays readable.
+  - Gaps: no custom title after the marker (`> [!NOTE]- My title`; the text becomes the body), and the fold state is not remembered between sessions. A folded state resets when another note opens.
 
 ### Productivity
 

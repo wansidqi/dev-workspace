@@ -125,6 +125,8 @@ struct Root {
     note_scroll: gpui::ScrollHandle,
     /// Text selection in the rendered note, and the focus that lets Ctrl+C copy it.
     preview_select: preview_select::Shared,
+    /// Foldable alerts of the open note that the reader has flipped.
+    alert_folds: markdown_view::AlertFolds,
     preview_focus: gpui::FocusHandle,
     /// The preview's find bar (Ctrl+F while the preview has focus): its query box,
     /// whether it is showing, and the subscription that repaints as it is typed in.
@@ -493,6 +495,8 @@ impl Root {
         self.note_scroll_seen = None;
         self.note_mode = mode;
         self.note_preview = None;
+        // Another note's alerts start as that note wrote them.
+        self.alert_folds.borrow_mut().clear();
         cx.notify();
     }
 
@@ -1286,6 +1290,7 @@ fn main() -> Result<()> {
                         note_copied: None,
                         note_scroll: gpui::ScrollHandle::new(),
                         preview_select: Default::default(),
+                        alert_folds: Default::default(),
                         preview_focus: cx.focus_handle(),
                         preview_find,
                         preview_find_open: false,

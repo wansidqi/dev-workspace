@@ -318,6 +318,7 @@ impl Root {
                     link_root.update(cx, |this, cx| this.follow_note_link(&href, cx));
                 }),
                 refs: ref_lookup.clone(),
+                folds: Some(this.alert_folds.clone()),
                 on_toggle: std::rc::Rc::new(move |range, window, cx| {
                     toggle_root.update(cx, |this, cx| {
                         if let Some((_, _, editor)) = this.open_note.clone() {

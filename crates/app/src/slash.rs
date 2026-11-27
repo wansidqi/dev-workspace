@@ -95,6 +95,19 @@ pub const ENTRIES: &[Entry] = &[
     alert!("important", "Important callout", "IMPORTANT"),
     alert!("warning", "Warning callout", "WARNING"),
     alert!("caution", "Caution callout", "CAUTION"),
+    // Named `to-do`, not `todo`, so `/todo` still finds the task list.
+    alert!("to-do", "To-do callout", "TODO"),
+    alert!("bug", "Bug callout", "BUG"),
+    alert!("question", "Question callout", "QUESTION"),
+    Entry {
+        name: "foldable",
+        title: "Collapsible callout",
+        keywords: &["alert", "callout", "collapse", "fold"],
+        action: Action::Insert {
+            text: "> [!NOTE]-\n> ",
+            caret: "> [!NOTE]-\n> ".len(),
+        },
+    },
     Entry {
         name: "link",
         title: "Link",
@@ -276,8 +289,21 @@ mod tests {
         // `alert` finds every callout.
         assert_eq!(
             names("alert"),
-            ["note", "tip", "important", "warning", "caution"]
+            [
+                "note",
+                "tip",
+                "important",
+                "warning",
+                "caution",
+                "to-do",
+                "bug",
+                "question",
+                "foldable"
+            ]
         );
+        assert_eq!(names("fold"), ["foldable"]);
+        assert_eq!(names("bug")[0], "bug");
+        assert_eq!(names("to-do")[0], "to-do");
         // Contains: `ing` starts no word but sits inside `warning` and `heading`.
         assert!(names("ing").contains(&"warning"));
         assert!(names("ing").contains(&"heading"));
@@ -359,10 +385,45 @@ mod tests {
             );
             assert_eq!(find(e.name), Some(e));
             if let Action::Insert { text, caret } = e.action {
-                assert!(text.starts_with("> [!") && text.contains("]\n> "));
+                assert!(text.starts_with("> [!") && text.contains("\n> "));
                 assert_eq!(caret, text.len(), "caret goes on the empty quoted line");
             }
         }
         assert_eq!(find("nope"), None);
+    }
+
+    #[test]
+    fn every_inserted_callout_reads_back_as_that_alert() {
+        use crate::markdown::{parse, AlertKind, Block, Fold};
+        let expect = [
+            ("note", AlertKind::Note, Fold::None),
+            ("tip", AlertKind::Tip, Fold::None),
+            ("important", AlertKind::Important, Fold::None),
+            ("warning", AlertKind::Warning, Fold::None),
+            ("caution", AlertKind::Caution, Fold::None),
+            ("to-do", AlertKind::Todo, Fold::None),
+            ("bug", AlertKind::Bug, Fold::None),
+            ("question", AlertKind::Question, Fold::None),
+            ("foldable", AlertKind::Note, Fold::Closed),
+        ];
+        for (name, kind, fold) in expect {
+            let entry = find(name).expect("known command");
+            let Action::Insert { text, .. } = entry.action else {
+                panic!("{name} should insert fixed text");
+            };
+            // The callout is empty until the reader types, and must still be one.
+            match parse(&format!("{text}body")).first() {
+                Some(Block::Alert {
+                    kind: k, fold: f, ..
+                }) => assert_eq!((*k, *f), (kind, fold), "{name}"),
+                other => panic!("{name}: {other:?}"),
+            }
+        }
+        // Nothing else inserts a callout, so the table above covers them all.
+        let callouts = ENTRIES
+            .iter()
+            .filter(|e| matches!(e.action, Action::Insert { .. }))
+            .count();
+        assert_eq!(callouts, expect.len());
     }
 }

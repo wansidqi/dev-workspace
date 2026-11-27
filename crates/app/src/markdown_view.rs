@@ -3,7 +3,8 @@
 //! square checkboxes, inline code chips, and a plain left-aligned column.
 //! Nothing here is interactive except the copy button on code blocks.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -15,7 +16,7 @@ use gpui::{
 };
 
 use crate::highlight::{self, Token};
-use crate::markdown::{self, AlertKind, Block, Item, Span};
+use crate::markdown::{self, AlertKind, Block, Fold, Item, Span};
 use crate::preview_select::{Entry, Selection};
 use crate::refs::RefLook;
 use crate::theme::{checkbox_fill, syntax_color, GlassTheme, TypeScale, CODE_FONT, UI_FONT};
@@ -41,6 +42,11 @@ pub type LinkHandler = Rc<dyn Fn(String, &mut Window, &mut App)>;
 /// the brackets (or the `#4`). Called while the preview is built.
 pub type RefLookup = Rc<dyn Fn(&str) -> RefLook>;
 
+/// The foldable alerts (`> [!NOTE]-`) the reader has flipped from how the note
+/// wrote them, by their number in drawing order. The owner keeps it across
+/// frames; a click flips an entry and redraws.
+pub type AlertFolds = Rc<RefCell<HashSet<usize>>>;
+
 /// Called with the top-level block's index and the pointer position when a
 /// block is double-clicked.
 pub type EditHandler = Rc<dyn Fn(usize, gpui::Point<gpui::Pixels>, &mut Window, &mut App)>;
@@ -59,17 +65,23 @@ pub struct CopyHook {
     pub on_link: LinkHandler,
     /// How references are drawn. `None` draws them like any other link.
     pub refs: Option<RefLookup>,
+    /// Which foldable alerts are flipped. `None` draws every alert open.
+    pub folds: Option<AlertFolds>,
 }
 
 /// Ids for the clickable text of one render, handed out in order so they stay the
 /// same from frame to frame.
 static NEXT_LINK_ID: AtomicUsize = AtomicUsize::new(0);
 
+/// Numbers for the alerts of one render, handed out in drawing order.
+static NEXT_ALERT_ID: AtomicUsize = AtomicUsize::new(0);
+
 /// The preview for a note: one element per top-level block, each already sized
 /// to the reading column. They are separate children (not one wrapper) so the
 /// owner's scroll handle can scroll to the one a `#anchor` link points at.
 pub fn render_blocks(blocks: &[Block], theme: &GlassTheme, hook: &CopyHook) -> Vec<AnyElement> {
     NEXT_LINK_ID.store(0, Ordering::Relaxed);
+    NEXT_ALERT_ID.store(0, Ordering::Relaxed);
     hook.select.borrow_mut().begin_frame();
     let counter = Cell::new(0);
     blocks
@@ -179,7 +191,7 @@ fn render_block(
                     .map(|(i, b)| render_block(b, &theme, hook, counter, i == 0)),
             )
             .into_any_element(),
-        Block::Alert { kind, blocks } => {
+        Block::Alert { kind, fold, blocks } => {
             // Shape (icon) and title carry the type; the colour only echoes it.
             let (glyph, color) = match kind {
                 AlertKind::Note => (Icon::Info, theme.accent),
@@ -187,7 +199,50 @@ fn render_block(
                 AlertKind::Important => (Icon::Alert, theme.accent),
                 AlertKind::Warning => (Icon::Triangle, theme.warning),
                 AlertKind::Caution => (Icon::Alert, theme.danger),
+                AlertKind::Todo => (Icon::ListChecks, theme.text_secondary),
+                AlertKind::Bug => (Icon::Bug, theme.danger),
+                AlertKind::Question => (Icon::CircleHelp, theme.accent),
             };
+            // Every alert takes a number in drawing order, so a foldable one
+            // keeps its place from frame to frame (alerts inside a folded alert
+            // are not drawn and take none, which can renumber the ones after).
+            let index = NEXT_ALERT_ID.fetch_add(1, Ordering::Relaxed);
+            let folds = hook.folds.clone().filter(|_| *fold != Fold::None);
+            // `folds` holds the alerts the reader has flipped from how the note
+            // wrote them, so a note change cannot leave one stuck.
+            let folded = folds
+                .as_ref()
+                .is_some_and(|f| (*fold == Fold::Closed) != f.borrow().contains(&index));
+            let header = div()
+                .id(("md-alert", index))
+                .flex()
+                .items_center()
+                .gap(theme.space_2)
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(color)
+                .child(icon(glyph, 16.0, color))
+                .child(kind.title())
+                .when_some(folds.clone(), |d, folds| {
+                    d.cursor_pointer()
+                        .child(icon(
+                            if folded {
+                                Icon::ChevronRight
+                            } else {
+                                Icon::ChevronDown
+                            },
+                            14.0,
+                            theme.text_muted,
+                        ))
+                        .on_click(move |_, window, cx| {
+                            // Keep the preview's double-click-to-edit from also firing.
+                            cx.stop_propagation();
+                            let mut flipped = folds.borrow_mut();
+                            if !flipped.remove(&index) {
+                                flipped.insert(index);
+                            }
+                            window.refresh();
+                        })
+                });
             div()
                 .flex()
                 .flex_col()
@@ -196,19 +251,12 @@ fn render_block(
                 .py(theme.space_1)
                 .border_l_4()
                 .border_color(color)
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(theme.space_2)
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(color)
-                        .child(icon(glyph, 16.0, color))
-                        .child(kind.title()),
-                )
+                .child(header)
+                // A folded alert draws only its header.
                 .children(
                     blocks
                         .iter()
+                        .filter(|_| !folded)
                         .map(|b| render_block(b, &theme, hook, counter, true)),
                 )
                 .into_any_element()
