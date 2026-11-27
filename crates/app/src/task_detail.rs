@@ -621,6 +621,29 @@ impl TaskDetail {
         cx.notify();
     }
 
+    /// Ticks or unticks the checklist marker at `range` in the description (a
+    /// click on a preview checkbox). Skipped if the text no longer matches what
+    /// the preview saw.
+    fn toggle_body_task(&mut self, range: &std::ops::Range<usize>, cx: &mut Context<Self>) {
+        let task = self.task_id;
+        self.state.update(cx, |state, cx| {
+            let Some(id) = state.body_note(task) else {
+                return;
+            };
+            let Some(content) = state.read_note_content(id) else {
+                return;
+            };
+            let Some((replace, text)) = markdown::toggle_marker(&content, range) else {
+                return;
+            };
+            let mut updated = content;
+            updated.replace_range(replace, text);
+            state.write_note_content(id, &updated);
+            cx.notify();
+        });
+        cx.notify();
+    }
+
     /// Opens another task's page (a subtask, or the parent).
     fn open_task(&mut self, id: TaskId, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(open) = &self.on_open_task {
@@ -1115,6 +1138,7 @@ impl TaskDetail {
                 }
                 let me = cx.entity();
                 let edit_me = me.clone();
+                let toggle_me = me.clone();
                 let hook = markdown_view::CopyHook {
                     select: self.preview_select.clone(),
                     on_edit: Some(std::rc::Rc::new(move |_block, window, cx| {
@@ -1139,8 +1163,11 @@ impl TaskDetail {
                             .detach();
                         });
                     }),
-                    // The checklist boxes are edited in the note page.
-                    on_toggle: std::rc::Rc::new(|_, _, _| {}),
+                    // Ticking a box rewrites its marker in the body note, which
+                    // refreshes the cached preview through the note's timestamp.
+                    on_toggle: std::rc::Rc::new(move |range, _window, cx| {
+                        toggle_me.update(cx, |this, cx| this.toggle_body_task(&range, cx));
+                    }),
                     on_link: std::rc::Rc::new(|href, _window, _cx| {
                         // Web and mail links only; the target is untrusted.
                         let _ = crate::external::open_url(&href);
