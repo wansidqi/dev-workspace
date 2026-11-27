@@ -36,8 +36,9 @@ pub type ToggleHandler = Rc<dyn Fn(std::ops::Range<usize>, &mut Window, &mut App
 /// Called with a link's destination (a URL or `#anchor`) when it is clicked.
 pub type LinkHandler = Rc<dyn Fn(String, &mut Window, &mut App)>;
 
-/// Called with the top-level block's index when a block is double-clicked.
-pub type EditHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
+/// Called with the top-level block's index and the pointer position when a
+/// block is double-clicked.
+pub type EditHandler = Rc<dyn Fn(usize, gpui::Point<gpui::Pixels>, &mut Window, &mut App)>;
 
 /// What the preview needs from its owner: which code block was just copied (to
 /// show "Copied"), what to do on a copy click, when a task checkbox is clicked,
@@ -81,7 +82,7 @@ pub fn render_blocks(blocks: &[Block], theme: &GlassTheme, hook: &CopyHook) -> V
                         // container's own handler must not also fire.
                         if event.click_count() >= 2 {
                             cx.stop_propagation();
-                            on_edit(i, window, cx);
+                            on_edit(i, event.position(), window, cx);
                         }
                     })
                 })

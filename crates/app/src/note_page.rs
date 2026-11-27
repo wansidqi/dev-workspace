@@ -105,13 +105,22 @@ impl Root {
         cx.notify();
     }
 
-    /// Double-click in the preview: switch to the editor with the cursor at the
-    /// start of the block that was clicked, scrolled into view.
-    fn edit_note_at_block(&mut self, block: usize, window: &mut Window, cx: &mut Context<Self>) {
+    /// Double-click in the preview: switch to the editor with the cursor on the
+    /// letter that was clicked (found by matching the clicked word inside the
+    /// block's source), or at the block's start when that cannot be told,
+    /// scrolled into view.
+    fn edit_note_at(
+        &mut self,
+        block: usize,
+        at: gpui::Point<gpui::Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let clicked = self.preview_select.borrow().text_at(at);
         let offset = self
             .note_preview
             .as_ref()
-            .and_then(|(_, _, starts)| starts.get(block).copied().flatten());
+            .and_then(|(source, _, starts)| markdown::click_offset(source, starts, block, clicked));
         self.set_note_mode(NoteMode::Edit, window, cx);
         if let (Some(offset), Some((_, _, editor))) = (offset, self.open_note.clone()) {
             editor.update(cx, |e, cx| e.place_cursor(offset, window, cx));
@@ -280,8 +289,8 @@ impl Root {
                     });
                 }),
                 on_edit: editable.then(|| {
-                    std::rc::Rc::new(move |block, window: &mut Window, cx: &mut gpui::App| {
-                        open_root.update(cx, |this, cx| this.edit_note_at_block(block, window, cx));
+                    std::rc::Rc::new(move |block, at, window: &mut Window, cx: &mut gpui::App| {
+                        open_root.update(cx, |this, cx| this.edit_note_at(block, at, window, cx));
                     }) as markdown_view::EditHandler
                 }),
                 copied: this.note_copied,

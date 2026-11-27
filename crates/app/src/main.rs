@@ -515,11 +515,14 @@ impl Root {
                 });
             }));
             let edit_root = root.clone();
-            detail.on_edit_note = Some(Box::new(move |id, title, window, cx| {
+            detail.on_edit_note = Some(Box::new(move |id, title, offset, window, cx| {
                 edit_root.update(cx, |root, cx| {
                     root.open_note(id, title, cx);
                     root.set_note_mode(note_page::NoteMode::Edit, window, cx);
                     root.close_note_on_save = true;
+                    if let (Some(offset), Some((_, _, editor))) = (offset, root.open_note.clone()) {
+                        editor.update(cx, |e, cx| e.place_cursor(offset, window, cx));
+                    }
                 });
             }));
             let history_root = root.clone();

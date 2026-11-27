@@ -34,6 +34,19 @@ use crate::ui::{
 
 pub type CloseHandler = Box<dyn Fn(&mut Window, &mut App)>;
 pub type OpenNoteHandler = Box<dyn Fn(NoteId, SharedString, &mut Window, &mut App)>;
+/// Opens a note in the editor, with the cursor at a byte offset when given.
+pub type EditNoteHandler = Box<dyn Fn(NoteId, SharedString, Option<usize>, &mut Window, &mut App)>;
+
+/// The parsed body note with what a click needs to find its place in the
+/// source; kept until the note changes.
+struct BodyCache {
+    note: NoteId,
+    updated: i64,
+    blocks: Vec<Block>,
+    source: String,
+    /// Where each block starts in `source`.
+    starts: Vec<Option<usize>>,
+}
 /// Opens a task's page; the flag asks for its Subtasks tab.
 pub type OpenTaskHandler = Box<dyn Fn(TaskId, bool, &mut Window, &mut App)>;
 
@@ -93,7 +106,7 @@ pub struct TaskDetail {
     /// Pulls and pushes this task's GitHub issue; also says what went wrong.
     issue_sync: Entity<IssueSync>,
     /// The parsed body note, kept until the note changes.
-    body_cache: Option<(NoteId, i64, Vec<Block>)>,
+    body_cache: Option<BodyCache>,
     /// Text selection of the body preview (each text registers with it).
     preview_select: preview_select::Shared,
     /// Focus scope of the description: Ctrl+C / Ctrl+A / Ctrl+F act on it.
@@ -134,7 +147,7 @@ pub struct TaskDetail {
     pub on_open_note: Option<OpenNoteHandler>,
     /// Opens a note straight in Edit mode (the description's Edit button and
     /// double-click); `on_open_note` opens it for reading.
-    pub on_edit_note: Option<OpenNoteHandler>,
+    pub on_edit_note: Option<EditNoteHandler>,
     /// Opens another task's page (a subtask, or the parent on Back).
     pub on_open_task: Option<OpenTaskHandler>,
     /// Jump to the commit browser to map more commits.
@@ -598,6 +611,17 @@ impl TaskDetail {
     /// Opens the task's body note in the note page (made first if the task
     /// has none yet).
     fn open_body_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_body_note_at(None, window, cx);
+    }
+
+    /// Like [`Self::open_body_note`], with the editor's cursor at `offset` (a
+    /// byte offset into the description) when given.
+    fn open_body_note_at(
+        &mut self,
+        offset: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let task = self.task_id;
         let note = self.state.update(cx, |state, cx| {
             let id = state.ensure_body_note(task);
@@ -613,7 +637,7 @@ impl TaskDetail {
         match note {
             Some((id, title)) => {
                 if let Some(open) = &self.on_edit_note {
-                    open(id, title.into(), window, cx);
+                    open(id, title.into(), offset, window, cx);
                 }
             }
             None => self.notice = Some(("Couldn't open the description".into(), true)),
@@ -1087,14 +1111,21 @@ impl TaskDetail {
                 let stale = self
                     .body_cache
                     .as_ref()
-                    .is_none_or(|(cached, at, _)| (*cached, *at) != (id, updated));
+                    .is_none_or(|c| (c.note, c.updated) != (id, updated));
                 if stale {
                     let content = self
                         .state
                         .read(cx)
                         .read_note_content(id)
                         .unwrap_or_default();
-                    self.body_cache = Some((id, updated, markdown::parse_mapped(&content).0));
+                    let (blocks, starts) = markdown::parse_mapped(&content);
+                    self.body_cache = Some(BodyCache {
+                        note: id,
+                        updated,
+                        blocks,
+                        source: content,
+                        starts,
+                    });
                     // The old selection pointed into text that is gone.
                     self.preview_select.borrow_mut().clear();
                 }
@@ -1104,7 +1135,7 @@ impl TaskDetail {
                     String::new()
                 };
                 self.preview_select.borrow_mut().set_query(&query);
-                let blocks: &[Block] = self.body_cache.as_ref().map_or(&[], |(_, _, b)| b);
+                let blocks: &[Block] = self.body_cache.as_ref().map_or(&[], |c| &c.blocks);
                 out.push(
                     div()
                         .flex()
@@ -1141,8 +1172,15 @@ impl TaskDetail {
                 let toggle_me = me.clone();
                 let hook = markdown_view::CopyHook {
                     select: self.preview_select.clone(),
-                    on_edit: Some(std::rc::Rc::new(move |_block, window, cx| {
-                        edit_me.update(cx, |this, cx| this.open_body_note(window, cx));
+                    on_edit: Some(std::rc::Rc::new(move |block, at, window, cx| {
+                        edit_me.update(cx, |this, cx| {
+                            // Cursor on the clicked letter, not just the block.
+                            let clicked = this.preview_select.borrow().text_at(at);
+                            let offset = this.body_cache.as_ref().and_then(|c| {
+                                markdown::click_offset(&c.source, &c.starts, block, clicked)
+                            });
+                            this.open_body_note_at(offset, window, cx)
+                        });
                     })),
                     copied: self.copied,
                     on_copy: std::rc::Rc::new(move |index, _text, _window, cx| {

@@ -270,6 +270,17 @@ impl Selection {
         Some((ix, if entry.blank { 0 } else { offset }))
     }
 
+    /// The text under the pointer and the byte offset of the character
+    /// there, for turning a click into a position in the note's source.
+    pub fn text_at(&self, at: Point<Pixels>) -> Option<(String, usize)> {
+        let (ix, offset) = self.hit(at)?;
+        let entry = self.entries.get(ix)?;
+        if entry.blank {
+            return None;
+        }
+        Some((entry.layout.text(), offset))
+    }
+
     /// The selected text, or `None` when nothing is selected.
     pub fn selected_text(&self) -> Option<String> {
         let (start, end) = ordered(self.anchor?, self.head?);

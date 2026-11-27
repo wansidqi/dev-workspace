@@ -179,6 +179,84 @@ pub fn parse_mapped(source: &str) -> (Vec<Block>, Vec<Option<usize>>) {
     (body, starts)
 }
 
+/// The editor offset for a double-click in the preview: on the clicked letter
+/// when `clicked` (the rendered text under the pointer and the byte offset in
+/// it) can be found in the block's source, else the block's start. `starts` is
+/// [`parse_mapped`]'s second result; `None` when that block has no source (the
+/// synthesised footnotes).
+pub fn click_offset(
+    source: &str,
+    starts: &[Option<usize>],
+    block: usize,
+    clicked: Option<(String, usize)>,
+) -> Option<usize> {
+    let start = starts.get(block).copied().flatten()?;
+    let Some((rendered, in_text)) = clicked else {
+        return Some(start);
+    };
+    // The block runs to the next block's start (or the note's end).
+    let end = starts
+        .iter()
+        .skip(block + 1)
+        .find_map(|s| *s)
+        .unwrap_or(source.len())
+        .min(source.len());
+    let slice = source.get(start..end)?;
+    Some(start + locate_in_source(slice, &rendered, in_text))
+}
+
+/// Where in a block's markdown `source` the preview text `rendered` at byte
+/// `offset` came from, so a double-click on a word lands the editor's cursor on
+/// that word. Markup (`**`, links, bullets) is gone from the rendered text, so
+/// this matches text, not positions: first the text just before the click
+/// together with the clicked word, then the word alone (the occurrence at the
+/// same relative place wins). Returns an offset into `source`; 0 (the block's
+/// start) when nothing matches.
+pub fn locate_in_source(source: &str, rendered: &str, offset: usize) -> usize {
+    let mut offset = offset.min(rendered.len());
+    while !rendered.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let word_start = rendered[..offset]
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| is_word(*c))
+        .last()
+        .map_or(offset, |(i, _)| i);
+    let word_end = rendered[offset..]
+        .char_indices()
+        .find(|(_, c)| !is_word(*c))
+        .map_or(rendered.len(), |(i, _)| offset + i);
+    let word = &rendered[word_start..word_end];
+    if word.is_empty() {
+        return 0;
+    }
+    let within = offset - word_start;
+
+    // A few characters before the word tell repeated words apart.
+    let mut ctx_start = word_start;
+    for (i, _) in rendered[..word_start].char_indices().rev().take(12) {
+        ctx_start = i;
+    }
+    let with_ctx = &rendered[ctx_start..word_end];
+    if ctx_start < word_start {
+        if let Some(at) = source.find(with_ctx) {
+            return at + (word_start - ctx_start) + within;
+        }
+    }
+    let ratio = word_start as f64 / rendered.len().max(1) as f64;
+    source
+        .match_indices(word)
+        .map(|(at, _)| at)
+        .min_by(|a, b| {
+            let da = (*a as f64 / source.len().max(1) as f64 - ratio).abs();
+            let db = (*b as f64 / source.len().max(1) as f64 - ratio).abs();
+            da.total_cmp(&db)
+        })
+        .map_or(0, |at| at + within)
+}
+
 /// Passes events through while remembering the source range of the last one, so
 /// task markers can be located without threading ranges through every parser.
 struct Tracked<'p, I> {
@@ -949,6 +1027,45 @@ mod tests {
         assert_eq!(blocks.len(), starts.len());
         let at = |s: &str| src.find(s);
         assert_eq!(starts, vec![Some(0), at("para"), at("```"), at("- a")]);
+    }
+
+    #[test]
+    fn a_click_lands_on_the_clicked_word_and_letter() {
+        let src = "I will refine the plan and refine it again";
+        // Plain text maps one to one: the second "refine", on its "i".
+        let rendered = src;
+        let click = src.rfind("refine").unwrap() + 3;
+        assert_eq!(locate_in_source(src, rendered, click), click);
+        // The first "refine" is told apart from the second.
+        let first = src.find("refine").unwrap() + 3;
+        assert_eq!(locate_in_source(src, rendered, first), first);
+    }
+
+    #[test]
+    fn markup_before_the_word_does_not_throw_the_match_off() {
+        let src = "- **bold** and [a link](http://x.test) then refine here";
+        let rendered = "bold and a link then refine here";
+        let click = rendered.find("refine").unwrap() + 3;
+        assert_eq!(
+            locate_in_source(src, rendered, click),
+            src.find("refine").unwrap() + 3
+        );
+        // Inside bold text.
+        let click = rendered.find("bold").unwrap() + 1;
+        assert_eq!(
+            locate_in_source(src, rendered, click),
+            src.find("bold").unwrap() + 1
+        );
+    }
+
+    #[test]
+    fn nothing_to_match_falls_back_to_the_block_start() {
+        assert_eq!(locate_in_source("abc", "xyz", 1), 0);
+        assert_eq!(locate_in_source("abc", "", 0), 0);
+        // Multibyte text never splits a character.
+        let src = "héllo wörld";
+        let at = locate_in_source(src, src, 8);
+        assert!(src.is_char_boundary(at));
     }
 
     #[test]
