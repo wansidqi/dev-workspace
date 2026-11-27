@@ -13,11 +13,12 @@ Rules that still apply to all of them: notes are untrusted input (raw HTML stays
 ### High value, fits the app
 
 - [ ] **Task and note references.** Two syntaxes, built in two steps. Both render as clickable chips that open the target, and both are **same project only**.
-  - [ ] Step 1: `[[Title]]` links a note or a task by title. Typing `[[` opens an autocomplete list of the project's notes and tasks and inserts the chosen title.
+  - [x] Step 1a (2026-11-27): `[[Title]]` and `[[Title|label]]` render as links in note previews and task descriptions; a click opens the project note, or else the task, with that title (case-insensitive, a note wins over a task). A missing title shows a notice. Code in `markdown.rs` (`split_refs`), `refs.rs` (resolver), `note_page.rs` and `task_detail.rs` (click handlers).
+  - [x] Step 1b (2026-11-27): typing `[[` in the note editor opens a popup under the caret listing the project's notes and tasks, filtered as you type (prefix, then word, then contains). Up/Down move, Enter or Tab (or a click) insert `[[Title]]`, Escape closes the popup first. Logic in `refs.rs` (`open_query`, `filter`, `candidates`), popup in `note_editor.rs`. Subtasks show "in Parent › Child" in the popup and are written with their chain (`[[Release › Deploy › Plan]]`), so a link finds the task you picked and not a namesake; a bare `[[Plan]]` prefers the top-level task, and a chain may start lower down (`[[Deploy › Plan]]`). Typing a parent's name and `›` or `>` lists only its subtasks. Tried by hand in the app: popup and rendered link confirmed.
+  - [ ] Step 1c: style a reference differently from a web link and mark a broken one as "not found" (muted) in the preview, before any click.
   - [ ] Step 2: `#4` links a task by number (the same convention the git code already uses to suggest commits for a task). Typing `#` opens a task picker. The chip shows the task title and status. Notes have no number, so `#` is for tasks only.
   - Check first whether task numbers are visible in the UI. If not, show the number on the task page before step 2, or ship only `[[...]]`.
-  - Resolve titles in one background pass per note and cache the result; never query the database on the UI thread.
-  - A deleted or missing target renders as a muted "not found" chip.
+  - Titles resolve from the project's notes and tasks already held in `AppState`, so no database query or background pass is needed.
   - Cross-project (`[[Project name/Title]]`) is out of scope for now. Task numbers are only unique within a project, so `#4` never crosses projects.
 - [ ] **Commit references.** A short hash in backticks or `repo@hash` renders as a chip that opens the commit in History. Identify a commit by (repo_id, hash), never by hash alone. Optionally offer "link to this task".
 - [ ] **Code block extras.** Line numbers, a filename title (`` ```rust title="main.rs" ``), highlighted lines, and diff colouring for `diff` blocks (reuse the git diff colours).

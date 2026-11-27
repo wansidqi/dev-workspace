@@ -440,8 +440,68 @@ impl Inline {
     }
 
     fn take(&mut self) -> Vec<Span> {
-        std::mem::take(&mut self.spans)
+        split_refs(std::mem::take(&mut self.spans))
     }
+}
+
+/// Prefix of the `href` that a `[[Title]]` reference carries. A reference
+/// is a link to a note or task of the same project, resolved by title when it
+/// is clicked, so it never reaches the OS (see `external::open_url`).
+pub const REF_SCHEME: &str = "devspace-ref:";
+
+/// The title a reference `href` points at, or `None` for any other link.
+pub fn ref_target(href: &str) -> Option<&str> {
+    href.strip_prefix(REF_SCHEME)
+}
+
+/// Turns `[[Title]]` and `[[Title|label]]` in plain text into link spans.
+/// Adjacent plain text has already been merged into one span, so a reference
+/// is never split across spans. Code, existing links and anything with a
+/// newline or bracket inside stay as written.
+fn split_refs(spans: Vec<Span>) -> Vec<Span> {
+    let mut out = Vec::with_capacity(spans.len());
+    for span in spans {
+        if span.code || span.link || !span.text.contains("[[") {
+            out.push(span);
+            continue;
+        }
+        let mut rest = span.text.as_str();
+        let piece = |text: &str| Span {
+            text: text.to_string(),
+            ..span.clone()
+        };
+        while let Some(open) = rest.find("[[") {
+            let inner = &rest[open + 2..];
+            let Some(close) = inner.find("]]") else { break };
+            let body = &inner[..close];
+            let (target, label) = match body.split_once('|') {
+                Some((t, l)) => (t.trim(), l.trim()),
+                None => (body.trim(), body.trim()),
+            };
+            let valid = !target.is_empty() && !label.is_empty() && !body.contains(['\n', '[', ']']);
+            if !valid {
+                // Keep the brackets as text and look past this opener.
+                let keep = open + 2;
+                out.push(piece(&rest[..keep]));
+                rest = &rest[keep..];
+                continue;
+            }
+            if open > 0 {
+                out.push(piece(&rest[..open]));
+            }
+            out.push(Span {
+                text: label.to_string(),
+                link: true,
+                href: Some(format!("{REF_SCHEME}{target}")),
+                ..span.clone()
+            });
+            rest = &inner[close + 2..];
+        }
+        if !rest.is_empty() {
+            out.push(piece(rest));
+        }
+    }
+    out
 }
 
 /// Superscript or subscript form of `c` where Unicode has one.
@@ -1194,6 +1254,46 @@ mod tests {
             panic!("expected nested list");
         };
         assert_eq!(inner[0].checked, Some(true));
+    }
+
+    #[test]
+    fn double_brackets_become_references() {
+        let blocks = parse("See [[Deploy checklist]] and **[[Setup|the setup]]** now.");
+        let spans = para(&blocks, 0);
+        let refs: Vec<(&str, &str, bool)> = spans
+            .iter()
+            .filter_map(|s| ref_target(s.href.as_deref()?).map(|t| (s.text.as_str(), t, s.bold)))
+            .collect();
+        assert_eq!(
+            refs,
+            vec![
+                ("Deploy checklist", "Deploy checklist", false),
+                ("the setup", "Setup", true),
+            ]
+        );
+        let text: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(text, "See Deploy checklist and the setup now.");
+    }
+
+    #[test]
+    fn broken_or_quoted_references_stay_text() {
+        for src in [
+            "[[]]",
+            "[[ ]]",
+            "[[open",
+            "[[a  \nb]]",
+            "`[[code]]`",
+            "[[a[b]]",
+        ] {
+            let blocks = parse(src);
+            let any = match blocks.first() {
+                Some(Block::Paragraph(spans)) => spans
+                    .iter()
+                    .any(|s| s.href.as_deref().and_then(ref_target).is_some()),
+                _ => false,
+            };
+            assert!(!any, "{src:?} must not become a reference");
+        }
     }
 
     #[test]

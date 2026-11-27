@@ -668,6 +668,33 @@ impl TaskDetail {
         cx.notify();
     }
 
+    /// A click on a link in the description: a `[[Title]]` reference opens the
+    /// note or task of this project it names; anything else is a web or mail
+    /// link (the target is untrusted, so `open_url` filters it).
+    fn follow_link(&mut self, href: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(title) = markdown::ref_target(href) {
+            let target = {
+                let state = self.state.read(cx);
+                crate::refs::resolve(title, &state.notes, &state.tasks)
+            };
+            match target {
+                Some(crate::refs::RefTarget::Note(id)) => {
+                    if let Some(open) = &self.on_open_note {
+                        open(id, SharedString::from(title.trim().to_string()), window, cx);
+                    }
+                }
+                Some(crate::refs::RefTarget::Task(id)) => self.open_task(id, window, cx),
+                None => {
+                    self.notice =
+                        Some((format!("No note or task named \"{}\"", title.trim()), true));
+                    cx.notify();
+                }
+            }
+            return;
+        }
+        let _ = crate::external::open_url(href);
+    }
+
     /// Opens another task's page (a subtask, or the parent).
     fn open_task(&mut self, id: TaskId, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(open) = &self.on_open_task {
@@ -1170,6 +1197,7 @@ impl TaskDetail {
                 let me = cx.entity();
                 let edit_me = me.clone();
                 let toggle_me = me.clone();
+                let link_me = me.clone();
                 let hook = markdown_view::CopyHook {
                     select: self.preview_select.clone(),
                     on_edit: Some(std::rc::Rc::new(move |block, at, window, cx| {
@@ -1206,9 +1234,8 @@ impl TaskDetail {
                     on_toggle: std::rc::Rc::new(move |range, _window, cx| {
                         toggle_me.update(cx, |this, cx| this.toggle_body_task(&range, cx));
                     }),
-                    on_link: std::rc::Rc::new(|href, _window, _cx| {
-                        // Web and mail links only; the target is untrusted.
-                        let _ = crate::external::open_url(&href);
+                    on_link: std::rc::Rc::new(move |href, window, cx| {
+                        link_me.update(cx, |this, cx| this.follow_link(&href, window, cx));
                     }),
                 };
                 let select = self.preview_select.clone();

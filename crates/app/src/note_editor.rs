@@ -19,12 +19,15 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::refs::{self, Candidate};
 use crate::text_input::TextInput;
 use crate::theme::{GlassTheme, TypeScale};
 use crate::ui::{icon_button, Icon};
 
 pub type ChangeHandler = Box<dyn Fn(&str, &mut Window, &mut Context<NoteEditor>)>;
 pub type CloseHandler = Box<dyn Fn(&mut Window, &mut Context<NoteEditor>)>;
+/// Supplies the suggestions for `[[`: the notes and tasks of the open project.
+pub type RefSource = Box<dyn Fn(&App) -> Vec<Candidate>>;
 
 actions!(
     devspace_note_editor,
@@ -55,6 +58,7 @@ actions!(
         NeFind,
         NeFindNext,
         NeFindPrev,
+        NeAcceptRef,
     ]
 );
 
@@ -89,6 +93,7 @@ pub fn init_key_bindings(cx: &mut App) {
         KeyBinding::new("home", NeHome, Some("NoteEditor")),
         KeyBinding::new("end", NeEnd, Some("NoteEditor")),
         KeyBinding::new("enter", NeNewline, Some("NoteEditor")),
+        KeyBinding::new("tab", NeAcceptRef, Some("NoteEditor")),
         KeyBinding::new("escape", NeClose, Some("NoteEditor")),
         KeyBinding::new("ctrl-s", NeSave, Some("NoteEditor")),
         KeyBinding::new("cmd-s", NeSave, Some("NoteEditor")),
@@ -119,6 +124,14 @@ pub struct NoteEditor {
     pub on_close: Option<CloseHandler>,
     /// Called on Ctrl+S (the caller switches to the preview).
     pub on_save: Option<CloseHandler>,
+    /// Lists the notes and tasks a `[[` can point at (set by the page that
+    /// owns the project). Called only while the popup could show.
+    pub ref_source: Option<RefSource>,
+    /// The highlighted row of the `[[` popup.
+    ref_selected: usize,
+    /// The reference (by where its query starts) that Escape closed the popup
+    /// for, so it stays closed until the caret moves on to another `[[`.
+    ref_dismissed: Option<usize>,
     /// Tracks the scroller so the cursor can be kept in view while typing.
     scroll_handle: ScrollHandle,
     /// Set by every selection or content change; the next paint scrolls the
@@ -187,9 +200,162 @@ impl NoteEditor {
             on_change: None,
             on_close: None,
             on_save: None,
+            ref_source: None,
+            ref_selected: 0,
+            ref_dismissed: None,
             scroll_handle: ScrollHandle::new(),
             reveal_cursor: true,
             theme,
+        }
+    }
+
+    /// The `[[` suggestion popup, when it should be showing: where the typed
+    /// query starts, and the matching notes and tasks. `None` while the caret
+    /// is not inside an unfinished `[[`, after Escape closed it for this
+    /// reference, or when nothing matches.
+    fn ref_popup(&self, cx: &App) -> Option<(usize, Vec<Candidate>)> {
+        let source = self.ref_source.as_ref()?;
+        if !self.selected_range.is_empty() {
+            return None;
+        }
+        let (start, query) = refs::open_query(&self.content, self.cursor_offset())?;
+        if self.ref_dismissed == Some(start) {
+            return None;
+        }
+        let list = refs::filter(query, &source(cx));
+        (!list.is_empty()).then_some((start, list))
+    }
+
+    /// Writes the highlighted suggestion over the typed query as
+    /// `[[Title]]` and puts the caret after the closing brackets. Returns
+    /// false when no popup is showing, so the key keeps its normal meaning.
+    fn accept_ref(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some((start, list)) = self.ref_popup(cx) else {
+            return false;
+        };
+        let Some(pick) = list.get(self.ref_selected.min(list.len() - 1)) else {
+            return false;
+        };
+        let caret = self.cursor_offset();
+        // Typing `[[` inside text that already has `]]` must not double them.
+        let end = if self.content[caret..].starts_with("]]") {
+            caret + 2
+        } else {
+            caret
+        };
+        let text = format!("{}]]", pick.reference);
+        let range = self.range_to_utf16(&(start..end));
+        self.replace_text_in_range(Some(range), &text, window, cx);
+        true
+    }
+
+    /// Moves the highlight in the suggestion popup, wrapping at both ends.
+    /// Returns false when no popup is showing.
+    fn step_ref(&mut self, dir: isize, cx: &mut Context<Self>) -> bool {
+        let Some((_, list)) = self.ref_popup(cx) else {
+            return false;
+        };
+        let n = list.len() as isize;
+        self.ref_selected = (self.ref_selected as isize + dir).rem_euclid(n) as usize;
+        cx.notify();
+        true
+    }
+
+    /// The `[[` popup under the caret, drawn above everything (it may hang
+    /// out of the scroller) and kept inside the window.
+    fn render_ref_popup(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let (_, list) = self.ref_popup(cx)?;
+        let bounds = self.last_bounds?;
+        let caret = self.caret_point(self.cursor_offset())?;
+        let at = bounds.origin + caret + point(px(0.0), self.last_line_height + px(4.0));
+        let theme = self.theme;
+        let selected = self.ref_selected.min(list.len() - 1);
+        let rows = list.into_iter().enumerate().map(|(ix, c)| {
+            let (glyph, label) = match (c.is_task, c.parent.is_some()) {
+                (true, true) => (Icon::CircleCheck, "Subtask"),
+                (true, false) => (Icon::CircleCheck, "Task"),
+                (false, _) => (Icon::FileText, "Note"),
+            };
+            div()
+                .id(("ref-suggestion", ix))
+                .flex()
+                .items_center()
+                .gap(theme.space_2)
+                .px(theme.space_2)
+                .py(theme.space_1)
+                .rounded(theme.radius_sm)
+                .cursor_pointer()
+                .when(ix == selected, |d| d.bg(theme.accent.opacity(0.16)))
+                .when(ix != selected, |d| {
+                    d.hover(move |s| s.bg(theme.surface_hover))
+                })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        // Keep the click from moving the caret under the popup.
+                        cx.stop_propagation();
+                        this.ref_selected = ix;
+                        this.accept_ref(window, cx);
+                    }),
+                )
+                .child(crate::ui::icon(glyph, 14.0, theme.text_muted))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .t_body()
+                                .text_color(theme.text_primary)
+                                .child(c.title),
+                        )
+                        // A subtask says which task it sits under.
+                        .children(c.parent.map(|parent| {
+                            div()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .t_small()
+                                .text_color(theme.text_muted)
+                                .child(format!("in {parent}"))
+                        })),
+                )
+                .child(div().t_small().text_color(theme.text_muted).child(label))
+        });
+        let popup = div()
+            .w(px(320.0))
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .p(theme.space_1)
+            .rounded(theme.radius_md)
+            .border_1()
+            .border_color(theme.border_light)
+            .bg(theme.surface_solid)
+            .shadow_lg()
+            .occlude()
+            .children(rows);
+        Some(
+            gpui::deferred(
+                gpui::anchored()
+                    .position(at)
+                    .anchor(gpui::Anchor::TopLeft)
+                    .snap_to_window_with_margin(px(8.0))
+                    .child(popup),
+            )
+            .with_priority(10)
+            .into_any_element(),
+        )
+    }
+
+    fn accept_ref_action(&mut self, _: &NeAcceptRef, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.accept_ref(window, cx) {
+            cx.propagate();
         }
     }
 
@@ -245,11 +411,15 @@ impl NoteEditor {
     }
 
     fn up(&mut self, _: &NeUp, window: &mut Window, cx: &mut Context<Self>) {
-        self.move_vertical(-1, window, cx);
+        if !self.step_ref(-1, cx) {
+            self.move_vertical(-1, window, cx);
+        }
     }
 
     fn down(&mut self, _: &NeDown, window: &mut Window, cx: &mut Context<Self>) {
-        self.move_vertical(1, window, cx);
+        if !self.step_ref(1, cx) {
+            self.move_vertical(1, window, cx);
+        }
     }
 
     /// Moves the caret one visual row up (`-1`) or down (`1`), keeping its
@@ -442,10 +612,19 @@ impl NoteEditor {
     }
 
     fn newline(&mut self, _: &NeNewline, window: &mut Window, cx: &mut Context<Self>) {
+        if self.accept_ref(window, cx) {
+            return;
+        }
         self.replace_text_in_range(None, "\n", window, cx);
     }
 
     fn close(&mut self, _: &NeClose, window: &mut Window, cx: &mut Context<Self>) {
+        // Escape first closes the suggestion popup; the next one leaves the note.
+        if let Some((start, _)) = self.ref_popup(cx) {
+            self.ref_dismissed = Some(start);
+            cx.notify();
+            return;
+        }
         if let Some(handler) = self.on_close.take() {
             handler(window, cx);
             self.on_close = Some(handler);
@@ -819,6 +998,8 @@ impl NoteEditor {
     }
 
     fn notify_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The suggestion list changes with every edit, so start at its top.
+        self.ref_selected = 0;
         if let Some(handler) = self.on_change.take() {
             handler(&self.content.clone(), window, cx);
             self.on_change = Some(handler);
@@ -1359,6 +1540,11 @@ impl Render for NoteEditor {
         let theme = self.theme;
         self.refresh_find(cx);
         let focused = self.focus_handle.is_focused(window);
+        let popup = if focused {
+            self.render_ref_popup(cx)
+        } else {
+            None
+        };
         // The scroll container carries the frame; the padded text box inside it
         // grows with the content (padding on the scroller itself clips the text).
         let editor = div()
@@ -1392,6 +1578,7 @@ impl Render for NoteEditor {
             .on_action(cx.listener(Self::open_find))
             .on_action(cx.listener(Self::find_next))
             .on_action(cx.listener(Self::find_prev))
+            .on_action(cx.listener(Self::accept_ref_action))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -1405,7 +1592,8 @@ impl Render for NoteEditor {
             .child(NoteTextElement {
                 input: cx.entity(),
                 theme,
-            });
+            })
+            .children(popup);
         let scroller = div()
             .id("note-editor-scroll")
             .flex_1()

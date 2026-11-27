@@ -143,9 +143,36 @@ impl Root {
             }
             return;
         }
+        if let Some(title) = markdown::ref_target(href) {
+            self.follow_reference(title, cx);
+            return;
+        }
         if let Err(message) = crate::external::open_url(href) {
             self.workspace_tools
                 .update(cx, |tools, cx| tools.set_notice(message, true, cx));
+        }
+    }
+
+    /// Opens the note or task a `[[Title]]` reference names, in this project.
+    /// A title nothing matches (renamed or deleted) shows a notice instead.
+    fn follow_reference(&mut self, title: &str, cx: &mut Context<Self>) {
+        let target = {
+            let state = self.state.read(cx);
+            crate::refs::resolve(title, &state.notes, &state.tasks)
+        };
+        match target {
+            Some(crate::refs::RefTarget::Note(id)) => {
+                self.open_note(id, SharedString::from(title.trim().to_string()), cx);
+            }
+            Some(crate::refs::RefTarget::Task(id)) => {
+                self.open_note = None;
+                self.open_task_detail(id, cx);
+            }
+            None => {
+                let message = format!("No note or task named \"{}\"", title.trim());
+                self.workspace_tools
+                    .update(cx, |tools, cx| tools.set_notice(message, true, cx));
+            }
         }
     }
 

@@ -33,6 +33,7 @@ mod preview_select;
 mod project_files;
 mod project_page;
 mod qa;
+mod refs;
 mod run_panel;
 mod settings;
 mod shell;
@@ -460,6 +461,12 @@ impl Root {
                     root.open_note = None;
                     cx.notify();
                 });
+            }));
+            // `[[` suggests this project's notes and tasks.
+            let ref_state = state.clone();
+            editor.ref_source = Some(Box::new(move |cx| {
+                let state = ref_state.read(cx);
+                refs::candidates(&state.notes, &state.tasks)
             }));
             let save_root = root.clone();
             editor.on_save = Some(Box::new(move |window, cx| {
