@@ -50,6 +50,8 @@ pub struct CredentialsPanel {
     edit_host: Entity<TextInput>,
     /// A new password for the credential being edited; empty keeps the old one.
     edit_value: Entity<TextInput>,
+    /// The kind chosen for the credential being edited.
+    edit_kind: CredentialKind,
     /// Kind given to the credential being added; the chip cycles it.
     kind: CredentialKind,
     /// Result of the last action: (message, is_error).
@@ -140,6 +142,7 @@ impl CredentialsPanel {
             edit_username,
             edit_host,
             edit_value,
+            edit_kind: CredentialKind::Password,
             kind: CredentialKind::Password,
             notice: None,
             revealed: None,
@@ -165,6 +168,7 @@ impl CredentialsPanel {
         };
         self.confirm_delete = None;
         self.editing = Some(id);
+        self.edit_kind = meta.kind;
         self.rename_input
             .update(cx, |i, _| i.set_text_selected(meta.label));
         self.edit_username
@@ -204,13 +208,8 @@ impl CredentialsPanel {
         let username = self.edit_username.read(cx).content.to_string();
         let host = self.edit_host.read(cx).content.to_string();
         let new_value = self.edit_value.read(cx).content.to_string();
+        let kind = self.edit_kind;
         let result = self.state.update(cx, |state, cx| {
-            let kind = state
-                .credentials
-                .iter()
-                .find(|c| c.id == id)
-                .map(|c| c.kind)
-                .ok_or_else(|| "That credential is not in this project".to_string())?;
             // An empty password box keeps the current secret.
             let value = (!new_value.is_empty()).then_some(new_value.as_str());
             let r = state.edit_credential(id, &label, kind, (&username, &host), value);
@@ -355,6 +354,13 @@ impl CredentialsPanel {
             .min_w(px(0.0))
             .child(
                 div()
+                    .flex_none()
+                    .t_micro()
+                    .text_color(theme.text_muted)
+                    .child(what.to_uppercase()),
+            )
+            .child(
+                div()
                     .truncate()
                     .text_color(theme.text_secondary)
                     .child(SharedString::from(text.to_string())),
@@ -455,11 +461,11 @@ impl CredentialsPanel {
                                     .flex()
                                     .flex_wrap()
                                     .items_center()
-                                    .gap_x(theme.space_2)
+                                    .gap_x(theme.space_4)
+                                    .gap_y(theme.space_1)
                                     .t_small()
                                     .t_code()
                                     .text_color(theme.text_muted)
-                                    .child(meta.kind.label().to_lowercase())
                                     .when(!meta.username.is_empty(), |el| {
                                         el.child(self.plain_field(
                                             ("cred-user-copy", uid),
@@ -476,6 +482,25 @@ impl CredentialsPanel {
                                             cx,
                                         ))
                                     })
+                                    // The secret itself is never drawn here, only
+                                    // what kind it is; Reveal shows it below.
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(theme.space_1)
+                                            .child(
+                                                div()
+                                                    .t_micro()
+                                                    .text_color(theme.text_muted)
+                                                    .child(meta.kind.label().to_uppercase()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_color(theme.text_secondary)
+                                                    .child("••••••••"),
+                                            ),
+                                    )
                                     .child(format!("added {}", format_date(meta.created_at))),
                             ),
                     )
@@ -553,90 +578,232 @@ impl CredentialsPanel {
 }
 
 impl CredentialsPanel {
-    /// The row of the credential being edited, in place: name, username, host
-    /// and an optional new password, with Save and Cancel beside the name.
-    fn edit_row(&self, meta: &CredentialMeta, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// A form field: a small uppercase label over its input.
+    fn field(&self, label: &'static str, input: &Entity<TextInput>) -> gpui::Div {
         let theme = self.theme;
-        let uid = meta.id.0 as u64;
         div()
             .flex()
             .flex_col()
-            .gap(theme.space_2)
-            .px(theme.space_2)
-            .py(theme.space_3)
-            .border_b_1()
-            .border_color(theme.border_subtle)
+            .gap(theme.space_1)
+            .min_w(px(0.0))
+            .child(
+                div()
+                    .t_micro()
+                    .t_code()
+                    .text_color(theme.text_muted)
+                    .child(label),
+            )
+            .child(input.clone())
+    }
+
+    /// The TYPE choice (password, API key, token, SSH key, other), shared by
+    /// the new-credential form and the edit card. `editing` picks which of the
+    /// two selections a click changes.
+    fn kind_field(&self, kind: CredentialKind, editing: bool, cx: &mut Context<Self>) -> gpui::Div {
+        let theme = self.theme;
+        let scope = if editing {
+            "cred-edit-kind"
+        } else {
+            "cred-kind"
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(theme.space_1)
+            .child(
+                div()
+                    .t_micro()
+                    .t_code()
+                    .text_color(theme.text_muted)
+                    .child("TYPE"),
+            )
+            .child(
+                ui::segmented(&theme).children(CredentialKind::ALL.iter().map(|&k| {
+                    ui::segment(&theme, (scope, k as u64), k.label(), k == kind).on_click(
+                        cx.listener(move |this, _, _, cx| {
+                            if editing {
+                                this.edit_kind = k;
+                            } else {
+                                this.kind = k;
+                            }
+                            cx.notify();
+                        }),
+                    )
+                })),
+            )
+    }
+
+    /// The new-credential form: the same labelled card as editing, with the
+    /// kind as a segmented choice instead of a button that cycles.
+    fn add_form(&self, kind: CredentialKind, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        div()
+            .flex()
+            .flex_col()
+            .max_w(px(720.0))
+            .gap(theme.space_3)
+            .p(theme.space_4)
+            .rounded(theme.radius_md)
+            .bg(theme.surface_raised)
+            .border_1()
+            .border_color(theme.border_light)
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(theme.space_3)
-                    .child(icon(Icon::Key, 16.0, theme.accent))
+                    .gap(theme.space_2)
+                    .child(icon(Icon::Plus, 14.0, theme.accent))
                     .child(
                         div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .child(self.rename_input.clone()),
-                    )
-                    .child(self.edit_actions(uid, cx)),
+                            .t_body()
+                            .t_strong()
+                            .text_color(theme.text_primary)
+                            .child("New credential"),
+                    ),
             )
+            .child(self.field("NAME", &self.label_input))
             .child(
                 div()
-                    .ml(px(28.0))
                     .flex()
                     .flex_wrap()
+                    .gap(theme.space_3)
+                    .child(
+                        self.field("USERNAME", &self.username_input)
+                            .flex_1()
+                            .min_w(px(200.0)),
+                    )
+                    .child(
+                        self.field("HOST OR LINK", &self.host_input)
+                            .flex_1()
+                            .min_w(px(200.0)),
+                    ),
+            )
+            .child(self.field("PASSWORD OR SECRET", &self.value_input))
+            .child(self.kind_field(kind, false, cx))
+            .child(
+                div()
+                    .flex()
                     .items_center()
                     .gap(theme.space_2)
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(140.0))
-                            .child(self.edit_username.clone()),
+                        ui::button(
+                            &theme,
+                            "cred-save",
+                            ButtonKind::Primary,
+                            Some(Icon::Plus),
+                            "Save credential",
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
                     )
                     .child(
                         div()
                             .flex_1()
-                            .min_w(px(140.0))
-                            .child(self.edit_host.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(180.0))
-                            .child(self.edit_value.clone()),
+                            .text_right()
+                            .t_small()
+                            .t_code()
+                            .text_color(theme.text_muted)
+                            .child("Enter next field · Ctrl+S save"),
                     ),
             )
             .into_any_element()
     }
 
-    fn edit_actions(&self, uid: u64, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// The credential being edited, in place: a compact card with labelled
+    /// fields (name, username, host or link, new password) and Save / Cancel.
+    fn edit_row(&self, meta: &CredentialMeta, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
+        let uid = meta.id.0 as u64;
         div()
+            .flex()
+            .items_start()
+            .gap(theme.space_3)
+            .px(theme.space_2)
+            .py(theme.space_3)
+            .border_b_1()
+            .border_color(theme.border_subtle)
+            .child(div().mt(px(2.0)).child(icon(Icon::Key, 16.0, theme.accent)))
             .child(
                 div()
                     .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(theme.space_1)
+                    .flex_col()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .max_w(px(720.0))
+                    .gap(theme.space_3)
+                    .p(theme.space_4)
+                    .rounded(theme.radius_md)
+                    .bg(theme.surface_raised)
+                    .border_1()
+                    .border_color(theme.border_light)
+                    .child(self.field("NAME", &self.rename_input))
                     .child(
-                        ui::button(
-                            &theme,
-                            ("cred-edit-save", uid),
-                            ButtonKind::Primary,
-                            Some(Icon::Check),
-                            "Save",
-                        )
-                        .on_click(cx.listener(|this, _, window, cx| this.save_edit(window, cx))),
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap(theme.space_3)
+                            .child(
+                                self.field("USERNAME", &self.edit_username)
+                                    .flex_1()
+                                    .min_w(px(200.0)),
+                            )
+                            .child(
+                                self.field("HOST OR LINK", &self.edit_host)
+                                    .flex_1()
+                                    .min_w(px(200.0)),
+                            ),
                     )
                     .child(
-                        ui::button(
-                            &theme,
-                            ("cred-edit-cancel", uid),
-                            ButtonKind::Ghost,
-                            None,
-                            "Cancel",
-                        )
-                        .on_click(cx.listener(|this, _, window, cx| this.cancel_edit(window, cx))),
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(theme.space_1)
+                            .child(self.field("PASSWORD", &self.edit_value))
+                            .child(
+                                div()
+                                    .t_small()
+                                    .text_color(theme.text_muted)
+                                    .child("Leave empty to keep the current password."),
+                            ),
+                    )
+                    .child(self.kind_field(self.edit_kind, true, cx))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(theme.space_2)
+                            .child(
+                                ui::button(
+                                    &theme,
+                                    ("cred-edit-save", uid),
+                                    ButtonKind::Primary,
+                                    Some(Icon::Check),
+                                    "Save",
+                                )
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.save_edit(window, cx)),
+                                ),
+                            )
+                            .child(
+                                ui::button(
+                                    &theme,
+                                    ("cred-edit-cancel", uid),
+                                    ButtonKind::Ghost,
+                                    None,
+                                    "Cancel",
+                                )
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.cancel_edit(window, cx)),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_right()
+                                    .t_small()
+                                    .t_code()
+                                    .text_color(theme.text_muted)
+                                    .child("Ctrl+S save · Esc cancel"),
+                            ),
                     ),
             )
             .into_any_element()
@@ -752,42 +919,7 @@ impl Render for CredentialsPanel {
                         ))
                     })
                     .when(project.is_some(), |el| {
-                        el.child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .items_center()
-                                .gap(theme.space_2)
-                                .child(div().flex_1().min_w(px(180.0)).child(self.label_input.clone()))
-                                .child(div().flex_1().min_w(px(140.0)).child(self.username_input.clone()))
-                                .child(div().flex_1().min_w(px(140.0)).child(self.host_input.clone()))
-                                .child(div().flex_1().min_w(px(140.0)).child(self.value_input.clone()))
-                                .child(
-                                    ui::button(
-                                        &theme,
-                                        "cred-kind",
-                                        ButtonKind::Secondary,
-                                        None,
-                                        kind.label(),
-                                    )
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.kind = this.kind.cycle();
-                                        cx.notify();
-                                    })),
-                                )
-                                .child(
-                                    ui::button(
-                                        &theme,
-                                        "cred-save",
-                                        ButtonKind::Primary,
-                                        Some(Icon::Plus),
-                                        "Save",
-                                    )
-                                    .on_click(
-                                        cx.listener(|this, _, window, cx| this.save(window, cx)),
-                                    ),
-                                ),
-                        )
+                        el.child(self.add_form(kind, cx))
                     })
                     .when_some(self.notice.clone(), |el, (message, is_error)| {
                         el.child(ui::notice(&theme, message, is_error))
