@@ -35,7 +35,8 @@ Rules that still apply to all of them: notes are untrusted input (raw HTML stays
 
 ### Productivity
 
-- [ ] **Editor slash commands and snippets.** Typing `/table`, `/alert`, `/code` inserts a template. Add a small toolbar for bold, link and checkbox.
+- [x] **Editor slash commands and snippets** (2026-11-27). `/` at the start of a line opens a popup of blocks (heading, table, code, SQL, task list, bulleted and numbered list, quote, the five alert callouts, link, divider); typing narrows it by name or keyword (`/alert` lists every callout, `/todo` finds the task list). Enter, Tab or a click inserts it; Escape closes it. A format makes the same edit as the toolbar button, so the two agree; a callout inserts `> [!NOTE]` and leaves the caret inside. It stays closed for paths (`/usr/bin`), mid-line slashes, indented lines and fenced code. Logic in `slash.rs`, popup in `note_editor.rs`. The toolbar for bold, link and checkbox already existed. Not yet tried by hand in the app.
+  - Gap: the popup lists names only; there is no preview of the block, and snippets of your own are not supported.
 - [ ] **Frontmatter.** A YAML header (`tags`, `status`, `due`) shown as a properties strip above the note. The notes list can then filter on those fields. Decide whether it is display-only or also stored in SQLite (a schema change needs a numbered migration and approval).
 
 ### Not planned

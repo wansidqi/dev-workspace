@@ -37,6 +37,7 @@ mod refs;
 mod run_panel;
 mod settings;
 mod shell;
+mod slash;
 mod state;
 mod task_detail;
 mod task_tree;

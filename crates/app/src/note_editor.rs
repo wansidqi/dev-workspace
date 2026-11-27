@@ -20,6 +20,7 @@ use gpui::{
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::refs::{self, Candidate};
+use crate::slash;
 use crate::text_input::TextInput;
 use crate::theme::{GlassTheme, TypeScale};
 use crate::ui::{icon_button, Icon};
@@ -104,12 +105,23 @@ pub fn init_key_bindings(cx: &mut App) {
     ]);
 }
 
+/// Which trigger opened the suggestion popup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PopupKind {
+    /// `[[`: notes and tasks, written as `[[Title]]`.
+    Link,
+    /// `#`: tasks, written as `#<number>`.
+    Task,
+    /// `/` at the start of a line: blocks to insert.
+    Slash,
+}
+
 /// What the suggestion popup shows: where the typed text starts (just after
-/// `[[`, or at the `#`), the matches, and whether it is the `#` task picker.
+/// `[[`, or at the `#` or `/`), the matches, and which trigger it is.
 struct RefPopup {
     start: usize,
     list: Vec<Candidate>,
-    hash: bool,
+    kind: PopupKind,
 }
 
 pub struct NoteEditor {
@@ -238,7 +250,28 @@ impl NoteEditor {
             return (!list.is_empty()).then_some(RefPopup {
                 start,
                 list,
-                hash: false,
+                kind: PopupKind::Link,
+            });
+        }
+        // A `/word` that starts a line lists the blocks to insert.
+        if let Some((start, query)) = slash::open_query(&self.content, caret) {
+            if self.ref_dismissed == Some(start) {
+                return None;
+            }
+            let list: Vec<Candidate> = slash::filter(query)
+                .into_iter()
+                .map(|e| Candidate {
+                    title: e.title.to_string(),
+                    is_task: false,
+                    parent: None,
+                    reference: e.name.to_string(),
+                    task_id: None,
+                })
+                .collect();
+            return (!list.is_empty()).then_some(RefPopup {
+                start,
+                list,
+                kind: PopupKind::Slash,
             });
         }
         // Otherwise a `#` after other text opens the task picker.
@@ -257,36 +290,68 @@ impl NoteEditor {
         (!list.is_empty()).then_some(RefPopup {
             start,
             list,
-            hash: true,
+            kind: PopupKind::Task,
         })
     }
 
     /// Writes the highlighted suggestion over what was typed: `[[Title]]` with
-    /// the caret after the closing brackets, or `#<number>` for the task picker.
-    /// Returns false when no popup is showing, so the key keeps its normal
-    /// meaning.
+    /// the caret after the closing brackets, `#<number>` for the task picker, or
+    /// the chosen block for a slash command. Returns false when no popup is
+    /// showing, so the key keeps its normal meaning.
     fn accept_ref(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some(RefPopup { start, list, hash }) = self.ref_popup(cx) else {
+        let Some(RefPopup { start, list, kind }) = self.ref_popup(cx) else {
             return false;
         };
         let Some(pick) = list.get(self.ref_selected.min(list.len() - 1)) else {
             return false;
         };
         let caret = self.cursor_offset();
-        let (end, text) = if hash {
-            (caret, pick.reference.clone())
-        } else {
-            // Typing `[[` inside text that already has `]]` must not double them.
-            let end = if self.content[caret..].starts_with("]]") {
-                caret + 2
-            } else {
-                caret
-            };
-            (end, format!("{}]]", pick.reference))
+        let (end, text) = match kind {
+            PopupKind::Slash => {
+                let name = pick.reference.clone();
+                self.apply_slash(start, caret, &name, window, cx);
+                return true;
+            }
+            PopupKind::Task => (caret, pick.reference.clone()),
+            PopupKind::Link => {
+                // Typing `[[` inside text that already has `]]` must not double them.
+                let end = if self.content[caret..].starts_with("]]") {
+                    caret + 2
+                } else {
+                    caret
+                };
+                (end, format!("{}]]", pick.reference))
+            }
         };
         let range = self.range_to_utf16(&(start..end));
         self.replace_text_in_range(Some(range), &text, window, cx);
         true
+    }
+
+    /// Replaces the typed `/word` (`start..caret`) with the block the command
+    /// `name` makes: the same edit the toolbar makes for a format, or fixed text
+    /// for a callout. It is one change, so one write to the note.
+    fn apply_slash(
+        &mut self,
+        start: usize,
+        caret: usize,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(entry) = slash::find(name) else {
+            return;
+        };
+        let (text, select) = slash::apply(&self.content, start, caret, entry);
+        self.content = text.into();
+        self.selected_range = select;
+        self.selection_reversed = false;
+        self.reveal_cursor = true;
+        self.marked_range = None;
+        self.ref_dismissed = None;
+        window.notify_text_input_changed(&self.focus_handle);
+        self.notify_change(window, cx);
+        cx.notify();
     }
 
     /// Moves the highlight in the suggestion popup, wrapping at both ends.
@@ -304,7 +369,7 @@ impl NoteEditor {
     /// The `[[` popup under the caret, drawn above everything (it may hang
     /// out of the scroller) and kept inside the window.
     fn render_ref_popup(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let RefPopup { list, hash, .. } = self.ref_popup(cx)?;
+        let RefPopup { list, kind, .. } = self.ref_popup(cx)?;
         let bounds = self.last_bounds?;
         let caret = self.caret_point(self.cursor_offset())?;
         let at = bounds.origin + caret + point(px(0.0), self.last_line_height + px(4.0));
@@ -312,8 +377,10 @@ impl NoteEditor {
         let selected = self.ref_selected.min(list.len() - 1);
         let rows = list.into_iter().enumerate().map(|(ix, c)| {
             let (glyph, label) = match (c.is_task, c.parent.is_some()) {
+                // A command shows what is typed to reach it.
+                _ if kind == PopupKind::Slash => (Icon::FileText, format!("/{}", c.reference)),
                 // The task picker writes the number, so it is what is shown.
-                (true, _) if hash => (Icon::CircleCheck, c.reference.clone()),
+                (true, _) if kind == PopupKind::Task => (Icon::CircleCheck, c.reference.clone()),
                 (true, true) => (Icon::CircleCheck, "Subtask".to_string()),
                 (true, false) => (Icon::CircleCheck, "Task".to_string()),
                 (false, _) => (Icon::FileText, "Note".to_string()),
@@ -340,7 +407,10 @@ impl NoteEditor {
                         this.accept_ref(window, cx);
                     }),
                 )
-                .child(crate::ui::icon(glyph, 14.0, theme.text_muted))
+                .children(
+                    (kind != PopupKind::Slash)
+                        .then(|| crate::ui::icon(glyph, 14.0, theme.text_muted)),
+                )
                 .child(
                     div()
                         .flex_1()
