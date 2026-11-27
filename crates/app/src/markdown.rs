@@ -1563,11 +1563,60 @@ mod tests {
             "expected the contents list and more, got {anchors}"
         );
 
-        let alerts = blocks
+        // GitHub's five, our three, and one folded and one foldable example.
+        let alerts: Vec<(AlertKind, Fold)> = blocks
             .iter()
-            .filter(|b| matches!(b, Block::Alert { .. }))
-            .count();
-        assert_eq!(alerts, 5);
+            .filter_map(|b| match b {
+                Block::Alert { kind, fold, .. } => Some((*kind, *fold)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(alerts.len(), 10);
+        for kind in [AlertKind::Todo, AlertKind::Bug, AlertKind::Question] {
+            assert!(alerts.iter().any(|(k, _)| *k == kind), "{kind:?}");
+        }
+        assert!(alerts.iter().any(|(_, f)| *f == Fold::Closed));
+        assert!(alerts.iter().any(|(_, f)| *f == Fold::Open));
+
+        // The references it shows are found, and the ones it only describes in
+        // code are not.
+        fn targets(blocks: &[Block], out: &mut Vec<String>) {
+            for b in blocks {
+                match b {
+                    Block::Paragraph(s) | Block::Heading(_, s) => out.extend(
+                        s.iter()
+                            .filter_map(|s| s.href.as_deref().and_then(ref_target))
+                            .map(str::to_string),
+                    ),
+                    Block::List { items, .. } => {
+                        for item in items {
+                            targets(&item.blocks, out);
+                        }
+                    }
+                    Block::Quote(inner) | Block::Alert { blocks: inner, .. } => targets(inner, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut refs = Vec::new();
+        targets(&blocks, &mut refs);
+        for wanted in [
+            "Markdown preview demo",
+            "Release › Deploy › Plan",
+            "Deploy > Plan",
+            "A note that does not exist",
+            "#1",
+            "#99999",
+        ] {
+            assert!(
+                refs.iter().any(|r| r == wanted),
+                "missing {wanted:?}: {refs:?}"
+            );
+        }
+        assert!(
+            !refs.iter().any(|r| r == "#4" || r == "Title"),
+            "code and glued numbers are not references: {refs:?}"
+        );
         assert!(matches!(blocks.last(), Some(Block::Footnotes(n)) if n.len() == 2));
         assert!(markers(&source).len() >= 12, "tasks of every spelling");
         assert!(blocks.iter().any(|b| matches!(b, Block::Table { .. })));
