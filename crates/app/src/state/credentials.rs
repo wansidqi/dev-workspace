@@ -40,6 +40,8 @@ impl AppState {
         &mut self,
         label: &str,
         kind: CredentialKind,
+        username: &str,
+        host: &str,
         value: &str,
     ) -> Result<CredentialId, String> {
         let project = self
@@ -49,8 +51,9 @@ impl AppState {
             &mut self.next_credential_id,
             self.credentials.iter().map(|c| c.id.0).max().unwrap_or(0),
         ));
-        let meta =
-            CredentialMeta::new(id, project, label, kind, now()).map_err(|e| e.to_string())?;
+        let meta = CredentialMeta::new(id, project, label, kind, now())
+            .and_then(|m| m.with_contact(username, host))
+            .map_err(|e| e.to_string())?;
         self.open_vault()?;
         let vault = self
             .vault
@@ -98,6 +101,47 @@ impl AppState {
         }
     }
 
+    /// Changes the label, kind, username and host of a credential of the
+    /// selected project, and its secret too when `new_value` is given.
+    pub fn edit_credential(
+        &mut self,
+        id: CredentialId,
+        label: &str,
+        kind: CredentialKind,
+        contact: (&str, &str),
+        new_value: Option<&str>,
+    ) -> Result<(), String> {
+        let (username, host) = contact;
+        if !self.credentials.iter().any(|c| c.id == id) {
+            return Err("That credential is not in this project".into());
+        }
+        // Validate the value first so a bad one leaves the label unchanged.
+        if let Some(value) = new_value {
+            devspace_core::validate_credential_value(value).map_err(|e| e.to_string())?;
+        }
+        let label = devspace_core::normalize_credential_label(label).map_err(|e| e.to_string())?;
+        let username = devspace_core::normalize_credential_field(username, "username")
+            .map_err(|e| e.to_string())?;
+        let host =
+            devspace_core::normalize_credential_field(host, "host").map_err(|e| e.to_string())?;
+        if let Some(value) = new_value {
+            self.replace_credential_value(id, value)?;
+        }
+        match CredentialRepo::update_meta(&self.conn, id, &label, kind, &username, &host) {
+            Ok(true) => {
+                if let Some(c) = self.credentials.iter_mut().find(|c| c.id == id) {
+                    c.label = label;
+                    c.kind = kind;
+                    c.username = username;
+                    c.host = host;
+                }
+                Ok(())
+            }
+            Ok(false) => Err("That credential no longer exists".into()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
     /// Deletes a credential of the selected project.
     pub fn delete_credential(&mut self, id: CredentialId) {
         if !self.credentials.iter().any(|c| c.id == id) {
@@ -129,7 +173,7 @@ mod tests {
     fn add_reveal_and_delete_round_trip() {
         let mut state = state();
         let id = state
-            .add_credential("  prod db  ", CredentialKind::Password, "hunter2")
+            .add_credential("  prod db  ", CredentialKind::Password, "", "", "hunter2")
             .unwrap();
         assert_eq!(state.credentials[0].label, "prod db");
         assert_eq!(state.reveal_credential(id).unwrap().as_str(), "hunter2");
@@ -149,18 +193,58 @@ mod tests {
     }
 
     #[test]
+    fn edit_changes_label_kind_and_optionally_value() {
+        let mut state = state();
+        let id = state
+            .add_credential("old", CredentialKind::Password, "", "", "pw")
+            .unwrap();
+        state
+            .edit_credential(
+                id,
+                "  new name ",
+                CredentialKind::ApiKey,
+                ("root", " 10.0.0.1 "),
+                None,
+            )
+            .unwrap();
+        assert_eq!(state.credentials[0].label, "new name");
+        assert_eq!(state.credentials[0].kind, CredentialKind::ApiKey);
+        assert_eq!(state.credentials[0].username, "root");
+        assert_eq!(state.credentials[0].host, "10.0.0.1");
+        assert_eq!(state.reveal_credential(id).unwrap().as_str(), "pw");
+
+        state
+            .edit_credential(
+                id,
+                "new name",
+                CredentialKind::ApiKey,
+                ("root", "10.0.0.1"),
+                Some("pw2"),
+            )
+            .unwrap();
+        assert_eq!(state.reveal_credential(id).unwrap().as_str(), "pw2");
+
+        // A bad label changes nothing, including the value.
+        assert!(state
+            .edit_credential(id, " ", CredentialKind::Token, ("", ""), Some("pw3"))
+            .is_err());
+        assert_eq!(state.reveal_credential(id).unwrap().as_str(), "pw2");
+        assert_eq!(state.credentials[0].label, "new name");
+    }
+
+    #[test]
     fn bad_input_is_refused_without_storing_anything() {
         let mut state = state();
         assert!(state
-            .add_credential("", CredentialKind::Token, "x")
+            .add_credential("", CredentialKind::Token, "", "", "x")
             .is_err());
         assert!(state
-            .add_credential("a", CredentialKind::Token, "")
+            .add_credential("a", CredentialKind::Token, "", "", "")
             .is_err());
         assert!(state.credentials.is_empty());
         // The error text never carries the value.
         let err = state
-            .add_credential("", CredentialKind::Token, "super-secret-value")
+            .add_credential("", CredentialKind::Token, "", "", "super-secret-value")
             .unwrap_err();
         assert!(!err.contains("super-secret-value"));
     }
@@ -170,7 +254,7 @@ mod tests {
         let mut state = state();
         let a = state.selected_project.unwrap();
         let id = state
-            .add_credential("a-key", CredentialKind::ApiKey, "aaa")
+            .add_credential("a-key", CredentialKind::ApiKey, "", "", "aaa")
             .unwrap();
         state.create_project("Q");
         assert!(state.credentials.is_empty());
@@ -185,14 +269,14 @@ mod tests {
     fn ids_never_repeat_after_a_delete() {
         let mut state = state();
         let first = state
-            .add_credential("one", CredentialKind::Other, "1")
+            .add_credential("one", CredentialKind::Other, "", "", "1")
             .unwrap();
         let second = state
-            .add_credential("two", CredentialKind::Other, "2")
+            .add_credential("two", CredentialKind::Other, "", "", "2")
             .unwrap();
         state.delete_credential(second);
         let third = state
-            .add_credential("three", CredentialKind::Other, "3")
+            .add_credential("three", CredentialKind::Other, "", "", "3")
             .unwrap();
         assert!(first.0 < second.0 && second.0 < third.0);
     }

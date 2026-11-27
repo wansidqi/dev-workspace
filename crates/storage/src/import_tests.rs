@@ -40,7 +40,8 @@ fn fixture(tag: &str) -> Fixture {
          INSERT INTO commit_links VALUES (50, 20, 5, 'abc123', 'p1', 'deployed', 'n', 70);
          INSERT INTO commit_links VALUES (51, 22, 6, 'abc123', NULL, 'linked', NULL, 71);
          INSERT INTO run_commands VALUES (60, 7, 'build', 'cargo build', NULL);
-         INSERT INTO credentials VALUES (80, 7, 'db password', 'password', x'00', x'ff', 1);",
+         INSERT INTO credentials (id, project_id, label, kind, nonce, ciphertext, created_at)
+             VALUES (80, 7, 'db password', 'password', x'00', x'ff', 1);",
     )
     .unwrap();
     fs::write(paths.notes_dir(ProjectId(7)).join("30.md"), "# hello").unwrap();

@@ -257,6 +257,16 @@ const MIGRATIONS: &[(i64, &str)] = &[
         DROP TABLE note_task_map;
         "#,
     ),
+    (
+        7,
+        // A credential can carry a plain-text username and host (an IP address
+        // or a website link) next to its encrypted secret. Existing rows get
+        // empty values.
+        r#"
+        ALTER TABLE credentials ADD COLUMN username TEXT NOT NULL DEFAULT '';
+        ALTER TABLE credentials ADD COLUMN host TEXT NOT NULL DEFAULT '';
+        "#,
+    ),
 ];
 
 /// Whether the database is behind this build, so a caller can take a backup

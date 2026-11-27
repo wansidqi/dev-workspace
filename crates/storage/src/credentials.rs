@@ -1,5 +1,6 @@
 use devspace_core::{
-    validate_credential_value, CredentialId, CredentialKind, CredentialMeta, ProjectId,
+    normalize_credential_field, normalize_credential_label, validate_credential_value,
+    CredentialId, CredentialKind, CredentialMeta, ProjectId,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use zeroize::Zeroizing;
@@ -57,8 +58,9 @@ impl CredentialRepo {
             .seal(&binding(meta.project_id, meta.id), value.as_bytes())
             .map_err(domain)?;
         conn.execute(
-            "INSERT INTO credentials (id, project_id, label, kind, nonce, ciphertext, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO credentials
+                 (id, project_id, label, kind, nonce, ciphertext, created_at, username, host)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 meta.id.0,
                 meta.project_id.0,
@@ -67,6 +69,8 @@ impl CredentialRepo {
                 sealed.nonce,
                 sealed.ciphertext,
                 meta.created_at,
+                meta.username,
+                meta.host,
             ],
         )?;
         Ok(())
@@ -78,7 +82,7 @@ impl CredentialRepo {
         project: ProjectId,
     ) -> Result<Vec<CredentialMeta>, StorageError> {
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, label, kind, created_at
+            "SELECT id, project_id, label, kind, created_at, username, host
              FROM credentials WHERE project_id = ?1 ORDER BY created_at, id",
         )?;
         let rows = stmt.query_map(params![project.0], |row| {
@@ -88,6 +92,8 @@ impl CredentialRepo {
                 label: row.get(2)?,
                 kind: str_to_kind(&row.get::<_, String>(3)?),
                 created_at: row.get(4)?,
+                username: row.get(5)?,
+                host: row.get(6)?,
             })
         })?;
         rows.collect::<Result<_, _>>().map_err(StorageError::from)
@@ -156,6 +162,27 @@ impl CredentialRepo {
         Ok(changed > 0)
     }
 
+    /// Changes a credential's label and kind. The secret is untouched.
+    /// Returns false when the credential does not exist.
+    pub fn update_meta(
+        conn: &Connection,
+        id: CredentialId,
+        label: &str,
+        kind: CredentialKind,
+        username: &str,
+        host: &str,
+    ) -> Result<bool, StorageError> {
+        let label = normalize_credential_label(label).map_err(domain)?;
+        let username = normalize_credential_field(username, "username").map_err(domain)?;
+        let host = normalize_credential_field(host, "host").map_err(domain)?;
+        let changed = conn.execute(
+            "UPDATE credentials SET label = ?2, kind = ?3, username = ?4, host = ?5
+             WHERE id = ?1",
+            params![id.0, label, kind_to_str(kind), username, host],
+        )?;
+        Ok(changed > 0)
+    }
+
     pub fn delete(conn: &Connection, id: CredentialId) -> Result<(), StorageError> {
         conn.execute("DELETE FROM credentials WHERE id = ?1", params![id.0])?;
         Ok(())
@@ -195,6 +222,37 @@ mod tests {
             id,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn username_and_host_round_trip_and_update() {
+        let (conn, vault) = setup();
+        let with_contact = meta(1, 1, "jump box")
+            .with_contact("root", "49.0.204.6")
+            .unwrap();
+        CredentialRepo::insert(&conn, &vault, &with_contact, "pw").unwrap();
+        let listed = CredentialRepo::list_for_project(&conn, ProjectId(1)).unwrap();
+        assert_eq!(
+            (listed[0].username.as_str(), listed[0].host.as_str()),
+            ("root", "49.0.204.6")
+        );
+
+        assert!(CredentialRepo::update_meta(
+            &conn,
+            CredentialId(1),
+            "jump",
+            CredentialKind::Password,
+            "",
+            "https://x.test",
+        )
+        .unwrap());
+        let listed = CredentialRepo::list_for_project(&conn, ProjectId(1)).unwrap();
+        assert_eq!(listed[0].label, "jump");
+        assert_eq!(listed[0].username, "");
+        assert_eq!(listed[0].host, "https://x.test");
+        // The secret is untouched by a metadata update.
+        let secret = CredentialRepo::reveal(&conn, &vault, CredentialId(1)).unwrap();
+        assert_eq!(secret.unwrap().as_str(), "pw");
     }
 
     #[test]

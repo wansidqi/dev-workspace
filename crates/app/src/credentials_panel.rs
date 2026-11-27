@@ -40,7 +40,16 @@ pub struct CredentialsPanel {
     state: Entity<AppState>,
     theme: GlassTheme,
     label_input: Entity<TextInput>,
+    username_input: Entity<TextInput>,
+    host_input: Entity<TextInput>,
     value_input: Entity<TextInput>,
+    /// The name, username and host inputs shown in place of a row's text
+    /// while editing it. Separate from the add form so that stays put.
+    rename_input: Entity<TextInput>,
+    edit_username: Entity<TextInput>,
+    edit_host: Entity<TextInput>,
+    /// A new password for the credential being edited; empty keeps the old one.
+    edit_value: Entity<TextInput>,
     /// Kind given to the credential being added; the chip cycles it.
     kind: CredentialKind,
     /// Result of the last action: (message, is_error).
@@ -48,6 +57,8 @@ pub struct CredentialsPanel {
     revealed: Option<Revealed>,
     /// Credential waiting for a second click on ✕.
     confirm_delete: Option<CredentialId>,
+    /// Credential whose row is being edited in place.
+    editing: Option<CredentialId>,
     /// Bumped whenever the revealed secret changes, so an old auto-hide timer
     /// cannot hide a newer reveal.
     epoch: u64,
@@ -58,42 +69,166 @@ pub struct CredentialsPanel {
 
 impl CredentialsPanel {
     pub fn new(cx: &mut Context<Self>, state: Entity<AppState>, theme: GlassTheme) -> Self {
-        let label_input = cx.new(|cx| TextInput::new(cx, "Label, e.g. production database", theme));
-        let value_input = cx.new(|cx| {
-            let mut input = TextInput::new(cx, "Secret value", theme);
-            input.masked = true;
-            // A failed save must not wipe what was typed.
-            input.keep_on_confirm = true;
-            input
-        });
+        let plain = |cx: &mut Context<Self>, placeholder: &'static str| {
+            cx.new(|cx| {
+                let mut input = TextInput::new(cx, placeholder, theme);
+                // A failed save must not wipe what was typed.
+                input.keep_on_confirm = true;
+                input
+            })
+        };
+        let label_input = plain(cx, "Label, e.g. production database");
+        let username_input = plain(cx, "Username (optional)");
+        let host_input = plain(cx, "Host, IP or link (optional)");
+        let value_input = plain(cx, "Secret value");
+        value_input.update(cx, |input, _| input.masked = true);
+        let rename_input = plain(cx, "Label");
+        let edit_username = plain(cx, "Username (optional)");
+        let edit_host = plain(cx, "Host, IP or link (optional)");
+        let edit_value = plain(cx, "New password (empty keeps the current one)");
+        edit_value.update(cx, |input, _| input.masked = true);
+
+        // Enter walks through the add form's boxes, then the last one saves.
         let me = cx.entity();
         value_input.update(cx, |input, _| {
             input.on_confirm = Some(Box::new(move |_value, window, cx| {
                 me.update(cx, |this, cx| this.save(window, cx));
             }));
         });
-        let me = cx.entity();
-        label_input.update(cx, |input, _| {
-            // Enter on the label moves on to the value instead of saving.
-            input.keep_on_confirm = true;
-            input.on_confirm = Some(Box::new(move |_label, window, cx| {
-                let handle = me.read(cx).value_input.read(cx).focus_handle.clone();
-                window.focus(&handle, cx);
-            }));
-        });
+        for (from, to) in [
+            (&label_input, &username_input),
+            (&username_input, &host_input),
+            (&host_input, &value_input),
+        ] {
+            let next = to.clone();
+            from.update(cx, |input, _| {
+                input.on_confirm = Some(Box::new(move |_text, window, cx| {
+                    let handle = next.read(cx).focus_handle.clone();
+                    window.focus(&handle, cx);
+                }));
+            });
+        }
+        // While editing a row, Enter saves and Escape cancels. Both run
+        // deferred: the pressed input is mid-update, and saving or cancelling
+        // resets it, so the panel must not touch it from inside the handler.
+        for input in [&rename_input, &edit_username, &edit_host, &edit_value] {
+            let save_me = cx.weak_entity();
+            let cancel_me = cx.weak_entity();
+            input.update(cx, |input, _| {
+                input.on_confirm = Some(Box::new(move |_text, window, cx| {
+                    let me = save_me.clone();
+                    window.defer(cx, move |window, cx| {
+                        me.update(cx, |this, cx| this.save_edit(window, cx)).ok();
+                    });
+                }));
+                input.on_cancel = Some(Box::new(move |window, cx| {
+                    let me = cancel_me.clone();
+                    window.defer(cx, move |window, cx| {
+                        me.update(cx, |this, cx| this.cancel_edit(window, cx)).ok();
+                    });
+                }));
+            });
+        }
         Self {
             state,
             theme,
             label_input,
+            username_input,
+            host_input,
             value_input,
+            rename_input,
+            edit_username,
+            edit_host,
+            edit_value,
             kind: CredentialKind::Password,
             notice: None,
             revealed: None,
             confirm_delete: None,
+            editing: None,
             epoch: 0,
             shown_project: None,
             on_close: None,
         }
+    }
+
+    /// Turns a row's name, username and host into inputs holding their values.
+    fn start_edit(&mut self, id: CredentialId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(meta) = self
+            .state
+            .read(cx)
+            .credentials
+            .iter()
+            .find(|c| c.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        self.confirm_delete = None;
+        self.editing = Some(id);
+        self.rename_input
+            .update(cx, |i, _| i.set_text_selected(meta.label));
+        self.edit_username
+            .update(cx, |i, _| i.set_text_selected(meta.username));
+        self.edit_host
+            .update(cx, |i, _| i.set_text_selected(meta.host));
+        let handle = self.rename_input.read(cx).focus_handle.clone();
+        window.focus(&handle, cx);
+        self.notice = None;
+        cx.notify();
+    }
+
+    fn cancel_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.editing = None;
+        self.reset_edit_inputs(window, cx);
+        self.notice = None;
+        cx.notify();
+    }
+
+    fn reset_edit_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for input in [
+            &self.rename_input,
+            &self.edit_username,
+            &self.edit_host,
+            &self.edit_value,
+        ] {
+            input.update(cx, |i, cx| i.reset(window, cx));
+        }
+    }
+
+    /// Saves the edited name, username and host; kind and secret stay.
+    fn save_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.editing else {
+            return;
+        };
+        let label = self.rename_input.read(cx).content.to_string();
+        let username = self.edit_username.read(cx).content.to_string();
+        let host = self.edit_host.read(cx).content.to_string();
+        let new_value = self.edit_value.read(cx).content.to_string();
+        let result = self.state.update(cx, |state, cx| {
+            let kind = state
+                .credentials
+                .iter()
+                .find(|c| c.id == id)
+                .map(|c| c.kind)
+                .ok_or_else(|| "That credential is not in this project".to_string())?;
+            // An empty password box keeps the current secret.
+            let value = (!new_value.is_empty()).then_some(new_value.as_str());
+            let r = state.edit_credential(id, &label, kind, (&username, &host), value);
+            cx.notify();
+            r
+        });
+        match result {
+            Ok(()) => {
+                self.editing = None;
+                self.reset_edit_inputs(window, cx);
+                // A shown secret may be the old one.
+                self.revealed = None;
+                self.epoch += 1;
+                self.notice = Some(("Changes saved".into(), false));
+            }
+            Err(message) => self.notice = Some((message, true)),
+        }
+        cx.notify();
     }
 
     /// Wipes the revealed secret and any pending delete confirmation.
@@ -106,20 +241,27 @@ impl CredentialsPanel {
 
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let label = self.label_input.read(cx).content.to_string();
+        let username = self.username_input.read(cx).content.to_string();
+        let host = self.host_input.read(cx).content.to_string();
         let value = self.value_input.read(cx).content.to_string();
         let kind = self.kind;
-        let result = self
-            .state
-            .update(cx, |state, cx| {
-                let r = state.add_credential(&label, kind, &value);
-                cx.notify();
-                r
-            })
-            .map(|_| ());
+        let result = self.state.update(cx, |state, cx| {
+            let r = state
+                .add_credential(&label, kind, &username, &host, &value)
+                .map(|_| ());
+            cx.notify();
+            r
+        });
         match result {
             Ok(()) => {
-                self.label_input.update(cx, |i, cx| i.reset(window, cx));
-                self.value_input.update(cx, |i, cx| i.reset(window, cx));
+                for input in [
+                    &self.label_input,
+                    &self.username_input,
+                    &self.host_input,
+                    &self.value_input,
+                ] {
+                    input.update(cx, |i, cx| i.reset(window, cx));
+                }
                 self.notice = Some(("Saved and encrypted".into(), false));
             }
             Err(message) => self.notice = Some((message, true)),
@@ -189,26 +331,42 @@ impl CredentialsPanel {
         cx.notify();
     }
 
-    /// Replaces a credential's secret with what is typed in the value box
-    /// (for rotating a key); the old value is gone once this succeeds.
-    fn replace(&mut self, id: CredentialId, window: &mut Window, cx: &mut Context<Self>) {
-        self.confirm_delete = None;
-        let value = self.value_input.read(cx).content.to_string();
-        let result = self
-            .state
-            .update(cx, |state, _| state.replace_credential_value(id, &value));
-        match result {
-            Ok(()) => {
-                self.value_input.update(cx, |i, cx| i.reset(window, cx));
-                if self.revealed.as_ref().is_some_and(|r| r.id == id) {
-                    self.revealed = None;
-                    self.epoch += 1;
-                }
-                self.notice = Some(("Value replaced".into(), false));
-            }
-            Err(message) => self.notice = Some((message, true)),
-        }
+    /// Copies a username or host. Not a secret, so no auto-clear.
+    fn copy_plain(&mut self, what: &str, text: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.notice = Some((format!("{what} copied"), false));
         cx.notify();
+    }
+
+    /// A username or host on a row's meta line, with its own copy button.
+    fn plain_field(
+        &self,
+        id: (&'static str, u64),
+        what: &'static str,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let theme = self.theme;
+        let owned = text.to_string();
+        div()
+            .flex()
+            .items_center()
+            .gap(theme.space_1)
+            .min_w(px(0.0))
+            .child(
+                div()
+                    .truncate()
+                    .text_color(theme.text_secondary)
+                    .child(SharedString::from(text.to_string())),
+            )
+            .child(
+                ui::icon_button(&theme, Icon::Copy, id, theme.text_primary)
+                    .flex_none()
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.copy_plain(what, owned.clone(), cx)),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn delete(&mut self, id: CredentialId, cx: &mut Context<Self>) {
@@ -241,6 +399,9 @@ impl CredentialsPanel {
             .map(|r| SharedString::from(r.value.to_string()));
         let confirming = self.confirm_delete == Some(id);
         let is_shown = shown.is_some();
+        if self.editing == Some(id) {
+            return self.edit_row(meta, cx);
+        }
         div()
             .flex()
             .flex_col()
@@ -263,19 +424,60 @@ impl CredentialsPanel {
                             .min_w(px(0.0))
                             .child(
                                 div()
-                                    .t_body()
-                                    .t_strong()
-                                    .text_color(theme.text_primary)
-                                    .truncate()
-                                    .child(SharedString::from(meta.label.clone())),
+                                    .flex()
+                                    .items_center()
+                                    .gap(theme.space_1)
+                                    .child(
+                                        div()
+                                            .t_body()
+                                            .t_strong()
+                                            .text_color(theme.text_primary)
+                                            .truncate()
+                                            .child(SharedString::from(meta.label.clone())),
+                                    )
+                                    .child(
+                                        ui::icon_button(
+                                            &theme,
+                                            Icon::Pencil,
+                                            ("cred-edit", uid),
+                                            theme.text_primary,
+                                        )
+                                        .flex_none()
+                                        .on_click(
+                                            cx.listener(move |this, _, window, cx| {
+                                                this.start_edit(id, window, cx)
+                                            }),
+                                        ),
+                                    ),
                             )
-                            .child(div().t_small().t_code().text_color(theme.text_muted).child(
-                                format!(
-                                    "{} · added {}",
-                                    meta.kind.label().to_lowercase(),
-                                    format_date(meta.created_at)
-                                ),
-                            )),
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap_x(theme.space_2)
+                                    .t_small()
+                                    .t_code()
+                                    .text_color(theme.text_muted)
+                                    .child(meta.kind.label().to_lowercase())
+                                    .when(!meta.username.is_empty(), |el| {
+                                        el.child(self.plain_field(
+                                            ("cred-user-copy", uid),
+                                            "Username",
+                                            &meta.username,
+                                            cx,
+                                        ))
+                                    })
+                                    .when(!meta.host.is_empty(), |el| {
+                                        el.child(self.plain_field(
+                                            ("cred-host-copy", uid),
+                                            "Host",
+                                            &meta.host,
+                                            cx,
+                                        ))
+                                    })
+                                    .child(format!("added {}", format_date(meta.created_at))),
+                            ),
                     )
                     .child(
                         div()
@@ -310,18 +512,6 @@ impl CredentialsPanel {
                                     "Copy",
                                 )
                                 .on_click(cx.listener(move |this, _, _, cx| this.copy(id, cx))),
-                            )
-                            .child(
-                                ui::button(
-                                    &theme,
-                                    ("cred-replace", uid),
-                                    ButtonKind::Ghost,
-                                    Some(Icon::Refresh),
-                                    "Replace",
-                                )
-                                .on_click(cx.listener(
-                                    move |this, _, window, cx| this.replace(id, window, cx),
-                                )),
                             )
                             .child(if confirming {
                                 ui::button(
@@ -362,6 +552,97 @@ impl CredentialsPanel {
     }
 }
 
+impl CredentialsPanel {
+    /// The row of the credential being edited, in place: name, username, host
+    /// and an optional new password, with Save and Cancel beside the name.
+    fn edit_row(&self, meta: &CredentialMeta, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let uid = meta.id.0 as u64;
+        div()
+            .flex()
+            .flex_col()
+            .gap(theme.space_2)
+            .px(theme.space_2)
+            .py(theme.space_3)
+            .border_b_1()
+            .border_color(theme.border_subtle)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(theme.space_3)
+                    .child(icon(Icon::Key, 16.0, theme.accent))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .child(self.rename_input.clone()),
+                    )
+                    .child(self.edit_actions(uid, cx)),
+            )
+            .child(
+                div()
+                    .ml(px(28.0))
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(theme.space_2)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(140.0))
+                            .child(self.edit_username.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(140.0))
+                            .child(self.edit_host.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(180.0))
+                            .child(self.edit_value.clone()),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn edit_actions(&self, uid: u64, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        div()
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(theme.space_1)
+                    .child(
+                        ui::button(
+                            &theme,
+                            ("cred-edit-save", uid),
+                            ButtonKind::Primary,
+                            Some(Icon::Check),
+                            "Save",
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| this.save_edit(window, cx))),
+                    )
+                    .child(
+                        ui::button(
+                            &theme,
+                            ("cred-edit-cancel", uid),
+                            ButtonKind::Ghost,
+                            None,
+                            "Cancel",
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| this.cancel_edit(window, cx))),
+                    ),
+            )
+            .into_any_element()
+    }
+}
+
 impl gpui::Focusable for CredentialsPanel {
     fn focus_handle(&self, cx: &gpui::App) -> FocusHandle {
         self.label_input.read(cx).focus_handle.clone()
@@ -395,6 +676,19 @@ impl Render for CredentialsPanel {
             .flex_1()
             .h_full()
             .min_w(px(0.0))
+            // Ctrl+S (Cmd+S) saves what is being edited, or the new credential.
+            // Escape is handled by the rename input itself.
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                if event.keystroke.key != "s" || !event.keystroke.modifiers.secondary() {
+                    return;
+                }
+                if this.editing.is_some() {
+                    this.save_edit(window, cx);
+                } else {
+                    this.save(window, cx);
+                }
+                cx.stop_propagation();
+            }))
             .child(ui::page_header(
                 &theme,
                 "Credentials",
@@ -442,7 +736,9 @@ impl Render for CredentialsPanel {
                                     .child(
                                         "Encrypted on this computer; the key is kept in your OS keychain. \
                                          Values are never logged and are not part of project exports. \
-                                         Replace swaps a credential's value for what is typed in the value box.",
+                                         The pencil beside a name edits it in place: name, username, \
+                                         host or link, and a new password if you type one. \
+                                         Username and host are not encrypted.",
                                     ),
                             ),
                     )
@@ -463,7 +759,9 @@ impl Render for CredentialsPanel {
                                 .items_center()
                                 .gap(theme.space_2)
                                 .child(div().flex_1().min_w(px(180.0)).child(self.label_input.clone()))
-                                .child(div().flex_1().min_w(px(180.0)).child(self.value_input.clone()))
+                                .child(div().flex_1().min_w(px(140.0)).child(self.username_input.clone()))
+                                .child(div().flex_1().min_w(px(140.0)).child(self.host_input.clone()))
+                                .child(div().flex_1().min_w(px(140.0)).child(self.value_input.clone()))
                                 .child(
                                     ui::button(
                                         &theme,

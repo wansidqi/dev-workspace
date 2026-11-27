@@ -3,6 +3,9 @@ use crate::{CredentialId, ProjectId};
 /// Longest label, in characters.
 pub const MAX_CREDENTIAL_LABEL_CHARS: usize = 100;
 
+/// Longest username or host, in characters. A URL with a path fits.
+pub const MAX_CREDENTIAL_FIELD_CHARS: usize = 300;
+
 /// Largest secret the vault accepts, in bytes. Room for a private key file,
 /// small enough that a paste mistake is refused instead of stored.
 pub const MAX_CREDENTIAL_VALUE_BYTES: usize = 32 * 1024;
@@ -53,6 +56,10 @@ pub struct CredentialMeta {
     pub project_id: ProjectId,
     pub label: String,
     pub kind: CredentialKind,
+    /// Optional account name or login. Stored in plain text (not a secret).
+    pub username: String,
+    /// Optional host, IP address or website link. Stored in plain text.
+    pub host: String,
     pub created_at: i64,
 }
 
@@ -68,6 +75,10 @@ pub enum CredentialError {
     EmptyValue,
     #[error("the secret value is larger than {} KiB", MAX_CREDENTIAL_VALUE_BYTES / 1024)]
     ValueTooLarge,
+    #[error("the {0} is longer than {MAX_CREDENTIAL_FIELD_CHARS} characters")]
+    FieldTooLong(&'static str),
+    #[error("the {0} must not contain control characters")]
+    FieldControlChar(&'static str),
 }
 
 /// Checks a secret before it is stored. The message never includes the value.
@@ -81,6 +92,38 @@ pub fn validate_credential_value(value: &str) -> Result<(), CredentialError> {
     Ok(())
 }
 
+/// Trims and checks a credential label; used for new and renamed credentials
+/// so both follow the same rule.
+pub fn normalize_credential_label(label: &str) -> Result<String, CredentialError> {
+    let label = label.trim().to_string();
+    if label.is_empty() {
+        return Err(CredentialError::EmptyLabel);
+    }
+    if label.chars().any(char::is_control) {
+        return Err(CredentialError::LabelControlChar);
+    }
+    if label.chars().count() > MAX_CREDENTIAL_LABEL_CHARS {
+        return Err(CredentialError::LabelTooLong);
+    }
+    Ok(label)
+}
+
+/// Trims an optional username or host. Empty is allowed; `name` only words
+/// the error.
+pub fn normalize_credential_field(
+    value: &str,
+    name: &'static str,
+) -> Result<String, CredentialError> {
+    let value = value.trim().to_string();
+    if value.chars().any(char::is_control) {
+        return Err(CredentialError::FieldControlChar(name));
+    }
+    if value.chars().count() > MAX_CREDENTIAL_FIELD_CHARS {
+        return Err(CredentialError::FieldTooLong(name));
+    }
+    Ok(value)
+}
+
 impl CredentialMeta {
     pub fn new(
         id: CredentialId,
@@ -89,24 +132,23 @@ impl CredentialMeta {
         kind: CredentialKind,
         now: i64,
     ) -> Result<Self, CredentialError> {
-        let label = label.into();
-        let label = label.trim().to_string();
-        if label.is_empty() {
-            return Err(CredentialError::EmptyLabel);
-        }
-        if label.chars().any(char::is_control) {
-            return Err(CredentialError::LabelControlChar);
-        }
-        if label.chars().count() > MAX_CREDENTIAL_LABEL_CHARS {
-            return Err(CredentialError::LabelTooLong);
-        }
+        let label = normalize_credential_label(&label.into())?;
         Ok(Self {
             id,
             project_id,
             label,
             kind,
+            username: String::new(),
+            host: String::new(),
             created_at: now,
         })
+    }
+
+    /// Sets the optional plain-text username and host (empty clears them).
+    pub fn with_contact(mut self, username: &str, host: &str) -> Result<Self, CredentialError> {
+        self.username = normalize_credential_field(username, "username")?;
+        self.host = normalize_credential_field(host, "host")?;
+        Ok(self)
     }
 }
 
@@ -139,6 +181,26 @@ mod tests {
             CredentialError::LabelTooLong
         );
         assert!(meta(&"x".repeat(MAX_CREDENTIAL_LABEL_CHARS)).is_ok());
+    }
+
+    #[test]
+    fn username_and_host_are_optional_trimmed_and_checked() {
+        let m = meta("a").unwrap();
+        assert!(m.username.is_empty() && m.host.is_empty());
+        let m = m.with_contact("  root ", " https://x.test/login ").unwrap();
+        assert_eq!(m.username, "root");
+        assert_eq!(m.host, "https://x.test/login");
+        assert_eq!(
+            meta("a").unwrap().with_contact("a\nb", "").unwrap_err(),
+            CredentialError::FieldControlChar("username")
+        );
+        assert_eq!(
+            meta("a")
+                .unwrap()
+                .with_contact("", &"h".repeat(MAX_CREDENTIAL_FIELD_CHARS + 1))
+                .unwrap_err(),
+            CredentialError::FieldTooLong("host")
+        );
     }
 
     #[test]
