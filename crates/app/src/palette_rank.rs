@@ -169,7 +169,8 @@ impl Group {
     /// others.
     fn cap(self, query_blank: bool) -> usize {
         match (self, query_blank) {
-            (Group::Commands, _) => 12,
+            // Room for every built-in command on a blank query (a test checks).
+            (Group::Commands, _) => 16,
             (Group::Projects, true) => 5,
             (Group::Projects, false) => 6,
             (Group::Tasks, true) | (Group::Notes, true) => 5,
@@ -191,6 +192,7 @@ pub enum Command {
     OpenTimesheet,
     OpenCredentials,
     OpenSettings,
+    OpenDocs,
     NewProject,
     CycleTheme,
     ToggleReduceTransparency,
@@ -199,7 +201,7 @@ pub enum Command {
 
 impl Command {
     /// All commands, in the order shown for an empty query.
-    pub const ALL: [Command; 12] = [
+    pub const ALL: [Command; 13] = [
         Command::ToggleTerminal,
         Command::NewTerminal,
         Command::OpenChanges,
@@ -208,6 +210,7 @@ impl Command {
         Command::OpenTimesheet,
         Command::OpenCredentials,
         Command::OpenSettings,
+        Command::OpenDocs,
         Command::NewProject,
         Command::CycleTheme,
         Command::ToggleReduceTransparency,
@@ -225,6 +228,7 @@ impl Command {
             Command::OpenTimesheet => "Open timesheet",
             Command::OpenCredentials => "Open credentials",
             Command::OpenSettings => "Open settings",
+            Command::OpenDocs => "Open documentation",
             Command::NewProject => "New project",
             Command::CycleTheme => "Switch theme (system, dark, light)",
             Command::ToggleReduceTransparency => "Toggle reduced transparency",
@@ -243,6 +247,7 @@ impl Command {
             Command::OpenTimesheet => "Ctrl+Shift+M",
             Command::OpenCredentials => "Ctrl+Shift+L",
             Command::OpenSettings => "Ctrl+,",
+            Command::OpenDocs => "F1",
             Command::NewProject => "Ctrl+Shift+N",
             Command::CycleTheme
             | Command::ToggleReduceTransparency

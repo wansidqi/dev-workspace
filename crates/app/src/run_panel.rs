@@ -1176,6 +1176,7 @@ impl Root {
             self.open_note = None;
             self.settings_open = false;
             self.timesheet_open = false;
+            self.docs_open = false;
             self.run_open = true;
         }
         cx.notify();

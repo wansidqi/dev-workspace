@@ -674,6 +674,11 @@ impl Root {
                     self.toggle_settings_view(cx);
                 }
             }
+            Command::OpenDocs => {
+                if !self.docs_open {
+                    self.toggle_docs_view(cx);
+                }
+            }
             Command::NewProject => {
                 let focus = self.new_project_input.read(cx).focus_handle.clone();
                 window.focus(&focus, cx);

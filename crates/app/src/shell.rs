@@ -289,6 +289,7 @@ impl Root {
                         this.run_open = false;
                         this.timesheet_open = false;
                         this.credentials_open = false;
+                        this.docs_open = false;
                         this.state.update(cx, |state, _| {
                             state.select_project(id);
                         });
@@ -329,6 +330,7 @@ impl Root {
         let credentials = has_project.then(|| self.credentials_sidebar_row(cx).into_any_element());
         let timesheet = self.timesheet_sidebar_row(cx).into_any_element();
         let settings = self.settings_sidebar_row(cx).into_any_element();
+        let docs = self.docs_sidebar_row(cx).into_any_element();
 
         div()
             .flex()
@@ -391,7 +393,8 @@ impl Root {
                     .children(run)
                     .child(timesheet)
                     .children(credentials)
-                    .child(settings),
+                    .child(settings)
+                    .child(docs),
             )
     }
 
@@ -450,6 +453,7 @@ impl Root {
             self.run_open = false;
             self.timesheet_open = false;
             self.credentials_open = false;
+            self.docs_open = false;
             self.settings_open = true;
         }
         cx.notify();

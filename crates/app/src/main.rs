@@ -15,8 +15,10 @@ mod commit_browser;
 mod commit_detail;
 mod credentials_panel;
 mod date;
+mod docs_panel;
 mod external;
 mod github_panel;
+mod guide;
 mod highlight;
 mod ide;
 mod issue_sync;
@@ -58,6 +60,7 @@ use commit_browser::CommitBrowser;
 use credentials_panel::CredentialsPanel;
 use devspace_core::{NoteId, ProjectId, Task, TaskId, TaskStatus};
 use devspace_storage::WorkspacePaths;
+use docs_panel::DocsPanel;
 use gpui::{
     actions, div, prelude::*, px, size, App, Bounds, Context, Entity, KeyBinding,
     PathPromptOptions, SharedString, TitlebarOptions, Window, WindowAppearance,
@@ -88,6 +91,7 @@ actions!(
         ToggleTimesheetView,
         ToggleCredentialsView,
         ToggleSettingsView,
+        ToggleDocsView,
         FocusNewProject
     ]
 );
@@ -177,6 +181,10 @@ struct Root {
     /// the main content.
     credentials_panel: Entity<CredentialsPanel>,
     credentials_open: bool,
+    /// Documentation view (the in-app guide, see `docs_panel.rs`), shown in
+    /// place of the main content.
+    docs_panel: Entity<DocsPanel>,
+    docs_open: bool,
     /// Settings view (appearance, terminal, IDE, backup), shown in place of the
     /// main content.
     settings_open: bool,
@@ -273,6 +281,13 @@ pub(crate) const NAV_SETTINGS: NavItem = NavItem {
     icon: ui::Icon::Settings,
     label: "Settings",
     shortcut: "Ctrl+,",
+};
+pub(crate) const NAV_DOCS: NavItem = NavItem {
+    id: "open-docs",
+    hover_key: 7,
+    icon: ui::Icon::BookOpen,
+    label: "Documentation",
+    shortcut: "F1",
 };
 pub(crate) const PROJECT_HOVER_KEY_BASE: u64 = 1_000_000;
 
@@ -666,6 +681,7 @@ impl Root {
         self.run_open = false;
         self.timesheet_open = false;
         self.credentials_open = false;
+        self.docs_open = false;
         self.git_tab = tab;
         cx.notify();
     }
@@ -959,6 +975,8 @@ impl Render for Root {
             fill("view-credentials", self.credentials_panel.clone())
         } else if self.settings_open {
             fill("view-settings", self.workspace_tools.clone())
+        } else if self.docs_open {
+            fill("view-docs", self.docs_panel.clone())
         } else {
             let project = self
                 .state
@@ -1031,6 +1049,7 @@ impl Render for Root {
             .on_action(
                 cx.listener(|this, _: &ToggleSettingsView, _, cx| this.toggle_settings_view(cx)),
             )
+            .on_action(cx.listener(|this, _: &ToggleDocsView, _, cx| this.toggle_docs_view(cx)))
             .on_action(cx.listener(|this, _: &FocusNewProject, window, cx| {
                 this.run_command(palette_rank::Command::NewProject, window, cx)
             }))
@@ -1094,6 +1113,7 @@ fn main() -> Result<()> {
             KeyBinding::new("ctrl-shift-l", ToggleCredentialsView, None),
             KeyBinding::new("ctrl-shift-n", FocusNewProject, None),
             KeyBinding::new("ctrl-,", ToggleSettingsView, None),
+            KeyBinding::new("f1", ToggleDocsView, None),
         ]);
 
         let (width, height) = qa::window_size().unwrap_or((1000.0, 640.0));
@@ -1235,6 +1255,7 @@ fn main() -> Result<()> {
                         }));
                         panel
                     });
+                    let docs_panel = cx.new(|cx| DocsPanel::new(cx, theme));
                     // Global shortcuts (toggle terminal, ...) are actions
                     // dispatched along the focused element's ancestors, so
                     // the root needs focus whenever nothing else has it.
@@ -1316,6 +1337,8 @@ fn main() -> Result<()> {
                         timesheet_open: false,
                         credentials_panel,
                         credentials_open: false,
+                        docs_panel,
+                        docs_open: false,
                         settings_open: false,
                         toast_seen: None,
                         toast_epoch: 0,

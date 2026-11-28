@@ -547,6 +547,17 @@ in SQLite (`app.db`) instead.
 - The app launches with the Timesheet code in it; the screen itself still
   needs a hand test (month picker, "Sync from git", edits, "Copy all").
 
+## Documentation (in-app guide)
+
+Added 2026-11-28. A rule of the project from now on: every user-facing feature is described in the guide in the same change (see CLAUDE.md, "Documentation (in-app guide)").
+
+- [x] Documentation page: sidebar row (last of Workspace, book icon), `F1`, palette "Open documentation", QA hook `DEVSPACE_VIEW=docs[:topic-id]`. `docs_panel.rs` shows a list of topics beside the chosen one, drawn with the note preview's renderer (text selection and copy, code copy buttons, folding alerts, `#heading` links, `topic:<id>` links between topics, web links). Opening any other view closes it, like the other Workspace pages.
+- [x] Content: twelve topics as Markdown in `docs/guide/` (getting started, projects, tasks, notes, attachments, credentials, git, terminal and run commands, timesheet, search and shortcuts, settings and data) plus the Markdown reference, which is `samples/markdown-demo.md` itself. Embedded at build time by `guide.rs`.
+- [x] Tests in `guide.rs`: unique ids and titles, every page opens with its title as a level-1 heading, no dead `topic:` or `#heading` link, no topic that nothing links to, every palette shortcut and every sidebar page appears in the guide.
+- Written from this file and CLAUDE.md, not from using the app. Several features it describes were never clicked by hand (see the notes above), so the guide may describe something slightly differently from how it behaves.
+- Limits: the Markdown reference is read-only in the guide (its checkboxes and `[[references]]` do nothing there); there is no search box or Ctrl+F in the guide yet; the last topic shown is not remembered.
+- Not yet recorded in the sections above: the markdown work of 2026-11-27 (references, `#N` task numbers, slash commands, more alert kinds, collapsible alerts). Its record is in `docs/todo.md`, and the guide and the markdown demo describe it.
+
 ## Decisions / notes for future sessions
 
 - GPUI pinned at rev `56934ec0560bce8929025497411de7f5322fb6ca`. Current API uses

@@ -49,6 +49,7 @@ Non-goals:
 7. **Developer tools**: integrated terminal with tabs starting in the project folder; launch external IDE on the project folder; per-project run commands with log view.
 8. **Search and navigation**: global search; command palette; keyboard shortcuts; restore last project, task and layout on startup.
 9. **Data and safety**: backup and export/import of a project; local-first.
+10. **Documentation**: an in-app guide (sidebar Documentation, F1, palette "Open documentation") that explains every feature to the person using the app. See "Documentation (in-app guide)"; it is part of every feature, not a later task.
 
 ## Architecture
 
@@ -74,7 +75,8 @@ Suggested layout:
 │   ├── runner/      # std-only process runner for per-project run commands
 │   └── app/         # GPUI app, views, actions, main.rs
 ├── assets/          # icons, fonts, themes
-└── docs/
+├── samples/         # sample notes (markdown-demo.md also feeds the guide)
+└── docs/            # developer notes; docs/guide/ is the user guide shown in the app
 ```
 
 A Cargo workspace is preferred so core, storage and git can be tested without compiling the UI.
@@ -228,17 +230,26 @@ Translucency and shadows cost GPU time and memory, which conflicts with this pro
 ### Layout concept
 
 - Custom title bar blended into the window: brand at the left over the sidebar, a search field in the middle that opens the command palette (it opts out of dragging with `occlude`), and window controls at the right drawn as three small status-light dots (minimise amber, maximise green, close red; the glyph shows on hover). GPUI draws no caption buttons for a transparent title bar, so these are ours; each is marked with `window_control_area` and is a sibling of the drag region, never a child of it.
-- Left glass sidebar (248px): the project list (hover or select shows edit and archive), then a Workspace group of icon rows: Git, Run commands, Timesheet, Credentials, Settings (shortcut shown on hover). Git is one row with two tabs, Changes and History (Ctrl+Shift+G opens Changes, Ctrl+Shift+H opens History).
+- Left glass sidebar (248px): the project list (hover or select shows edit and archive), then a Workspace group of icon rows: Git, Run commands, Timesheet, Credentials, Settings, Documentation (shortcut shown on hover). Git is one row with two tabs, Changes and History (Ctrl+Shift+G opens Changes, Ctrl+Shift+H opens History).
 - The view area is a floating canvas (radius 12, hairline border) beside the terminal canvas; clip children to it, so a view must not paint its own opaque background at the corners.
 - Project page: header (name, meta, Open in IDE, New task) over a status strip, then tasks as a tree (subtasks are indented and hang off their parent's status icon with rounded L-shaped connector lines; the trunk continues past rows with later siblings; a hairline separates top-level groups only, not rows inside a branch; the status icon cycles the status, a chevron after the title folds a task's subtasks (revealed rows fade in, folded ones fade out) with a "+N" count and a Collapse all / Expand all button sits in the Tasks header, the row opens the task, actions float over the right edge on hover; a tag filter flattens the list and drops the lines) and a rail with notes, files and repositories. With GitHub on, issues are tasks: the Tasks header shows a Syncing spinner or a refresh button, and linked tasks show their `#N`.
 - Task page: breadcrumb (Back goes to the parent task), title, a GitHub `#N` chip or a Publish to GitHub button, status, properties (priority, due, branch), tags, then underline tabs for Description (the rendered body note, Edit opens the note page), Subtasks, Attachments, Commits and, for issues, Comments.
 - Terminal: a collapsible right-hand panel with tabs, one tab set per project (Ctrl+` toggles, Ctrl+Shift+` new tab). Drag its left edge to resize, double-click a tab to rename it, "Split" stacks a second shell in the tab.
 - Commit history browser: the History tab of Git, a full-content view with a mapping side panel. Credentials: a full-content view from the sidebar (add, reveal with auto-hide, copy with clipboard auto-clear, replace, delete).
-- Command palette (Ctrl+K or Ctrl+Shift+P) as a centered floating glass popover with a soft shadow; searches commands, projects, tasks, note titles, note text and commits. Shortcuts: Ctrl+Shift+H history, R run commands, M timesheet, L credentials, N new project, Ctrl+, settings.
+- Command palette (Ctrl+K or Ctrl+Shift+P) as a centered floating glass popover with a soft shadow; searches commands, projects, tasks, note titles, note text and commits. Shortcuts: Ctrl+Shift+H history, R run commands, M timesheet, L credentials, N new project, Ctrl+, settings, F1 documentation.
 - Run commands: a sidebar row opens a full-content view with saved commands and a live log. Open in IDE is a project page action; the Settings view (Ctrl+,) holds appearance, terminal scrollback, the IDE command, the data location (a "Show in folder" button selects `app.db` in the file manager) and backup, export and import. Results of those actions show as a toast at the bottom right.
 - Timesheet: a sidebar view with a per-month table per project, built from the author's git commits (stored in SQLite, migration 4); copies as tab-separated text.
 - Settings live in `settings.txt` (key=value) in the data directory: last project and task, terminal visibility and width, terminal scrollback, IDE command, theme (dark, light, system), reduced transparency, reduced motion. Theme, transparency, motion and scrollback are changed in the Settings view or the command palette.
 - Empty states have a short message and one primary action.
+
+## Documentation (in-app guide)
+
+The app teaches itself: a Documentation page (last row of the sidebar Workspace group, `F1`, palette "Open documentation") with a list of topics and the chosen topic beside it. It is part of the product, and **every user-facing feature must be in it.**
+
+- **Where it lives.** One Markdown file per topic in `docs/guide/`, embedded at build time by `crates/app/src/guide.rs` (`TOPICS`, nothing is read from disk at run time). The "Markdown reference" topic is `samples/markdown-demo.md` itself, so it cannot drift from the preview. The view is `crates/app/src/docs_panel.rs`; it draws a topic with the note preview's renderer, so anything the preview supports works in the guide, and text can be selected and copied.
+- **Topics now.** Getting started, Projects, Tasks and subtasks, Notes, Markdown reference, Attachments, Credentials vault, Git, Terminal and run commands, Timesheet, Search/palette/shortcuts, Settings and data. A new area gets a new topic: a file in `docs/guide/`, a line in `TOPICS`, and `[text](topic:id)` links from the topics that mention it.
+- **How to write it.** For the person using the app, not its developer: what a feature does, how to use it, its shortcut, and what it will not do. Describe only what is built and say plainly what is not available yet. No crate names or implementation detail.
+- **What the tests check.** See Testing.
 
 ## Performance rules
 
@@ -277,7 +288,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 ```
 
-Debug builds read `DEVSPACE_DATA_DIR`, `DEVSPACE_SIZE` (`1280x760`) and `DEVSPACE_VIEW` (`settings`, `changes[:select|branches|repo-branches|stash|tasks|confirm|lines]` with `DEVSPACE_QA_REPOS=<path>;<path>` to link throwaway repos, `history`, `run`, `timesheet`, `credentials`, `palette`, `terminal`, `task:<id>[:notes|attachments|commits]`, `note:<id>[:edit]`) so a screenshot run can start on a given screen against a copy of the data without synthetic input (see `qa.rs`). They compile to nothing in release. GPUI is very slow unoptimised, so judge typing and scrolling responsiveness on `cargo run --release -p app`, not on the debug build.
+Debug builds read `DEVSPACE_DATA_DIR`, `DEVSPACE_SIZE` (`1280x760`) and `DEVSPACE_VIEW` (`settings`, `changes[:select|branches|repo-branches|stash|tasks|confirm|lines]` with `DEVSPACE_QA_REPOS=<path>;<path>` to link throwaway repos, `history`, `run`, `timesheet`, `credentials`, `docs[:topic-id]`, `palette`, `terminal`, `task:<id>[:notes|attachments|commits]`, `note:<id>[:edit]`) so a screenshot run can start on a given screen against a copy of the data without synthetic input (see `qa.rs`). They compile to nothing in release. GPUI is very slow unoptimised, so judge typing and scrolling responsiveness on `cargo run --release -p app`, not on the debug build.
 
 ## Testing
 
@@ -285,6 +296,7 @@ Debug builds read `DEVSPACE_DATA_DIR`, `DEVSPACE_SIZE` (`1280x760`) and `DEVSPAC
 - git crate tests create temporary repos with git2 and assert commit linking, branch views and patch-id matching, including the rebase and missing-commit case. Git client operations (status, hunk/line staging, commit, branch switch, stash, and CLI-backed fetch/pull/push/merge/rebase against a local bare remote) get the same temp-repo tests; tests skip CLI cases when `git` is not on PATH.
 - Encryption tests: round trip, wrong key fails, nonce is never reused.
 - UI is tested manually; keep logic out of views so it can be tested elsewhere.
+- The guide (`guide.rs`) has tests that fail on a dead `topic:` or `#heading` link, a topic nothing links to, a palette shortcut missing from the shortcut table, and a sidebar page the guide never names. A new palette command or sidebar page must therefore be written into the guide before the tests pass.
 
 ## Cross-platform notes
 
@@ -303,4 +315,5 @@ Debug builds read `DEVSPACE_DATA_DIR`, `DEVSPACE_SIZE` (`1280x760`) and `DEVSPAC
 - Never commit secrets, test credentials or personal paths.
 - For any UI work, use the theme tokens; never hardcode colors, radii or shadows in a view.
 - Check that every new screen is readable on light and dark backgrounds and works with transparency reduced.
+- Documentation is part of done. When you add or change anything a user can see or do (a screen, control, shortcut, palette command, setting, markdown syntax, a behaviour they would notice), update the matching topic in `docs/guide/` in the same change, add a topic if the area has none, and keep `samples/markdown-demo.md` in step for anything markdown. A feature is not finished until the guide describes it. Say in your report which topic you updated.
 -

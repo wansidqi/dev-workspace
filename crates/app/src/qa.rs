@@ -7,7 +7,8 @@
 //! - `DEVSPACE_DATA_DIR`: use this folder instead of the OS data directory
 //! - `DEVSPACE_SIZE`: window size as `WIDTHxHEIGHT`
 //! - `DEVSPACE_VIEW`: `settings`, `history`, `run`, `timesheet`, `credentials`,
-//!   `palette`, `terminal`, `task:<id>[:notes|attachments|commits]` or `note:<id>`
+//!   `docs[:<topic id>]`, `palette`, `terminal`,
+//!   `task:<id>[:notes|attachments|commits]` or `note:<id>`
 
 use std::path::PathBuf;
 
@@ -70,10 +71,17 @@ pub fn open_view(root: &mut Root, window: &mut Window, cx: &mut Context<Root>) {
         "run" => root.toggle_run_view(cx),
         "timesheet" => root.toggle_timesheet_view(cx),
         "credentials" => root.toggle_credentials_view(cx),
+        "docs" => root.toggle_docs_view(cx),
         "palette" => root.toggle_palette(window, cx),
         "terminal" => root.toggle_terminal(window, cx),
         other => {
-            if let Some(rest) = other.strip_prefix("task:") {
+            if let Some(topic) = other.strip_prefix("docs:") {
+                if !root.docs_open {
+                    root.toggle_docs_view(cx);
+                }
+                root.docs_panel
+                    .update(cx, |panel, cx| panel.show(topic, cx));
+            } else if let Some(rest) = other.strip_prefix("task:") {
                 let (id, tab) = rest.split_once(':').unwrap_or((rest, ""));
                 if let Ok(id) = id.parse() {
                     root.open_task_detail(devspace_core::TaskId(id), cx);

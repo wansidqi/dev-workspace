@@ -21,7 +21,7 @@ Debug builds also read these environment variables (they compile to nothing in r
 |---|---|---|
 | `DEVSPACE_DATA_DIR` | `D:\tmp\devspace-qa` | Use this folder instead of `%APPDATA%\devspace`. |
 | `DEVSPACE_SIZE` | `1280x760` | Window size. |
-| `DEVSPACE_VIEW` | `timesheet` | Open on a view: `settings`, `history`, `run`, `timesheet`, `credentials`, `palette`, `terminal`, `task:<id>[:notes\|attachments\|commits]`, `note:<id>[:edit]`. |
+| `DEVSPACE_VIEW` | `timesheet` | Open on a view: `settings`, `history`, `run`, `timesheet`, `credentials`, `docs[:topic-id]`, `palette`, `terminal`, `task:<id>[:notes\|attachments\|commits]`, `note:<id>[:edit]`. |
 
 PowerShell example:
 

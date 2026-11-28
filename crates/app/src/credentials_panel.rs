@@ -962,6 +962,7 @@ impl crate::Root {
             self.settings_open = false;
             self.run_open = false;
             self.timesheet_open = false;
+            self.docs_open = false;
             self.credentials_open = true;
         }
         cx.notify();
